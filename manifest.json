@@ -1,0 +1,45 @@
+{
+    "name": "agentic_chatter",
+    "display_name": "Agentic Chatter",
+    "version": "0.1.0",
+    "description": "Agent 式回复流程聊天器：纯文本即回复、分层工具暴露、跨流全局心智、可 TOML 编排的回复管线",
+    "author": "MoFox Team",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "chatter",
+            "component_name": "agentic",
+            "dependencies": []
+        },
+        {
+            "component_type": "service",
+            "component_name": "pipeline",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "explore_tools",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "say",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "end_turn",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "stop_conversation",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "min_core_version": "1.2.0-alpha"
+}
