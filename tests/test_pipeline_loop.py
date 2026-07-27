@@ -8,10 +8,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
+
+from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall, ToolResult
+from src.kernel.llm.context_structure import validate_payload_sequence
 
 from ..actions.control import MAX_STOP_MINUTES
+from ..chatter import AgenticChatter
 from ..pipeline.loop import (
+    append_interrupted_tool_results,
     build_speak_segments,
     classify_calls,
     deliver_segments,
@@ -270,3 +277,119 @@ def test_outcome_reflects_stop_request() -> None:
 def test_outcome_carries_wait_seconds() -> None:
     state = TurnState(stream_id="s", end_turn_requested=True, end_turn_seconds=45)
     assert state.to_outcome().wait_seconds == 45.0
+
+
+class _PayloadResponse:
+    """收集 payload 的假响应。"""
+
+    def __init__(self, payloads: list[LLMPayload], calls: list[ToolCall]) -> None:
+        self.payloads = payloads
+        self.call_list = calls
+        self.message = "这条过时回复不应发送"
+
+    def add_payload(self, payload: LLMPayload) -> None:
+        self.payloads.append(payload)
+
+
+class _RequestReturningResponse:
+    """返回预设响应的假请求。"""
+
+    def __init__(self, response: _PayloadResponse) -> None:
+        self.response = response
+        self.payloads: list[LLMPayload] = []
+
+    def add_payload(self, payload: LLMPayload) -> None:
+        self.payloads.append(payload)
+
+    async def send(self) -> _PayloadResponse:
+        return self.response
+
+
+class _InterruptConfig:
+    """仅包含 act 阶段所需字段的假配置。"""
+
+    class Plugin:
+        model_task = "actor"
+
+    class Pipeline:
+        max_iterations = 1
+
+    class Tools:
+        enable_explore_tools = False
+
+    plugin = Plugin()
+    pipeline = Pipeline()
+    tools = Tools()
+
+
+# ----------------------------------------------------------------------
+# 新消息中断时的上下文闭合
+# ----------------------------------------------------------------------
+
+
+def test_interrupted_calls_are_closed_for_strict_context_validation() -> None:
+    calls = [
+        ToolCall(id="call_tool", name="tool-search", args={"q": "天气"}),
+        ToolCall(id="call_end", name="action-end_turn", args={"seconds": 30}),
+        ToolCall(id="call_stop", name="action-stop_conversation", args={"minutes": 5}),
+    ]
+    payloads = [
+        LLMPayload(ROLE.USER, Text("查一下天气")),
+        LLMPayload(ROLE.ASSISTANT, calls),
+    ]
+    response = _PayloadResponse(payloads, calls)
+
+    append_interrupted_tool_results(response, calls)
+
+    validate_payload_sequence(response.payloads, allow_incomplete_tail=False)
+    results = [
+        part
+        for payload in response.payloads
+        if payload.role == ROLE.TOOL_RESULT
+        for part in payload.content
+        if isinstance(part, ToolResult)
+    ]
+    assert [result.call_id for result in results] == [call.id for call in calls]
+    assert [result.name for result in results] == [call.name for call in calls]
+    assert all("未执行" in result.value for result in results)
+
+
+async def test_stage_act_closes_calls_before_interrupting() -> None:
+    calls = [
+        ToolCall(id="call_tool", name="tool-search", args={"q": "天气"}),
+        ToolCall(id="call_end", name="action-end_turn", args={"seconds": 30}),
+        ToolCall(id="call_stop", name="action-stop_conversation", args={"minutes": 5}),
+    ]
+    response = _PayloadResponse(
+        [
+            LLMPayload(ROLE.USER, Text("旧消息")),
+            LLMPayload(ROLE.ASSISTANT, calls),
+        ],
+        calls,
+    )
+    request = _RequestReturningResponse(response)
+    chatter = AgenticChatter(stream_id="stream", plugin=object())
+    chatter.get_llm_usables = AsyncMock(return_value=[])
+    chatter.modify_llm_usables = AsyncMock(return_value=[])
+    chatter._build_layout = lambda _config, _usables: SimpleNamespace(
+        exposed=[],
+        collapsed_categories={},
+        collapsed_classes={},
+    )
+    chatter._build_system_prompt = AsyncMock(return_value="system")
+    chatter._build_user_prompt = AsyncMock(return_value="user")
+    chatter.create_request = lambda **_kwargs: request
+    chatter._has_new_unreads = AsyncMock(return_value=True)
+    chatter._deliver_message = AsyncMock(return_value=True)
+    chatter._execute_calls = AsyncMock()
+    state = TurnState(stream_id="stream")
+
+    await chatter._stage_act(_InterruptConfig(), object(), state, [])
+
+    validate_payload_sequence(response.payloads, allow_incomplete_tail=False)
+    chatter._deliver_message.assert_not_awaited()
+    chatter._execute_calls.assert_not_awaited()
+    assert state.failed
+    assert state.error == "生成期间收到新消息，重新规划"
+    assert not state.end_turn_requested
+    assert not state.stop_requested

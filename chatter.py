@@ -40,6 +40,7 @@ from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
 from .pipeline.loop import (
+    append_interrupted_tool_results,
     append_no_op_nudge,
     append_tool_result,
     build_speak_segments,
@@ -412,14 +413,15 @@ class AgenticChatter(BaseChatter):
                 clear_stream_catalog(self.stream_id)
                 return
 
+            calls = list(getattr(response, "call_list", None) or [])
             if await self._has_new_unreads(config, unread_msgs):
+                append_interrupted_tool_results(response, calls)
                 state.failed = True
                 state.error = "生成期间收到新消息，重新规划"
                 clear_stream_catalog(self.stream_id)
                 return
 
             spoke_now = await self._deliver_message(config, response, state)
-            calls = list(getattr(response, "call_list", None) or [])
             normal_calls, end_seconds, stop_minutes = classify_calls(calls)
 
             if normal_calls:

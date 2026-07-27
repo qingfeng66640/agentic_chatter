@@ -181,6 +181,18 @@ def append_tool_result(response: Any, call: Any, value: str) -> None:
     )
 
 
+def append_interrupted_tool_results(response: Any, calls: list[Any]) -> None:
+    """为因新消息中断的工具调用补齐未执行结果。
+
+    Args:
+        response: 当前 LLM 响应对象。
+        calls: 当前响应中的全部 tool call。
+    """
+    value = "生成期间收到新消息，本次调用未执行；将基于新消息重新规划。"
+    for call in calls:
+        append_tool_result(response, call, value)
+
+
 def append_no_op_nudge(response: Any) -> None:
     """在模型既不说话也不调工具时追加一条推动消息。
 
