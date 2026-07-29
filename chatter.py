@@ -36,20 +36,36 @@ from src.core.prompt import get_prompt_manager
 from src.kernel.llm import LLMPayload, ROLE, Text, ToolRegistry
 
 from .config import AgenticChatterConfig
+from .decision import (
+    DecisionAction,
+    DecisionSource,
+    ReplyDecision,
+    compute_semantic_relevance,
+    decide_with_sub_actor,
+    extract_features,
+    get_participation_store,
+    hard_rule_decision,
+    interval_summary,
+    score_features,
+)
 from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
 from .pipeline.loop import (
+    append_control_tool_results,
     append_interrupted_tool_results,
     append_no_op_nudge,
+    append_post_speech_nudge,
     append_tool_result,
     build_speak_segments,
     classify_calls,
     deliver_segments,
+    is_repeated_reply,
     should_continue_loop,
 )
 from .pipeline.stages import (
     STAGE_ACT,
+    STAGE_DECIDE,
     STAGE_PERCEIVE,
     STAGE_PLAN,
     STAGE_REFLECT,
@@ -156,12 +172,6 @@ class AgenticChatter(BaseChatter):
                 yield Wait()
                 continue
 
-            if self._should_skip(config, chat_stream, unread_msgs):
-                logger.info(f"[{self.stream_id[:8]}] 本轮走神，略过 {len(unread_msgs)} 条消息")
-                await self.flush_unreads(unread_msgs)
-                yield Wait()
-                continue
-
             state = TurnState(
                 stream_id=self.stream_id,
                 unread_texts=unread_text,
@@ -182,6 +192,17 @@ class AgenticChatter(BaseChatter):
                 yield Wait(time=5.0)
                 continue
 
+            if config is not None and config.decision.enabled:
+                get_participation_store().record(
+                    self.stream_id,
+                    responded=state.spoke,
+                    topic=state.perceived_topic,
+                    ttl_seconds=max(
+                        60.0, float(config.decision.state_ttl_minutes) * 60.0
+                    ),
+                    max_streams=max(1, int(config.decision.max_state_streams)),
+                )
+
             await self.flush_unreads(unread_msgs)
 
             if outcome_result.should_stop:
@@ -189,38 +210,6 @@ class AgenticChatter(BaseChatter):
                 continue
 
             yield Wait(time=outcome_result.wait_seconds)
-
-    def _should_skip(
-        self,
-        config: AgenticChatterConfig | None,
-        chat_stream: "ChatStream",
-        unread_msgs: list["Message"],
-    ) -> bool:
-        """判断本轮是否因走神而略过。
-
-        Args:
-            config: 插件配置。
-            chat_stream: 当前聊天流。
-            unread_msgs: 本轮未读消息。
-
-        Returns:
-            bool: 为 True 表示略过本轮。
-        """
-        if config is None:
-            return False
-
-        is_private = str(chat_stream.chat_type or "").lower() == ChatType.PRIVATE.value
-        nickname = str(getattr(chat_stream, "bot_nickname", "") or "")
-        mentioned = bool(nickname) and any(
-            nickname in (msg.processed_plain_text or str(msg.content or ""))
-            for msg in unread_msgs
-        )
-
-        return should_get_distracted(
-            enabled=bool(config.humanize.enable_proactive),
-            probability=float(config.humanize.distraction_probability),
-            is_direct=is_private or mentioned,
-        )
 
     def _build_deduper(self, config: AgenticChatterConfig | None) -> CallDeduper:
         """按配置构建本轮的去重器。
@@ -268,6 +257,7 @@ class AgenticChatter(BaseChatter):
             order = resolve_stage_order(
                 list(config.pipeline.stage_order),
                 enable_perceive=bool(config.pipeline.enable_perceive),
+                enable_decide=bool(config.decision.enabled),
                 enable_plan=bool(config.pipeline.enable_plan),
                 enable_reflect=bool(config.pipeline.enable_reflect),
             )
@@ -275,10 +265,14 @@ class AgenticChatter(BaseChatter):
         for stage_name in order:
             if stage_name == STAGE_PERCEIVE:
                 await self._stage_perceive(config, state)
+            elif stage_name == STAGE_DECIDE:
+                await self._stage_decide(config, chat_stream, state, unread_msgs)
             elif stage_name == STAGE_PLAN:
-                await self._stage_plan(config, state)
+                if state.decision is None or state.decision.should_respond:
+                    await self._stage_plan(config, state)
             elif stage_name == STAGE_ACT:
-                await self._stage_act(config, chat_stream, state, unread_msgs)
+                if state.decision is None or state.decision.should_respond:
+                    await self._stage_act(config, chat_stream, state, unread_msgs)
             elif stage_name == STAGE_REFLECT:
                 await self._stage_reflect(config, chat_stream, state)
             else:
@@ -325,6 +319,165 @@ class AgenticChatter(BaseChatter):
         )
         if topic:
             state.perceived_topic = topic
+
+    async def _stage_decide(
+        self,
+        config: AgenticChatterConfig | None,
+        chat_stream: "ChatStream",
+        state: TurnState,
+        unread_msgs: list["Message"],
+    ) -> None:
+        """分层判断当前轮次是否应该自然介入。"""
+        if config is None or not config.decision.enabled:
+            state.decision = ReplyDecision(
+                DecisionAction.RESPOND,
+                DecisionSource.DISABLED,
+                reasons=["decision_disabled"],
+            )
+            return
+
+        is_private = str(chat_stream.chat_type or "").lower() == ChatType.PRIVATE.value
+        history_messages = list(chat_stream.context.history_messages)
+        bot_id = str(getattr(chat_stream, "bot_id", "") or "")
+        bot_nickname = str(getattr(chat_stream, "bot_nickname", "") or "")
+        bot_messages = [
+            message
+            for message in history_messages
+            if str(getattr(message, "sender_id", "") or "") == bot_id
+            or str(getattr(message, "sender_role", "") or "").lower() == "bot"
+        ]
+        bot_message_ids = {
+            str(getattr(message, "message_id", "") or "")
+            for message in bot_messages
+            if getattr(message, "message_id", "")
+        }
+        hard_decision = hard_rule_decision(
+            is_private=is_private,
+            bot_id=bot_id,
+            bot_nickname=bot_nickname,
+            unread_messages=unread_msgs,
+            bot_message_ids=bot_message_ids,
+        )
+        if hard_decision is not None:
+            state.decision = hard_decision
+            return
+
+        decision_config = config.decision
+        store = get_participation_store()
+        participation = store.get(
+            self.stream_id,
+            ttl_seconds=max(60.0, float(decision_config.state_ttl_minutes) * 60.0),
+            max_streams=max(1, int(decision_config.max_state_streams)),
+        )
+
+        if should_get_distracted(
+            enabled=bool(config.humanize.enable_proactive),
+            probability=float(config.humanize.distraction_probability),
+            is_direct=False,
+        ):
+            state.decision = ReplyDecision(
+                DecisionAction.SILENT,
+                DecisionSource.HARD_RULE,
+                reasons=["distracted"],
+            )
+            return
+
+        history_limit = max(1, int(decision_config.history_message_limit))
+        recent_history = history_messages[-history_limit:]
+        history_text = "\n".join(
+            self.format_message_line(message) for message in recent_history
+        )
+        unread_text = "\n".join(
+            self.format_message_line(message) for message in unread_msgs
+        )
+
+        features = extract_features(
+            unread_messages=unread_msgs,
+            bot_id=bot_id,
+            bot_nickname=bot_nickname,
+            bot_message_ids=bot_message_ids,
+            participation=participation,
+            semantic_continuity=None,
+            bot_history_continuity=None,
+            participation_window_seconds=float(
+                decision_config.participation_window_seconds
+            ),
+            rhythm_cooldown_seconds=float(decision_config.rhythm_cooldown_seconds),
+        )
+
+        if decision_config.local_gate_enabled:
+            topic_candidates = [
+                value
+                for value in (
+                    state.perceived_topic,
+                    participation.last_reply_topic,
+                )
+                if value
+            ]
+            bot_candidates = [
+                str(
+                    getattr(message, "processed_plain_text", None)
+                    or getattr(message, "content", "")
+                    or ""
+                )
+                for message in reversed(bot_messages)
+            ]
+            semantic, bot_semantic = await compute_semantic_relevance(
+                current_text=state.unread_texts,
+                topic_candidates=topic_candidates,
+                bot_candidates=bot_candidates,
+                model_task=str(decision_config.embedding_task or "embedding"),
+                candidate_limit=max(1, int(decision_config.semantic_candidate_limit)),
+                max_chars_per_candidate=max(
+                    64, int(decision_config.semantic_candidate_max_chars)
+                ),
+            )
+            features.semantic_continuity = semantic or 0.0
+            features.bot_history_continuity = bot_semantic or 0.0
+            if semantic is not None or bot_semantic is not None:
+                features.uncertainty = max(0.0, features.uncertainty - 0.18)
+                features.reasons = [
+                    reason for reason in features.reasons if reason != "semantic_unknown"
+                ]
+            local_decision = score_features(features, decision_config)
+            if local_decision is not None:
+                state.decision = local_decision
+                return
+
+        score, lower, upper = interval_summary(features, decision_config)
+        template = get_prompt_manager().get_template(
+            "agentic_chatter_reply_decision"
+        )
+        system_prompt = (
+            await template.build()
+            if template is not None
+            else "只输出 JSON，判断本轮应 respond 还是 silent。"
+        )
+        state.decision = await decide_with_sub_actor(
+            self,
+            config=decision_config,
+            system_prompt=system_prompt,
+            unread_text=unread_text,
+            history_text=history_text,
+            signal_summary={
+                "question_or_request": features.question_or_request,
+                "directed_elsewhere": features.directed_elsewhere,
+                "interruption_cost": features.interruption_cost,
+                "topic_closure": features.topic_closure,
+                "semantic_continuity": features.semantic_continuity,
+                "bot_history_continuity": features.bot_history_continuity,
+                "consecutive_participation": participation.consecutive_participation,
+                "consecutive_silence": participation.consecutive_silence,
+            },
+            local_score=score,
+            lower_bound=lower,
+            upper_bound=upper,
+            reasons=features.reasons,
+        )
+        logger.info(
+            f"[{self.stream_id[:8]}] 回复决策: {state.decision.action.value} "
+            f"source={state.decision.source.value} score={state.decision.score:.3f}"
+        )
 
     async def _stage_plan(
         self,
@@ -406,6 +559,7 @@ class AgenticChatter(BaseChatter):
 
             try:
                 response = await response.send()
+                await response
             except Exception as exc:
                 state.failed = True
                 state.error = str(exc)
@@ -421,11 +575,15 @@ class AgenticChatter(BaseChatter):
                 clear_stream_catalog(self.stream_id)
                 return
 
-            spoke_now = await self._deliver_message(config, response, state)
+            had_spoken_before_iteration = state.spoke
             normal_calls, end_seconds, stop_minutes = classify_calls(calls)
+            spoke_now, duplicate_text = await self._deliver_message(
+                config, response, state
+            )
 
+            tool_progress = 0
             if normal_calls:
-                await self._execute_calls(
+                tool_progress = await self._execute_calls(
                     normal_calls, response, state, registry, unread_msgs
                 )
                 expanded = consume_expansion(self.stream_id)
@@ -439,6 +597,8 @@ class AgenticChatter(BaseChatter):
                         LLMPayload(ROLE.TOOL, expanded)  # type: ignore[arg-type]
                     )
 
+            append_control_tool_results(response, calls)
+
             if stop_minutes is not None:
                 state.stop_requested = True
                 state.stop_minutes = stop_minutes
@@ -451,7 +611,52 @@ class AgenticChatter(BaseChatter):
                 clear_stream_catalog(self.stream_id)
                 return
 
-            if not spoke_now and not normal_calls:
+            made_progress = spoke_now or tool_progress > 0
+            if made_progress:
+                state.no_progress_iterations = 0
+            else:
+                state.no_progress_iterations += 1
+
+            if had_spoken_before_iteration:
+                state.post_speech_iterations += 1
+
+            pipeline_config = config.pipeline if config is not None else None
+            max_no_progress = max(
+                1,
+                int(getattr(pipeline_config, "max_no_progress_iterations", 2)),
+            )
+            max_post_speech = max(
+                1,
+                int(getattr(pipeline_config, "max_post_speech_iterations", 3)),
+            )
+            max_duplicate_streak = max(
+                1,
+                int(
+                    getattr(
+                        config.humanize if config is not None else None,
+                        "max_duplicate_streak",
+                        2,
+                    )
+                ),
+            )
+            if tool_progress == 0 and (
+                state.no_progress_iterations >= max_no_progress
+                or state.post_speech_iterations >= max_post_speech
+                or state.duplicate_text_streak >= max_duplicate_streak
+            ):
+                logger.info(
+                    f"[{self.stream_id[:8]}] 本轮无新增进展，自动结束: "
+                    f"no_progress={state.no_progress_iterations}, "
+                    f"duplicates={state.duplicate_text_streak}"
+                )
+                clear_stream_catalog(self.stream_id)
+                return
+
+            if duplicate_text:
+                append_post_speech_nudge(response, duplicate=True)
+            elif spoke_now and not normal_calls:
+                append_post_speech_nudge(response)
+            elif not spoke_now and not normal_calls:
                 append_no_op_nudge(response)
 
         clear_stream_catalog(self.stream_id)
@@ -559,8 +764,8 @@ class AgenticChatter(BaseChatter):
         config: AgenticChatterConfig | None,
         response: Any,
         state: TurnState,
-    ) -> bool:
-        """将模型的文本输出作为回复发送出去。
+    ) -> tuple[bool, bool]:
+        """将模型的非重复文本作为回复发送出去。
 
         这是「文本即回复」的实现点：模型不需要调用任何发送工具，
         它输出的文本会被直接分段发送。
@@ -571,13 +776,47 @@ class AgenticChatter(BaseChatter):
             state: 回合状态。
 
         Returns:
-            bool: 本次是否真的发送了消息。
+            tuple[bool, bool]: 是否发送了消息、文本是否因复读被抑制。
         """
-        message = getattr(response, "message", None)
+        message = str(getattr(response, "message", "") or "").strip()
+        if not message:
+            return False, False
+
         humanize = config.humanize if config is not None else None
+        dedup_enabled = bool(getattr(humanize, "enable_reply_dedup", True))
+        duplicate = dedup_enabled and is_repeated_reply(
+            message,
+            state.sent_texts,
+            similarity_threshold=float(
+                getattr(humanize, "reply_similarity_threshold", 0.88)
+            ),
+            containment_threshold=float(
+                getattr(humanize, "reply_containment_threshold", 0.90)
+            ),
+        )
+        if duplicate:
+            state.duplicate_text_streak += 1
+            logger.info(f"[{self.stream_id[:8]}] 检测到本轮复读，已抑制文本发送")
+            return False, True
+
+        max_emissions = max(
+            1,
+            int(
+                getattr(
+                    config.pipeline if config is not None else None,
+                    "max_visible_text_emissions",
+                    3,
+                )
+            ),
+        )
+        if state.visible_text_emissions >= max_emissions:
+            state.duplicate_text_streak += 1
+            logger.info(f"[{self.stream_id[:8]}] 已达到单轮可见发言次数上限")
+            return False, True
+
         segments = build_speak_segments(message, humanize)
         if not segments:
-            return False
+            return False, False
 
         async def speak(text: str) -> bool:
             """发送单条消息。
@@ -597,8 +836,11 @@ class AgenticChatter(BaseChatter):
         sent = await deliver_segments(segments, speak)
         if sent > 0:
             state.spoke = True
-            return True
-        return False
+            state.sent_texts.append(message)
+            state.visible_text_emissions += 1
+            state.duplicate_text_streak = 0
+            return True, False
+        return False, False
 
     async def _execute_calls(
         self,
@@ -607,7 +849,7 @@ class AgenticChatter(BaseChatter):
         state: TurnState,
         registry: ToolRegistry,
         unread_msgs: list["Message"],
-    ) -> None:
+    ) -> int:
         """执行本轮的普通工具调用并回灌结果。
 
         Args:
@@ -616,6 +858,9 @@ class AgenticChatter(BaseChatter):
             state: 回合状态。
             registry: 当前轮次可调用组件注册表。
             unread_msgs: 本轮未读消息，用于恢复动作的发送上下文。
+
+        Returns:
+            int: 实际放行并执行的工具调用数量。
         """
         trigger = unread_msgs[-1] if unread_msgs else None
         runnable: list[Any] = []
@@ -633,7 +878,7 @@ class AgenticChatter(BaseChatter):
             runnable.append(call)
 
         if not runnable:
-            return
+            return 0
 
         results = await self.run_tool_call(runnable, response, registry, trigger)
         for call, (_, success) in zip(runnable, results, strict=False):
@@ -643,6 +888,7 @@ class AgenticChatter(BaseChatter):
                 args if isinstance(args, dict) else {},
                 "执行成功" if success else "执行失败",
             )
+        return len(runnable)
 
     async def _has_new_unreads(
         self,

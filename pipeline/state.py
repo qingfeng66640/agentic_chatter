@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..decision.models import ReplyDecision
 from ..tooling.dedupe import CallDeduper
 
 
@@ -62,6 +63,11 @@ class TurnState:
     deduper: CallDeduper = field(default_factory=CallDeduper)
     iterations: int = 0
     spoke: bool = False
+    sent_texts: list[str] = field(default_factory=list)
+    duplicate_text_streak: int = 0
+    no_progress_iterations: int = 0
+    visible_text_emissions: int = 0
+    post_speech_iterations: int = 0
     tool_calls: list[str] = field(default_factory=list)
     end_turn_requested: bool = False
     end_turn_seconds: float = 0.0
@@ -69,6 +75,7 @@ class TurnState:
     stop_minutes: float = 0.0
     perceived_topic: str = ""
     plan_note: str = ""
+    decision: ReplyDecision | None = None
     failed: bool = False
     error: str = ""
     extras: dict[str, Any] = field(default_factory=dict)

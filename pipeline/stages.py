@@ -14,6 +14,7 @@ from .state import TurnState
 
 # 内置阶段名
 STAGE_PERCEIVE = "perceive"
+STAGE_DECIDE = "decide"
 STAGE_PLAN = "plan"
 STAGE_ACT = "act"
 STAGE_REFLECT = "reflect"
@@ -122,6 +123,7 @@ def resolve_stage_order(
     enable_perceive: bool,
     enable_plan: bool,
     enable_reflect: bool,
+    enable_decide: bool = False,
 ) -> list[str]:
     """根据配置解析出实际要执行的阶段序列。
 
@@ -131,6 +133,7 @@ def resolve_stage_order(
     Args:
         configured: 配置中声明的阶段顺序。
         enable_perceive: 是否启用感知阶段。
+        enable_decide: 是否启用回复决策阶段。
         enable_plan: 是否启用规划阶段。
         enable_reflect: 是否启用反思阶段。
 
@@ -139,6 +142,7 @@ def resolve_stage_order(
     """
     toggles = {
         STAGE_PERCEIVE: enable_perceive,
+        STAGE_DECIDE: enable_decide,
         STAGE_PLAN: enable_plan,
         STAGE_REFLECT: enable_reflect,
         STAGE_ACT: True,
@@ -155,5 +159,19 @@ def resolve_stage_order(
     for required in REQUIRED_STAGES:
         if required not in resolved:
             resolved.append(required)
+
+    if enable_decide:
+        if STAGE_DECIDE not in resolved:
+            act_index = resolved.index(STAGE_ACT)
+            resolved.insert(act_index, STAGE_DECIDE)
+        decision_index = resolved.index(STAGE_DECIDE)
+        guarded = {STAGE_PLAN, STAGE_ACT}
+        guarded_order = [name for name in resolved if name in guarded]
+        if any(name in guarded for name in resolved[:decision_index]):
+            resolved = [name for name in resolved if name not in guarded]
+            decision_index = resolved.index(STAGE_DECIDE)
+            for name in guarded_order:
+                decision_index += 1
+                resolved.insert(decision_index, name)
 
     return resolved

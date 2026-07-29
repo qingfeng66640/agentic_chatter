@@ -17,7 +17,13 @@ from src.core.prompt import get_prompt_manager, min_len, optional, wrap
 from .actions import EndTurnAction, SayAction, StopConversationAction
 from .chatter import AgenticChatter
 from .config import AgenticChatterConfig
-from .prompts import perceive_prompt, plan_prompt, system_prompt, user_prompt
+from .prompts import (
+    perceive_prompt,
+    plan_prompt,
+    reply_decision_prompt,
+    system_prompt,
+    user_prompt,
+)
 from .service import PipelineService
 from .tooling import ExploreToolsTool
 
@@ -32,8 +38,8 @@ class AgenticChatterPlugin(BasePlugin):
     plugin_version = "0.1.0"
     plugin_author = "MoFox Team"
     plugin_description = (
-        "Agent 式回复流程聊天器：纯文本即回复、分层工具暴露、"
-        "跨流全局心智、可 TOML 编排的回复管线"
+        "Agent 式回复流程聊天器：分层回复决策、纯文本即回复、"
+        "分层工具暴露、跨流全局心智"
     )
     configs = [AgenticChatterConfig]
 
@@ -111,6 +117,12 @@ class AgenticChatterPlugin(BasePlugin):
             name="agentic_chatter_plan",
             template=plan_prompt,
             policies={"conversation": optional("")},
+        )
+
+        get_prompt_manager().get_or_create(
+            name="agentic_chatter_reply_decision",
+            template=reply_decision_prompt,
+            policies={},
         )
 
         logger.info("agentic_chatter 插件已加载")

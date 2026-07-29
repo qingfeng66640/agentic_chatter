@@ -2,13 +2,18 @@
     "name": "agentic_chatter",
     "display_name": "Agentic Chatter",
     "version": "0.1.0",
-    "description": "Agent 式回复流程聊天器：纯文本即回复、分层工具暴露、跨流全局心智、可 TOML 编排的回复管线",
+    "description": "Agent 式回复流程聊天器：分层回复决策、纯文本即回复、分层工具暴露、跨流全局心智",
     "author": "MoFox Team",
     "dependencies": {
         "plugins": [],
         "components": []
     },
     "include": [
+        {
+            "component_type": "config",
+            "component_name": "config",
+            "dependencies": []
+        },
         {
             "component_type": "chatter",
             "component_name": "agentic",

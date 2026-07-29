@@ -56,12 +56,31 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
             hint="过小会导致 agent 来不及完成多步任务；过大可能导致单轮耗时过长",
         )
+        max_no_progress_iterations: int = Field(
+            default=2,
+            description="连续多少次既无新文本也无新工具进展后自动结束本轮",
+            label="无进展迭代上限",
+            tag="ai",
+        )
+        max_post_speech_iterations: int = Field(
+            default=3,
+            description="首次发言后最多继续多少次迭代，用于完成工具任务并避免反复补话",
+            label="发言后迭代上限",
+            tag="ai",
+        )
+        max_visible_text_emissions: int = Field(
+            default=3,
+            description="单轮最多允许几次非重复的可见文本输出",
+            label="单轮发言次数上限",
+            tag="ai",
+        )
         stage_order: list[str] = Field(
-            default_factory=lambda: ["perceive", "act", "reflect"],
+            default_factory=lambda: ["perceive", "decide", "act", "reflect"],
             description=(
                 "回复管线的阶段执行顺序。可用阶段："
-                "perceive（情境感知）、plan（意图规划）、act（行动与表达）、reflect（回合反思）。"
-                "act 阶段必须存在，其余阶段可自由增删和调整顺序。"
+                "perceive（情境感知）、decide（是否自然介入）、plan（意图规划）、"
+                "act（行动与表达）、reflect（回合反思）。"
+                "decide 启用时会被约束在 plan/act 前，act 阶段必须存在。"
             ),
             label="阶段顺序",
             tag="ai",
@@ -105,6 +124,64 @@ class AgenticChatterConfig(BaseConfig):
             label="规划阶段模型",
             tag="ai",
         )
+
+    @config_section("decision", title="回复决策", tag="ai")
+    class DecisionSection(SectionBase):
+        """群聊是否自然介入的分层决策配置。"""
+
+        enabled: bool = Field(
+            default=True,
+            description="是否在 act 前判断本轮是否应该回复；关闭后保持原有全量回复流程",
+            label="启用回复决策",
+            tag="ai",
+        )
+        local_gate_enabled: bool = Field(
+            default=True,
+            description=(
+                "是否启用本地规则、embedding 与置信区间初判。关闭后除私聊和直接召唤外，"
+                "群聊全部交给 sub_actor 判断"
+            ),
+            label="启用本地初判",
+            tag="ai",
+        )
+        model_task: str = Field(
+            default="sub_actor",
+            description="灰区回复决策使用的模型任务名",
+            label="决策模型任务",
+            tag="ai",
+        )
+        embedding_task: str = Field(
+            default="embedding",
+            description="每轮群聊语义相关性计算使用的 embedding 任务名",
+            label="Embedding 任务",
+            tag="ai",
+        )
+        max_input_tokens: int = Field(default=1500, description="决策模型总输入 token 软上限", label="决策输入上限", tag="performance")
+        max_unread_tokens: int = Field(default=700, description="决策输入中未读消息 token 软上限", label="未读输入上限", tag="performance")
+        history_message_limit: int = Field(default=10, description="决策最多读取的近期历史消息数", label="历史消息上限", tag="performance")
+        semantic_candidate_limit: int = Field(default=4, description="每类 embedding 语义候选的最大数量", label="语义候选上限", tag="performance")
+        semantic_candidate_max_chars: int = Field(default=360, description="单个 embedding 候选的字符上限", label="语义候选字数", tag="performance")
+        local_reply_lower_bound: float = Field(default=0.35, description="置信区间下界达到该值时直接回复", label="回复直通边界", tag="ai")
+        local_silent_upper_bound: float = Field(default=-0.35, description="置信区间上界低于该值时直接静默", label="静默直通边界", tag="ai")
+        base_uncertainty: float = Field(default=0.18, description="本地判断的基础不确定度", label="基础不确定度", tag="ai")
+        gray_zone_randomness: float = Field(default=0.03, description="只作用于灰区附近的拟人化随机扰动", label="灰区随机扰动", tag="ai")
+        fallback_mode: str = Field(default="contextual", description="sub_actor 失败回退：contextual、fail_open 或 fail_closed", label="失败回退", tag="ai")
+        participation_window_seconds: float = Field(default=600.0, description="近期参与惯性的衰减窗口", label="参与惯性窗口", tag="ai")
+        rhythm_cooldown_seconds: float = Field(default=35.0, description="bot 刚回复后的群聊节奏冷却", label="节奏冷却", tag="ai")
+        state_ttl_minutes: float = Field(default=180.0, description="流参与状态的过期时间", label="状态过期时间", tag="performance")
+        max_state_streams: int = Field(default=256, description="内存中最多保留的流参与状态数量", label="状态流上限", tag="performance")
+        weight_direct_address: float = Field(default=0.30, description="弱受话人信号权重", label="受话人权重", tag="ai")
+        weight_semantic_continuity: float = Field(default=0.20, description="当前话题 embedding 连续性权重", label="话题相关权重", tag="ai")
+        weight_bot_history_continuity: float = Field(default=0.14, description="与 bot 历史发言相关性的权重", label="历史相关权重", tag="ai")
+        weight_participation_momentum: float = Field(default=0.12, description="bot 近期参与惯性权重", label="参与惯性权重", tag="ai")
+        weight_question_or_request: float = Field(default=0.10, description="问题或请求形态权重", label="问题请求权重", tag="ai")
+        weight_contribution_value: float = Field(default=0.06, description="消息信息量与可贡献性权重", label="贡献价值权重", tag="ai")
+        weight_directed_elsewhere: float = Field(default=0.24, description="明确指向其他人的负向权重", label="他人定向权重", tag="ai")
+        weight_interruption_cost: float = Field(default=0.18, description="多人快速交谈的打断代价权重", label="打断代价权重", tag="ai")
+        weight_topic_closure: float = Field(default=0.16, description="话题闭合的负向权重", label="话题闭合权重", tag="ai")
+        weight_rhythm_cooldown: float = Field(default=0.12, description="刚回复后的节奏冷却权重", label="节奏冷却权重", tag="ai")
+        weight_silence_momentum: float = Field(default=0.08, description="连续静默惯性的负向权重", label="静默惯性权重", tag="ai")
+        weight_low_information: float = Field(default=0.06, description="低信息短消息的负向权重", label="低信息权重", tag="ai")
 
     @config_section("tools", title="工具策略", tag="ai")
     class ToolsSection(SectionBase):
@@ -267,6 +344,30 @@ class AgenticChatterConfig(BaseConfig):
             label="走神概率",
             tag="ai",
         )
+        enable_reply_dedup: bool = Field(
+            default=True,
+            description="是否抑制同一轮中的相同或近似重复文本，同时继续执行有效工具调用",
+            label="启用文本复读抑制",
+            tag="ai",
+        )
+        reply_similarity_threshold: float = Field(
+            default=0.88,
+            description="字符 n-gram Jaccard 达到该值时视为近似复读",
+            label="复读相似度阈值",
+            tag="ai",
+        )
+        reply_containment_threshold: float = Field(
+            default=0.90,
+            description="较短文本被已发文本覆盖的比例达到该值时视为复读",
+            label="复读覆盖率阈值",
+            tag="ai",
+        )
+        max_duplicate_streak: int = Field(
+            default=2,
+            description="连续复读达到该次数且没有新工具调用时自动结束本轮",
+            label="连续复读上限",
+            tag="ai",
+        )
         enable_interrupt: bool = Field(
             default=True,
             description=(
@@ -399,6 +500,7 @@ class AgenticChatterConfig(BaseConfig):
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     pipeline: PipelineSection = Field(default_factory=PipelineSection)
+    decision: DecisionSection = Field(default_factory=DecisionSection)
     tools: ToolsSection = Field(default_factory=ToolsSection)
     humanize: HumanizeSection = Field(default_factory=HumanizeSection)
     global_mind: GlobalMindSection = Field(default_factory=GlobalMindSection)

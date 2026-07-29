@@ -16,6 +16,7 @@ Wait 结束本轮。模型永远没有机会在说完话之后再想想「要不
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
@@ -181,6 +182,37 @@ def append_tool_result(response: Any, call: Any, value: str) -> None:
     )
 
 
+def append_control_tool_results(response: Any, calls: list[Any]) -> None:
+    """为控制流调用补齐与最终决策一致的结果。
+
+    Args:
+        response: 当前 LLM 响应对象。
+        calls: 当前响应中的全部 tool call。
+    """
+    control_calls = [
+        call
+        for call in calls
+        if str(getattr(call, "name", "") or "") in {END_TURN_CALL, STOP_CALL}
+    ]
+    effective_call = next(
+        (
+            call
+            for call in reversed(control_calls)
+            if str(getattr(call, "name", "") or "") == STOP_CALL
+        ),
+        control_calls[-1] if control_calls else None,
+    )
+
+    for call in control_calls:
+        name = str(getattr(call, "name", "") or "")
+        if call is not effective_call:
+            append_tool_result(response, call, "本次控制请求已被后续或更高优先级请求覆盖。")
+        elif name == END_TURN_CALL:
+            append_tool_result(response, call, "本轮已结束，等待后续消息。")
+        else:
+            append_tool_result(response, call, "当前对话已结束并进入冷却。")
+
+
 def append_interrupted_tool_results(response: Any, calls: list[Any]) -> None:
     """为因新消息中断的工具调用补齐未执行结果。
 
@@ -191,6 +223,76 @@ def append_interrupted_tool_results(response: Any, calls: list[Any]) -> None:
     value = "生成期间收到新消息，本次调用未执行；将基于新消息重新规划。"
     for call in calls:
         append_tool_result(response, call, value)
+
+
+def normalize_reply_text(text: str) -> str:
+    """标准化回复文本，用于本轮复读比较。"""
+    normalized = text.casefold()
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = re.sub(r"[，。！？、,.!?；;：:~～…]+", "", normalized)
+    return normalized
+
+
+def _character_ngrams(text: str, size: int = 2) -> set[str]:
+    """生成字符 n-gram 集合。"""
+    if len(text) < size:
+        return {text} if text else set()
+    return {text[index : index + size] for index in range(len(text) - size + 1)}
+
+
+def reply_similarity(left: str, right: str) -> tuple[float, float]:
+    """返回字符 n-gram Jaccard 与较短文本覆盖率。"""
+    left_normalized = normalize_reply_text(left)
+    right_normalized = normalize_reply_text(right)
+    if not left_normalized or not right_normalized:
+        return 0.0, 0.0
+    left_grams = _character_ngrams(left_normalized)
+    right_grams = _character_ngrams(right_normalized)
+    union = left_grams | right_grams
+    intersection = left_grams & right_grams
+    jaccard = len(intersection) / len(union) if union else 0.0
+    if left_normalized in right_normalized:
+        containment = 1.0
+    elif right_normalized in left_normalized:
+        containment = 0.0
+    else:
+        containment = len(intersection) / max(1, min(len(left_grams), len(right_grams)))
+    return jaccard, containment
+
+
+def is_repeated_reply(
+    text: str,
+    sent_texts: list[str],
+    *,
+    similarity_threshold: float,
+    containment_threshold: float,
+) -> bool:
+    """判断文本是否与本轮已发送内容重复。"""
+    candidate = normalize_reply_text(text)
+    if not candidate:
+        return False
+    for sent in sent_texts:
+        if candidate == normalize_reply_text(sent):
+            return True
+        similarity, containment = reply_similarity(text, sent)
+        if similarity >= similarity_threshold or containment >= containment_threshold:
+            return True
+    return False
+
+
+def append_post_speech_nudge(response: Any, *, duplicate: bool = False) -> None:
+    """提示模型不要复述已发送文本，并继续工具或结束本轮。"""
+    prefix = "刚才的文本与已发送内容重复，已被抑制。" if duplicate else "刚才的文本已经发送。"
+    response.add_payload(
+        LLMPayload(
+            ROLE.USER,
+            Text(
+                prefix
+                + "不要复述或改写已发送内容。若仍需查证或执行任务，只调用相关工具；"
+                "只有工具结果带来新信息时才补充，否则调用 end_turn。"
+            ),
+        )
+    )
 
 
 def append_no_op_nudge(response: Any) -> None:

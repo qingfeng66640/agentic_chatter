@@ -18,10 +18,14 @@ from src.kernel.llm.context_structure import validate_payload_sequence
 from ..actions.control import MAX_STOP_MINUTES
 from ..chatter import AgenticChatter
 from ..pipeline.loop import (
+    append_control_tool_results,
     append_interrupted_tool_results,
     build_speak_segments,
     classify_calls,
     deliver_segments,
+    is_repeated_reply,
+    normalize_reply_text,
+    reply_similarity,
     should_continue_loop,
 )
 from ..pipeline.stages import (
@@ -53,9 +57,46 @@ class _FakeHumanize:
     max_typing_delay = 2.0
 
 
-# ----------------------------------------------------------------------
-# 循环终止条件
-# ----------------------------------------------------------------------
+def test_normalize_reply_text_ignores_spacing_and_punctuation() -> None:
+    """空白和标点差异不应绕过精确复读判断。"""
+    assert normalize_reply_text("你好， 世界！") == normalize_reply_text("你好世界")
+
+
+def test_reply_similarity_detects_paraphrased_repetition() -> None:
+    """高度重叠的改写应被视为近似复读。"""
+    similarity, containment = reply_similarity(
+        "建议你先重启一下服务",
+        "建议你先重启一下服务看看",
+    )
+
+    assert similarity > 0.75
+    assert containment == 1.0
+    assert is_repeated_reply(
+        "建议你先重启一下服务",
+        ["建议你先重启一下服务看看"],
+        similarity_threshold=0.88,
+        containment_threshold=0.90,
+    )
+
+
+def test_reply_similarity_allows_old_text_with_new_information() -> None:
+    """旧文本只是新回复前缀时，应允许发送新增信息。"""
+    assert not is_repeated_reply(
+        "我先查一下日志，日志显示数据库连接超时",
+        ["我先查一下日志"],
+        similarity_threshold=0.88,
+        containment_threshold=0.90,
+    )
+
+
+def test_reply_similarity_keeps_new_tool_information() -> None:
+    """同一话题中的新工具结果不应被当作复读。"""
+    assert not is_repeated_reply(
+        "日志显示数据库连接超时",
+        ["我先查一下日志"],
+        similarity_threshold=0.88,
+        containment_threshold=0.90,
+    )
 
 
 def test_loop_continues_after_speaking() -> None:
@@ -280,15 +321,42 @@ def test_outcome_carries_wait_seconds() -> None:
 
 
 class _PayloadResponse:
-    """收集 payload 的假响应。"""
+    """收集 payload，并可在消费时填充响应内容的假响应。"""
 
-    def __init__(self, payloads: list[LLMPayload], calls: list[ToolCall]) -> None:
+    def __init__(
+        self,
+        payloads: list[LLMPayload],
+        calls: list[ToolCall],
+        *,
+        delayed: bool = False,
+        delayed_message: str = "",
+    ) -> None:
         self.payloads = payloads
-        self.call_list = calls
-        self.message = "这条过时回复不应发送"
+        self._pending_calls = calls if delayed else []
+        self._pending_message = delayed_message if delayed else ""
+        self.call_list = [] if delayed else calls
+        self.message = None if delayed else "这条过时回复不应发送"
+        self.consumed = False
 
     def add_payload(self, payload: LLMPayload) -> None:
         self.payloads.append(payload)
+
+    def __await__(self):
+        async def consume() -> str:
+            self.consumed = True
+            if self._pending_calls or self._pending_message:
+                self.call_list = self._pending_calls
+                self.message = self._pending_message
+                content: list[Any] = []
+                if self.message:
+                    content.append(Text(self.message))
+                content.extend(self.call_list)
+                self.payloads.append(LLMPayload(ROLE.ASSISTANT, content))
+                self._pending_calls = []
+                self._pending_message = ""
+            return self.message or ""
+
+        return consume().__await__()
 
 
 class _RequestReturningResponse:
@@ -354,6 +422,71 @@ def test_interrupted_calls_are_closed_for_strict_context_validation() -> None:
     assert all("未执行" in result.value for result in results)
 
 
+def test_control_calls_are_closed_for_strict_context_validation() -> None:
+    calls = [
+        ToolCall(id="call_end", name="action-end_turn", args={"seconds": 30}),
+        ToolCall(id="call_stop", name="action-stop_conversation", args={"minutes": 5}),
+    ]
+    response = _PayloadResponse(
+        [
+            LLMPayload(ROLE.USER, Text("结束本轮")),
+            LLMPayload(ROLE.ASSISTANT, calls),
+        ],
+        calls,
+    )
+
+    append_control_tool_results(response, calls)
+
+    validate_payload_sequence(response.payloads, allow_incomplete_tail=False)
+    results = [
+        part
+        for payload in response.payloads
+        if payload.role == ROLE.TOOL_RESULT
+        for part in payload.content
+        if isinstance(part, ToolResult)
+    ]
+    assert [result.call_id for result in results] == ["call_end", "call_stop"]
+    assert "覆盖" in results[0].value
+    assert "冷却" in results[1].value
+
+
+async def test_stage_act_consumes_stream_before_reading_calls() -> None:
+    calls = [
+        ToolCall(id="call_end", name="action-end_turn", args={"seconds": 30}),
+    ]
+    response = _PayloadResponse(
+        [LLMPayload(ROLE.USER, Text("结束本轮"))],
+        calls,
+        delayed=True,
+        delayed_message="流式文本",
+    )
+    request = _RequestReturningResponse(response)
+    chatter = AgenticChatter(stream_id="stream", plugin=object())
+    chatter.get_llm_usables = AsyncMock(return_value=[])
+    chatter.modify_llm_usables = AsyncMock(return_value=[])
+    chatter._build_layout = lambda _config, _usables: SimpleNamespace(
+        exposed=[],
+        collapsed_categories={},
+        collapsed_classes={},
+    )
+    chatter._build_system_prompt = AsyncMock(return_value="system")
+    chatter._build_user_prompt = AsyncMock(return_value="user")
+    chatter.create_request = lambda **_kwargs: request
+    chatter._has_new_unreads = AsyncMock(return_value=False)
+    chatter._deliver_message = AsyncMock(return_value=(False, False))
+    chatter._execute_calls = AsyncMock()
+    state = TurnState(stream_id="stream")
+
+    await chatter._stage_act(_InterruptConfig(), object(), state, [])
+
+    assert response.consumed
+    assert response.message == "流式文本"
+    assert state.end_turn_requested
+    assert state.end_turn_seconds == 30.0
+    chatter._execute_calls.assert_not_awaited()
+    validate_payload_sequence(response.payloads, allow_incomplete_tail=False)
+
+
 async def test_stage_act_closes_calls_before_interrupting() -> None:
     calls = [
         ToolCall(id="call_tool", name="tool-search", args={"q": "天气"}),
@@ -380,7 +513,7 @@ async def test_stage_act_closes_calls_before_interrupting() -> None:
     chatter._build_user_prompt = AsyncMock(return_value="user")
     chatter.create_request = lambda **_kwargs: request
     chatter._has_new_unreads = AsyncMock(return_value=True)
-    chatter._deliver_message = AsyncMock(return_value=True)
+    chatter._deliver_message = AsyncMock(return_value=(True, False))
     chatter._execute_calls = AsyncMock()
     state = TurnState(stream_id="stream")
 
