@@ -11,7 +11,11 @@ from src.core.models.stream import ChatStream
 from src.core.prompt.template import PromptTemplate
 
 from ..chatter import AgenticChatter
-from ..decision.actor import _fallback, _parse_decision_result
+from ..decision.actor import (
+    _fallback,
+    _parse_decision_result,
+    _response_diagnostics,
+)
 from ..decision import (
     DecisionAction,
     DecisionFeatures,
@@ -190,6 +194,20 @@ def test_explicit_fallback_modes_ignore_recent_reply_suppression() -> None:
         reasons=[],
         suppress_contextual=True,
     ).action == DecisionAction.SILENT
+
+
+def test_response_diagnostics_describes_empty_text_without_leaking_content() -> None:
+    """空决策输出日志只记录长度和响应状态，不记录正文。"""
+    response = SimpleNamespace(
+        message="",
+        reasoning_content="隐私推理内容",
+        call_list=[object()],
+        stop_reason="stop",
+    )
+
+    assert _response_diagnostics(response) == (
+        "正文长度=0，推理内容长度=6，工具调用数=1，结束原因=stop"
+    )
 
 
 def test_parse_decision_result_accepts_common_wrappers() -> None:

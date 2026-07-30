@@ -84,6 +84,18 @@ def _safe_raw_preview(raw: str, limit: int = 240) -> str:
     return preview if len(preview) <= limit else preview[: limit - 1] + "…"
 
 
+def _response_diagnostics(response: Any) -> str:
+    """生成不含模型正文的响应状态摘要，便于定位空输出。"""
+    message = str(getattr(response, "message", "") or "")
+    reasoning = str(getattr(response, "reasoning_content", "") or "")
+    calls = list(getattr(response, "call_list", None) or [])
+    stop_reason = str(getattr(response, "stop_reason", "") or "")
+    return (
+        f"正文长度={len(message)}，推理内容长度={len(reasoning)}，"
+        f"工具调用数={len(calls)}，结束原因={stop_reason or '未提供'}"
+    )
+
+
 def _fallback(
     mode: str,
     *,
@@ -177,9 +189,11 @@ async def decide_with_sub_actor(
 
     raw = ""
     try:
-        response = await request.send(stream=False)
+        response: Any = await request.send(stream=False)
         await response
         raw = str(getattr(response, "message", "") or "")
+        if not raw.strip():
+            raise ValueError(f"子决策模型未返回正文（{_response_diagnostics(response)}）")
         result = _parse_decision_result(raw)
         action = str(result.get("action", "")).strip().lower()
         if action not in {DecisionAction.RESPOND.value, DecisionAction.SILENT.value}:
