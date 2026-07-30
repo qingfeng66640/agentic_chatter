@@ -89,18 +89,23 @@ def _fallback(
     *,
     local_score: float,
     reasons: list[str],
+    suppress_contextual: bool = False,
 ) -> ReplyDecision:
-    """根据配置和本地倾向构造失败回退。"""
+    """依据配置与本地信号构造子决策模型失败后的回退结果。"""
     normalized = mode.strip().lower()
     respond = normalized in {"fail_open", "contextual"}
-    if normalized == "fail_closed":
+    fallback_reasons = [*reasons, "sub_actor_fallback"]
+    if normalized == "contextual" and suppress_contextual:
+        respond = False
+        fallback_reasons.append("recent_reply_fallback_suppressed")
+    elif normalized == "fail_closed":
         respond = False
     return ReplyDecision(
         DecisionAction.RESPOND if respond else DecisionAction.SILENT,
         DecisionSource.FALLBACK,
         score=local_score,
         confidence=0.0,
-        reasons=[*reasons, "sub_actor_fallback"],
+        reasons=fallback_reasons,
         sub_actor_used=True,
     )
 
@@ -117,6 +122,7 @@ async def decide_with_sub_actor(
     lower_bound: float,
     upper_bound: float,
     reasons: list[str],
+    suppress_contextual_fallback: bool = False,
 ) -> ReplyDecision:
     """调用 sub_actor 对灰区或全模型模式作最终裁决。"""
     try:
@@ -126,9 +132,12 @@ async def decide_with_sub_actor(
             with_reminder="sub_actor",
         )
     except Exception as exc:
-        logger.warning(f"无法创建 sub_actor 决策请求，执行回退: {exc}")
+        logger.warning(f"无法创建子决策模型请求，改用回退策略：{exc}")
         return _fallback(
-            str(config.fallback_mode), local_score=local_score, reasons=reasons
+            str(config.fallback_mode),
+            local_score=local_score,
+            reasons=reasons,
+            suppress_contextual=suppress_contextual_fallback,
         )
 
     model_identifier = _model_identifier(request)
@@ -191,9 +200,12 @@ async def decide_with_sub_actor(
         )
     except Exception as exc:
         logger.warning(
-            f"sub_actor 决策失败，执行回退: {type(exc).__name__}: {exc}; "
-            f"raw={_safe_raw_preview(raw)!r}"
+            f"子决策模型判断失败，改用回退策略：{type(exc).__name__}：{exc}；"
+            f"原始输出预览={_safe_raw_preview(raw)!r}"
         )
         return _fallback(
-            str(config.fallback_mode), local_score=local_score, reasons=reasons
+            str(config.fallback_mode),
+            local_score=local_score,
+            reasons=reasons,
+            suppress_contextual=suppress_contextual_fallback,
         )

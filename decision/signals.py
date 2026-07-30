@@ -45,6 +45,15 @@ def _mentioned_ids(message: Any) -> set[str]:
     return mentioned
 
 
+def _bot_was_mentioned(message: Any, bot_id: str) -> bool:
+    """判断平台或兼容字段是否确认当前 Bot 被 @。"""
+    extra = getattr(message, "extra", {})
+    if isinstance(extra, dict) and extra.get("bot_was_mentioned") is True:
+        return True
+    mentioned_ids = _mentioned_ids(message)
+    return bool(bot_id and bot_id in mentioned_ids)
+
+
 def hard_rule_decision(
     *,
     is_private: bool,
@@ -78,12 +87,21 @@ def hard_rule_decision(
                 DecisionSource.HARD_RULE,
                 reasons=["reply_to_bot"],
             )
-        mentioned_ids = _mentioned_ids(message)
-        if bot_id and bot_id in mentioned_ids:
+        if _bot_was_mentioned(message, bot_id):
             return ReplyDecision(
                 DecisionAction.RESPOND,
                 DecisionSource.HARD_RULE,
                 reasons=["mention_bot"],
+            )
+        if bot_nickname and (
+            text.startswith(bot_nickname)
+            or f"@{bot_nickname}" in text
+            or f"＠{bot_nickname}" in text
+        ):
+            return ReplyDecision(
+                DecisionAction.RESPOND,
+                DecisionSource.HARD_RULE,
+                reasons=["nickname_address"],
             )
     return None
 
@@ -144,7 +162,7 @@ def extract_features(
     for message in unread_messages:
         mentioned = _mentioned_ids(message)
         reply_to = str(getattr(message, "reply_to", "") or "")
-        if mentioned and (not bot_id or bot_id not in mentioned):
+        if mentioned and not _bot_was_mentioned(message, bot_id):
             directed_other = True
         if reply_to and reply_to not in bot_message_ids:
             directed_other = True

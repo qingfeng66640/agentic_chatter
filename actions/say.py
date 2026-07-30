@@ -8,10 +8,13 @@
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import uuid4
 
 from src.app.plugin_system.api import send_api
+from src.app.plugin_system.api.adapter_api import get_bot_info_by_platform
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.components.base.action import BaseAction
+from src.core.models.message import Message, MessageType
 
 logger = get_logger("agentic_chatter")
 
@@ -54,23 +57,58 @@ class SayAction(BaseAction):
         if not text:
             return False, "content 为空，没有内容可发送"
 
-        stream_id = getattr(self.chat_stream, "stream_id", "")
+        stream_id = str(getattr(self.chat_stream, "stream_id", "") or "")
         if not stream_id:
             return False, "无法解析当前对话流，发送失败"
 
+        reply_target = str(reply_to or "").strip()
         at_target = str(at or "").strip()
-        if at_target:
-            text = f"@{at_target} {text}"
+        if reply_target and at_target:
+            return False, "reply_to 与 at 不能同时使用"
 
-        try:
-            ok = await send_api.send_text(
+        if at_target:
+            chat_type = str(getattr(self.chat_stream, "chat_type", "") or "")
+            if chat_type != "group":
+                return False, "at 仅支持群聊发送"
+
+            platform = str(getattr(self.chat_stream, "platform", "") or "")
+            bot_info = await get_bot_info_by_platform(platform)
+            message = Message(
+                message_id=f"action_{self.name}_{uuid4().hex}",
                 content=text,
+                processed_plain_text=text,
+                message_type=MessageType.TEXT,
+                sender_id=str((bot_info or {}).get("bot_id", "")),
+                sender_name=str((bot_info or {}).get("bot_name", "Bot")),
+                platform=platform,
+                chat_type=chat_type,
                 stream_id=stream_id,
-                reply_to=str(reply_to or "").strip() or None,
             )
-        except Exception as exc:
-            logger.error(f"say 动作发送失败: {exc}")
-            return False, f"发送失败: {exc}"
+            message.extra["at_user_id"] = at_target
+            context_message = self._get_context_message_for_target()
+            if context_message is not None:
+                target_group_id = context_message.extra.get("group_id")
+                target_group_name = context_message.extra.get("group_name")
+                if target_group_id:
+                    message.extra["target_group_id"] = str(target_group_id)
+                if target_group_name:
+                    message.extra["target_group_name"] = str(target_group_name)
+
+            try:
+                ok = await send_api.send_message(message)
+            except Exception as exc:
+                logger.error(f"引用或提及发送动作失败：{exc}")
+                return False, f"发送失败: {exc}"
+        else:
+            try:
+                ok = await send_api.send_text(
+                    content=text,
+                    stream_id=stream_id,
+                    reply_to=reply_target or None,
+                )
+            except Exception as exc:
+                logger.error(f"引用或提及发送动作失败：{exc}")
+                return False, f"发送失败: {exc}"
 
         if not ok:
             return False, "发送失败，适配器返回未成功"

@@ -19,6 +19,7 @@ from ..decision import (
     ReplyDecision,
     compute_semantic_relevance,
     cosine_similarity,
+    extract_features,
     hard_rule_decision,
     score_features,
 )
@@ -46,7 +47,7 @@ async def test_reply_decision_prompt_escapes_json_example() -> None:
 
 
 def test_contextual_fallback_keeps_gray_zone_reachable() -> None:
-    """sub_actor 失败时，灰区不能被隐藏阈值再次判为静默。"""
+    """没有近期成功回复时，contextual fallback 仍允许进入回复流程。"""
     decision = _fallback(
         "contextual",
         local_score=-0.114,
@@ -55,6 +56,140 @@ def test_contextual_fallback_keeps_gray_zone_reachable() -> None:
 
     assert decision.action == DecisionAction.RESPOND
     assert decision.source == DecisionSource.FALLBACK
+
+
+
+def test_nickname_address_is_a_hard_reply_rule() -> None:
+    """明确称呼 bot 的文本应跳过评分和子模型判断。"""
+    decision = hard_rule_decision(
+        is_private=False,
+        bot_id="bot-id",
+        bot_nickname="小蝶",
+        unread_messages=[_message("@小蝶 帮我看看")],
+        bot_message_ids=set(),
+    )
+
+    assert decision is not None
+    assert decision.action == DecisionAction.RESPOND
+    assert decision.source == DecisionSource.HARD_RULE
+    assert decision.reasons == ["nickname_address"]
+
+
+def test_other_member_mention_does_not_trigger_hard_reply() -> None:
+    """提及其他成员不能被误判为 bot 被唤醒。"""
+    decision = hard_rule_decision(
+        is_private=False,
+        bot_id="bot-id",
+        bot_nickname="小蝶",
+        unread_messages=[_message("@我一下", at_users=["other-id"])],
+        bot_message_ids=set(),
+    )
+
+    assert decision is None
+
+
+def test_contextual_fallback_suppresses_recent_reply() -> None:
+    """近期已成功回复时，contextual fallback 不能再次自动介入。"""
+    decision = _fallback(
+        "contextual",
+        local_score=0.104,
+        reasons=["semantic_unknown"],
+        suppress_contextual=True,
+    )
+
+    assert decision.action == DecisionAction.SILENT
+    assert "recent_reply_fallback_suppressed" in decision.reasons
+
+
+def test_platform_mention_signal_triggers_hard_reply_without_ids() -> None:
+    """平台确认 @Bot 时不依赖稳定账号或结构化提及列表。"""
+    decision = hard_rule_decision(
+        is_private=False,
+        bot_id="",
+        bot_nickname="小蝶",
+        unread_messages=[_message("@<小蝶：群内身份> @我一下", bot_was_mentioned=True, at_users=[])],
+        bot_message_ids=set(),
+    )
+
+    assert decision is not None
+    assert decision.action == DecisionAction.RESPOND
+    assert decision.source == DecisionSource.HARD_RULE
+    assert decision.reasons == ["mention_bot"]
+
+
+def test_platform_mention_signal_overrides_other_member_mentions() -> None:
+    """平台确认 @Bot 时，其他成员提及不能标记为面向他人。"""
+    message = _message(
+        "@<小蝶：群内身份> @我一下",
+        bot_was_mentioned=True,
+        at_users=[{"user_id": "other-member"}],
+    )
+    decision = hard_rule_decision(
+        is_private=False,
+        bot_id="stable-bot-id",
+        bot_nickname="小蝶",
+        unread_messages=[message],
+        bot_message_ids=set(),
+    )
+    features = extract_features(
+        unread_messages=[message],
+        bot_id="stable-bot-id",
+        bot_nickname="小蝶",
+        bot_message_ids=set(),
+        participation=SimpleNamespace(last_reply_at=0.0, consecutive_silence=0),
+        semantic_continuity=None,
+        bot_history_continuity=None,
+        participation_window_seconds=60.0,
+        rhythm_cooldown_seconds=30.0,
+        now=100.0,
+    )
+
+    assert decision is not None
+    assert decision.reasons == ["mention_bot"]
+    assert features.directed_elsewhere == 0.0
+
+
+def test_platform_false_keeps_legacy_exact_mention_compatibility() -> None:
+    """False 不能否定旧 Adapter 的精确结构化提及。"""
+    decision = hard_rule_decision(
+        is_private=False,
+        bot_id="stable-bot-id",
+        bot_nickname="小蝶",
+        unread_messages=[_message("你好", bot_was_mentioned=False, at_users=[{"user_id": "stable-bot-id"}])],
+        bot_message_ids=set(),
+    )
+
+    assert decision is not None
+    assert decision.reasons == ["mention_bot"]
+
+
+def test_non_boolean_platform_mention_signal_does_not_trigger_reply() -> None:
+    """字符串等不可信值不能被当成平台确认。"""
+    decision = hard_rule_decision(
+        is_private=False,
+        bot_id="",
+        bot_nickname="小蝶",
+        unread_messages=[_message("普通消息", bot_was_mentioned="false")],
+        bot_message_ids=set(),
+    )
+
+    assert decision is None
+
+
+def test_explicit_fallback_modes_ignore_recent_reply_suppression() -> None:
+    """只有 contextual 受近期回复保护，显式模式保持原语义。"""
+    assert _fallback(
+        "fail_open",
+        local_score=0.0,
+        reasons=[],
+        suppress_contextual=True,
+    ).action == DecisionAction.RESPOND
+    assert _fallback(
+        "fail_closed",
+        local_score=0.0,
+        reasons=[],
+        suppress_contextual=True,
+    ).action == DecisionAction.SILENT
 
 
 def test_parse_decision_result_accepts_common_wrappers() -> None:

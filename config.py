@@ -166,6 +166,18 @@ class AgenticChatterConfig(BaseConfig):
         base_uncertainty: float = Field(default=0.18, description="本地判断的基础不确定度", label="基础不确定度", tag="ai")
         gray_zone_randomness: float = Field(default=0.03, description="只作用于灰区附近的拟人化随机扰动", label="灰区随机扰动", tag="ai")
         fallback_mode: str = Field(default="contextual", description="sub_actor 失败回退：contextual、fail_open 或 fail_closed", label="失败回退", tag="ai")
+        enable_contextual_fallback_recent_reply_suppression: bool = Field(
+            default=True,
+            description="近期已成功回复时，抑制 sub_actor 失败后的 contextual 自动回复；不影响私聊、可靠回复和结构化 @",
+            label="启用 fallback 近期回复抑制",
+            tag="ai",
+        )
+        contextual_fallback_recent_reply_window_seconds: float = Field(
+            default=300.0,
+            description="contextual fallback 的近期成功回复抑制窗口（秒），设为 0 可关闭",
+            label="fallback 回复抑制窗口",
+            tag="ai",
+        )
         participation_window_seconds: float = Field(default=600.0, description="近期参与惯性的衰减窗口", label="参与惯性窗口", tag="ai")
         rhythm_cooldown_seconds: float = Field(default=35.0, description="bot 刚回复后的群聊节奏冷却", label="节奏冷却", tag="ai")
         state_ttl_minutes: float = Field(default=180.0, description="流参与状态的过期时间", label="状态过期时间", tag="performance")

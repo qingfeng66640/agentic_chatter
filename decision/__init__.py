@@ -6,6 +6,7 @@ from .models import (
     DecisionFeatures,
     DecisionSource,
     ReplyDecision,
+    describe_decision,
 )
 from .scoring import interval_summary, score_features
 from .semantic import compute_semantic_relevance, cosine_similarity
@@ -22,6 +23,7 @@ __all__ = [
     "compute_semantic_relevance",
     "cosine_similarity",
     "decide_with_sub_actor",
+    "describe_decision",
     "extract_features",
     "get_participation_store",
     "hard_rule_decision",

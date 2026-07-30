@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 from src.app.plugin_system.api import send_api
@@ -42,6 +43,7 @@ from .decision import (
     ReplyDecision,
     compute_semantic_relevance,
     decide_with_sub_actor,
+    describe_decision,
     extract_features,
     get_participation_store,
     hard_rule_decision,
@@ -145,7 +147,7 @@ class AgenticChatter(BaseChatter):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error(f"[{self.stream_id[:8]}] agent 循环异常: {exc}")
+            logger.error(f"[{self.stream_id[:8]}] 智能体循环异常：{exc}")
             yield Failure(f"agent 循环异常: {exc}", exception=exc)
 
     async def _run_turns(
@@ -280,7 +282,7 @@ class AgenticChatter(BaseChatter):
 
                 custom_stage = get_custom_stage(stage_name)
                 if custom_stage is None:
-                    logger.warning(f"[{self.stream_id[:8]}] 未注册管线阶段: {stage_name}")
+                    logger.warning(f"[{self.stream_id[:8]}] 未注册管线阶段：{stage_name}")
                     continue
                 await custom_stage.run(
                     state,
@@ -334,6 +336,7 @@ class AgenticChatter(BaseChatter):
                 DecisionSource.DISABLED,
                 reasons=["decision_disabled"],
             )
+            self._log_reply_decision(state.decision)
             return
 
         is_private = str(chat_stream.chat_type or "").lower() == ChatType.PRIVATE.value
@@ -360,6 +363,7 @@ class AgenticChatter(BaseChatter):
         )
         if hard_decision is not None:
             state.decision = hard_decision
+            self._log_reply_decision(state.decision)
             return
 
         decision_config = config.decision
@@ -368,6 +372,27 @@ class AgenticChatter(BaseChatter):
             self.stream_id,
             ttl_seconds=max(60.0, float(decision_config.state_ttl_minutes) * 60.0),
             max_streams=max(1, int(decision_config.max_state_streams)),
+        )
+
+        fallback_window = max(
+            0.0,
+            float(
+                getattr(
+                    decision_config,
+                    "contextual_fallback_recent_reply_window_seconds",
+                    300.0,
+                )
+            ),
+        )
+        reply_age = time.time() - participation.last_reply_at
+        suppress_contextual_fallback = bool(
+            getattr(
+                decision_config,
+                "enable_contextual_fallback_recent_reply_suppression",
+                True,
+            )
+            and participation.last_reply_at > 0
+            and 0.0 <= reply_age < fallback_window
         )
 
         if should_get_distracted(
@@ -380,6 +405,7 @@ class AgenticChatter(BaseChatter):
                 DecisionSource.HARD_RULE,
                 reasons=["distracted"],
             )
+            self._log_reply_decision(state.decision)
             return
 
         history_limit = max(1, int(decision_config.history_message_limit))
@@ -442,6 +468,7 @@ class AgenticChatter(BaseChatter):
             local_decision = score_features(features, decision_config)
             if local_decision is not None:
                 state.decision = local_decision
+                self._log_reply_decision(state.decision)
                 return
 
         score, lower, upper = interval_summary(features, decision_config)
@@ -473,10 +500,23 @@ class AgenticChatter(BaseChatter):
             lower_bound=lower,
             upper_bound=upper,
             reasons=features.reasons,
+            suppress_contextual_fallback=suppress_contextual_fallback,
         )
+        self._log_reply_decision(state.decision)
+
+    def _log_reply_decision(self, decision: ReplyDecision | None) -> None:
+        """以中文记录本轮回复判断与诊断信息。"""
+        if decision is None:
+            return
+        action, source, reasons = describe_decision(decision)
         logger.info(
-            f"[{self.stream_id[:8]}] 回复决策: {state.decision.action.value} "
-            f"source={state.decision.source.value} score={state.decision.score:.3f}"
+            f"[{self.stream_id[:8]}] 回复判断：{action}"
+            f"（方式：{source}；原因：{reasons}）"
+        )
+        logger.debug(
+            f"[{self.stream_id[:8]}] 决策诊断：评分={decision.score:.3f}，"
+            f"区间=[{decision.lower_bound:.3f}, {decision.upper_bound:.3f}]，"
+            f"置信度={decision.confidence:.3f}，内部原因={decision.reasons}"
         )
 
     async def _stage_plan(
@@ -540,7 +580,7 @@ class AgenticChatter(BaseChatter):
             try:
                 registry.register(usable_cls)  # type: ignore[arg-type]
             except Exception as exc:
-                logger.debug(f"注册组件失败，已跳过: {exc}")
+                logger.debug(f"注册组件失败，已跳过：{exc}")
 
         system_text = await self._build_system_prompt(config, chat_stream, layout)
         user_text = await self._build_user_prompt(config, chat_stream, state, unread_msgs)
@@ -563,7 +603,7 @@ class AgenticChatter(BaseChatter):
             except Exception as exc:
                 state.failed = True
                 state.error = str(exc)
-                logger.error(f"[{self.stream_id[:8]}] LLM 调用失败: {exc}")
+                logger.error(f"[{self.stream_id[:8]}] 语言模型调用失败：{exc}")
                 clear_stream_catalog(self.stream_id)
                 return
 
@@ -592,7 +632,7 @@ class AgenticChatter(BaseChatter):
                         try:
                             registry.register(usable_cls)  # type: ignore[arg-type]
                         except Exception as exc:
-                            logger.debug(f"展开工具注册失败，已跳过: {exc}")
+                            logger.debug(f"展开工具注册失败，已跳过：{exc}")
                     response.add_payload(
                         LLMPayload(ROLE.TOOL, expanded)  # type: ignore[arg-type]
                     )
@@ -645,9 +685,9 @@ class AgenticChatter(BaseChatter):
                 or state.duplicate_text_streak >= max_duplicate_streak
             ):
                 logger.info(
-                    f"[{self.stream_id[:8]}] 本轮无新增进展，自动结束: "
-                    f"no_progress={state.no_progress_iterations}, "
-                    f"duplicates={state.duplicate_text_streak}"
+                    f"[{self.stream_id[:8]}] 本轮没有新增进展，自动结束："
+                    f"无进展次数={state.no_progress_iterations}，"
+                    f"重复次数={state.duplicate_text_streak}"
                 )
                 clear_stream_catalog(self.stream_id)
                 return
