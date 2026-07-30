@@ -357,6 +357,80 @@ def test_score_uses_confidence_interval() -> None:
     assert weak_decision is None
 
 
+def test_local_combinations_handle_clear_reply_and_silence() -> None:
+    """明显的本地组合应绕过子决策模型。"""
+    closure = score_features(
+        DecisionFeatures(topic_closure=1.0, low_information=1.0),
+        _decision_config(),
+    )
+    directed_other = score_features(
+        DecisionFeatures(directed_elsewhere=1.0),
+        _decision_config(),
+    )
+    followup_question = score_features(
+        DecisionFeatures(question_or_request=1.0, semantic_continuity=0.60),
+        _decision_config(),
+    )
+    strong_followup = score_features(
+        DecisionFeatures(
+            semantic_continuity=0.75,
+            bot_history_continuity=0.55,
+            contribution_value=0.25,
+        ),
+        _decision_config(),
+    )
+
+    assert closure is not None
+    assert closure.action == DecisionAction.SILENT
+    assert closure.reasons[0] == "closure_low_information"
+    assert directed_other is not None
+    assert directed_other.action == DecisionAction.SILENT
+    assert directed_other.reasons[0] == "directed_elsewhere_unrelated"
+    assert followup_question is not None
+    assert followup_question.action == DecisionAction.RESPOND
+    assert followup_question.reasons[0] == "contextual_question_for_bot"
+    assert strong_followup is not None
+    assert strong_followup.action == DecisionAction.RESPOND
+    assert strong_followup.reasons[0] == "strong_contextual_followup"
+
+
+def test_local_combinations_preserve_ambiguous_messages_for_sub_actor() -> None:
+    """泛问题或只与当前话题相关的消息仍需交给子决策模型。"""
+    generic_question = score_features(
+        DecisionFeatures(question_or_request=1.0),
+        _decision_config(),
+    )
+    topic_only = score_features(
+        DecisionFeatures(semantic_continuity=0.75, contribution_value=0.25),
+        _decision_config(),
+    )
+
+    assert generic_question is None
+    assert topic_only is None
+
+
+def test_local_reply_combination_respects_negative_guards() -> None:
+    """面向他人、冷却、收尾或多人快聊不能被连续性强行放行。"""
+    for feature in (
+        DecisionFeatures(
+            question_or_request=1.0,
+            semantic_continuity=0.9,
+            directed_elsewhere=1.0,
+        ),
+        DecisionFeatures(
+            question_or_request=1.0,
+            semantic_continuity=0.9,
+            rhythm_cooldown=1.0,
+        ),
+        DecisionFeatures(
+            question_or_request=1.0,
+            semantic_continuity=0.9,
+            interruption_cost=1.0,
+        ),
+    ):
+        decision = score_features(feature, _decision_config())
+        assert decision is None or decision.action == DecisionAction.SILENT
+
 def test_score_is_reproducible_with_fixed_rng() -> None:
     """固定 RNG 时灰区随机扰动应可复现。"""
     config = _decision_config(gray_zone_randomness=0.03)

@@ -91,6 +91,14 @@ _REASON_TEXT = {
     "conflicting_signals": "对话信号存在冲突",
     "recent_reply_fallback_suppressed": "刚回复过，避免故障回退时重复插话",
     "sub_actor_fallback": "子决策模型不可用",
+    "closure_low_information": "话题收尾且没有新信息",
+    "directed_elsewhere_unrelated": "消息面向其他成员且与我无关",
+    "fast_flow_no_clear_entry": "多人快速对话中没有明确介入入口",
+    "cooldown_low_value": "刚回复过且当前消息价值较低",
+    "contextual_question_for_bot": "问题与当前话题或我的发言连续",
+    "strong_contextual_followup": "高连续性且内容具有可贡献信息",
+    "local_score_reply": "本地评分达到回复边界",
+    "local_score_silent": "本地评分达到静默边界",
 }
 
 
