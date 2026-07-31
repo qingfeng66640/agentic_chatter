@@ -63,20 +63,91 @@ def test_contextual_fallback_keeps_gray_zone_reachable() -> None:
 
 
 
-def test_nickname_address_is_a_hard_reply_rule() -> None:
-    """明确称呼 bot 的文本应跳过评分和子模型判断。"""
+def test_nickname_address_enters_local_scoring() -> None:
+    """昵称文本不再绕过评分直接唤醒。"""
     decision = hard_rule_decision(
         is_private=False,
         bot_id="bot-id",
         bot_nickname="小蝶",
-        unread_messages=[_message("@小蝶 帮我看看")],
+        unread_messages=[_message("小蝶，帮我看看")],
         bot_message_ids=set(),
     )
 
+    assert decision is None
+
+
+def test_nickname_request_is_locally_allowed() -> None:
+    """昵称加问题或请求时由本地组合规则回复。"""
+    features = extract_features(
+        unread_messages=[_message("小蝶，帮我看看这个问题")],
+        bot_id="bot-id",
+        bot_nickname="小蝶",
+        bot_message_ids=set(),
+        participation=SimpleNamespace(last_reply_at=0.0, consecutive_silence=0),
+        semantic_continuity=0.0,
+        bot_history_continuity=0.0,
+        participation_window_seconds=60.0,
+        rhythm_cooldown_seconds=30.0,
+        now=100.0,
+    )
+
+    decision = score_features(features, _decision_config())
+
+    assert features.direct_address == 1.0
+    assert features.question_or_request == 1.0
     assert decision is not None
     assert decision.action == DecisionAction.RESPOND
-    assert decision.source == DecisionSource.HARD_RULE
-    assert decision.reasons == ["nickname_address"]
+    assert decision.source == DecisionSource.LOCAL
+
+
+def test_nickname_alone_is_not_a_direct_reply() -> None:
+    """单独出现昵称时仍受低信息和区间判断约束。"""
+    decision = hard_rule_decision(
+        is_private=False,
+        bot_id="bot-id",
+        bot_nickname="小蝶",
+        unread_messages=[_message("小蝶")],
+        bot_message_ids=set(),
+    )
+
+    assert decision is None
+
+
+def test_discussing_nickname_is_not_direct_address() -> None:
+    """正文讨论 Bot 名称时不能获得直接称呼信号。"""
+    features = extract_features(
+        unread_messages=[_message("我们正在讨论小蝶这个角色")],
+        bot_id="bot-id",
+        bot_nickname="小蝶",
+        bot_message_ids=set(),
+        participation=SimpleNamespace(last_reply_at=0.0, consecutive_silence=0),
+        semantic_continuity=0.0,
+        bot_history_continuity=0.0,
+        participation_window_seconds=60.0,
+        rhythm_cooldown_seconds=30.0,
+        now=100.0,
+    )
+
+    assert features.direct_address == 0.0
+    assert "nickname_address" not in features.reasons
+
+
+def test_nickname_prefix_inside_a_word_is_not_direct_address() -> None:
+    """昵称只是词语前缀时不能被视为直接称呼。"""
+    features = extract_features(
+        unread_messages=[_message("小蝶结这个道具怎么获得")],
+        bot_id="bot-id",
+        bot_nickname="小蝶",
+        bot_message_ids=set(),
+        participation=SimpleNamespace(last_reply_at=0.0, consecutive_silence=0),
+        semantic_continuity=0.0,
+        bot_history_continuity=0.0,
+        participation_window_seconds=60.0,
+        rhythm_cooldown_seconds=30.0,
+        now=100.0,
+    )
+
+    assert features.direct_address == 0.0
 
 
 def test_other_member_mention_does_not_trigger_hard_reply() -> None:
