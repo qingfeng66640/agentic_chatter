@@ -171,6 +171,29 @@ def test_nickname_alone_does_not_use_hard_rule() -> None:
     assert decision is None
 
 
+def test_personality_alias_is_direct_address() -> None:
+    """人格配置别名应与聊天流显示名同样参与本地称呼判断。"""
+    features = extract_features(
+        unread_messages=[_message("小蝶！")],
+        bot_id="bot-id",
+        bot_nickname=("我是打工蝶😭", "小蝶", "蝶宝"),
+        bot_message_ids=set(),
+        participation=SimpleNamespace(last_reply_at=0.0, consecutive_silence=0),
+        semantic_continuity=0.0,
+        bot_history_continuity=0.0,
+        participation_window_seconds=60.0,
+        rhythm_cooldown_seconds=30.0,
+        now=100.0,
+    )
+
+    decision = score_features(features, _decision_config())
+
+    assert features.direct_address == 1.0
+    assert decision is not None
+    assert decision.action == DecisionAction.RESPOND
+    assert decision.source == DecisionSource.LOCAL
+
+
 def test_discussing_nickname_is_not_direct_address() -> None:
     """正文讨论 Bot 名称时不能获得直接称呼信号。"""
     features = extract_features(
