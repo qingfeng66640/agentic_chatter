@@ -472,6 +472,15 @@ class AgenticChatter(BaseChatter):
                 return
 
         score, lower, upper = interval_summary(features, decision_config)
+        logger.debug(
+            f"[{self.stream_id[:8]}] 本地判断未达直通条件，交由子决策模型："
+            f"评分={score:.3f}，区间=[{lower:.3f}, {upper:.3f}]，"
+            f"回复下界={float(decision_config.local_reply_lower_bound):.3f}，"
+            f"静默上界={float(decision_config.local_silent_upper_bound):.3f}，"
+            f"当前话题相关度={features.semantic_continuity:.3f}，"
+            f"我的历史相关度={features.bot_history_continuity:.3f}，"
+            f"本地原因={features.reasons}"
+        )
         template = get_prompt_manager().get_template(
             "agentic_chatter_reply_decision"
         )
