@@ -98,10 +98,68 @@ def test_nickname_request_is_locally_allowed() -> None:
     assert decision is not None
     assert decision.action == DecisionAction.RESPOND
     assert decision.source == DecisionSource.LOCAL
+    assert "contextual_nickname_address" in decision.reasons
 
 
-def test_nickname_alone_is_not_a_direct_reply() -> None:
-    """单独出现昵称时仍受低信息和区间判断约束。"""
+def test_standalone_nickname_is_locally_allowed() -> None:
+    """独立昵称召唤不应因低信息信号进入灰区。"""
+    features = extract_features(
+        unread_messages=[_message("小蝶")],
+        bot_id="bot-id",
+        bot_nickname="小蝶",
+        bot_message_ids=set(),
+        participation=SimpleNamespace(last_reply_at=0.0, consecutive_silence=0),
+        semantic_continuity=0.0,
+        bot_history_continuity=0.0,
+        participation_window_seconds=60.0,
+        rhythm_cooldown_seconds=30.0,
+        now=100.0,
+    )
+
+    decision = score_features(features, _decision_config())
+
+    assert features.direct_address == 1.0
+    assert features.low_information == 1.0
+    assert decision is not None
+    assert decision.action == DecisionAction.RESPOND
+    assert decision.source == DecisionSource.LOCAL
+
+
+def test_nickname_punctuation_is_locally_allowed() -> None:
+    """独立昵称加标点也应视为召唤。"""
+    features = extract_features(
+        unread_messages=[_message("小蝶！")],
+        bot_id="bot-id",
+        bot_nickname="小蝶",
+        bot_message_ids=set(),
+        participation=SimpleNamespace(last_reply_at=0.0, consecutive_silence=0),
+        semantic_continuity=0.0,
+        bot_history_continuity=0.0,
+        participation_window_seconds=60.0,
+        rhythm_cooldown_seconds=30.0,
+        now=100.0,
+    )
+
+    decision = score_features(features, _decision_config())
+
+    assert decision is not None
+    assert decision.action == DecisionAction.RESPOND
+
+
+def test_nickname_local_reply_respects_negative_guards() -> None:
+    """明确负向上下文不能被昵称召唤组合直接放行。"""
+    for feature in (
+        DecisionFeatures(direct_address=1.0, directed_elsewhere=1.0),
+        DecisionFeatures(direct_address=1.0, topic_closure=1.0),
+        DecisionFeatures(direct_address=1.0, rhythm_cooldown=1.0),
+        DecisionFeatures(direct_address=1.0, interruption_cost=1.0),
+    ):
+        decision = score_features(feature, _decision_config())
+        assert decision is None or decision.action == DecisionAction.SILENT
+
+
+def test_nickname_alone_does_not_use_hard_rule() -> None:
+    """单独昵称仍不绕过硬规则层。"""
     decision = hard_rule_decision(
         is_private=False,
         bot_id="bot-id",
