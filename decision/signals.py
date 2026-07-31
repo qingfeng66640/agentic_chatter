@@ -54,6 +54,19 @@ def _bot_was_mentioned(message: Any, bot_id: str) -> bool:
     return bool(bot_id and bot_id in mentioned_ids)
 
 
+def _nickname_addresses_bot(text: str, bot_nickname: str) -> bool:
+    """判断文本是否以独立昵称形式直接称呼 Bot。"""
+    if not bot_nickname:
+        return False
+    normalized = text.lstrip()
+    for prefix in (bot_nickname, f"@{bot_nickname}", f"＠{bot_nickname}"):
+        if not normalized.startswith(prefix):
+            continue
+        suffix = normalized[len(prefix):]
+        return not suffix or suffix[0].isspace() or suffix[0] in "，。！？、：:;；,.!?"
+    return False
+
+
 def hard_rule_decision(
     *,
     is_private: bool,
@@ -93,16 +106,6 @@ def hard_rule_decision(
                 DecisionSource.HARD_RULE,
                 reasons=["mention_bot"],
             )
-        if bot_nickname and (
-            text.startswith(bot_nickname)
-            or f"@{bot_nickname}" in text
-            or f"＠{bot_nickname}" in text
-        ):
-            return ReplyDecision(
-                DecisionAction.RESPOND,
-                DecisionSource.HARD_RULE,
-                reasons=["nickname_address"],
-            )
     return None
 
 
@@ -125,10 +128,8 @@ def extract_features(
     joined = "\n".join(texts)
     features = DecisionFeatures()
 
-    if bot_nickname and any(
-        text.startswith(bot_nickname)
-        or f"@{bot_nickname}" in text
-        or f"＠{bot_nickname}" in text
+    if any(
+        _nickname_addresses_bot(text, bot_nickname)
         for text in texts
     ):
         features.direct_address = 1.0

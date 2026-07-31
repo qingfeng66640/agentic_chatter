@@ -153,6 +153,25 @@ def _combined_decision(
         )
 
     if (
+        features.direct_address >= 1.0
+        and (
+            features.question_or_request >= 1.0
+            or features.contribution_value >= 0.20
+        )
+        and features.low_information <= 0.0
+        and no_bot_entry
+    ):
+        return _local_decision(
+            DecisionAction.RESPOND,
+            "contextual_nickname_address",
+            features,
+            score,
+            lower,
+            upper,
+            confidence,
+        )
+
+    if (
         features.question_or_request >= 1.0
         and (
             features.semantic_continuity >= 0.60
