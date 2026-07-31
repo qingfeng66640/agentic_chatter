@@ -33,6 +33,7 @@ from src.core.components.base.chatter import (
     WaitResumeEvent,
 )
 from src.core.components.types import ChatType
+from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
 from src.kernel.llm import LLMPayload, ROLE, Text, ToolRegistry
 
@@ -343,6 +344,19 @@ class AgenticChatter(BaseChatter):
         history_messages = list(chat_stream.context.history_messages)
         bot_id = str(getattr(chat_stream, "bot_id", "") or "")
         bot_nickname = str(getattr(chat_stream, "bot_nickname", "") or "")
+        nicknames = {bot_nickname}
+        try:
+            personality = get_core_config().personality
+            nicknames.add(str(getattr(personality, "nickname", "") or ""))
+            nicknames.update(
+                str(alias)
+                for alias in getattr(personality, "alias_names", []) or []
+            )
+        except RuntimeError:
+            pass
+        bot_nicknames = tuple(
+            nickname.strip() for nickname in nicknames if nickname.strip()
+        )
         bot_messages = [
             message
             for message in history_messages
@@ -357,7 +371,7 @@ class AgenticChatter(BaseChatter):
         hard_decision = hard_rule_decision(
             is_private=is_private,
             bot_id=bot_id,
-            bot_nickname=bot_nickname,
+            bot_nickname=bot_nicknames,
             unread_messages=unread_msgs,
             bot_message_ids=bot_message_ids,
         )
@@ -420,7 +434,7 @@ class AgenticChatter(BaseChatter):
         features = extract_features(
             unread_messages=unread_msgs,
             bot_id=bot_id,
-            bot_nickname=bot_nickname,
+            bot_nickname=bot_nicknames,
             bot_message_ids=bot_message_ids,
             participation=participation,
             semantic_continuity=None,
@@ -479,6 +493,7 @@ class AgenticChatter(BaseChatter):
             f"静默上界={float(decision_config.local_silent_upper_bound):.3f}，"
             f"当前话题相关度={features.semantic_continuity:.3f}，"
             f"我的历史相关度={features.bot_history_continuity:.3f}，"
+            f"直接称呼={features.direct_address:.0f}，"
             f"本地原因={features.reasons}"
         )
         template = get_prompt_manager().get_template(

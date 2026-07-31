@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 import re
 import time
 from typing import Any
@@ -54,16 +54,30 @@ def _bot_was_mentioned(message: Any, bot_id: str) -> bool:
     return bool(bot_id and bot_id in mentioned_ids)
 
 
-def _nickname_addresses_bot(text: str, bot_nickname: str) -> bool:
+def _normalize_nicknames(bot_nickname: str | Collection[str]) -> tuple[str, ...]:
+    """规范化昵称候选并按长度降序排列。"""
+    values = [bot_nickname] if isinstance(bot_nickname, str) else bot_nickname
+    return tuple(
+        sorted(
+            {str(value).strip() for value in values if str(value).strip()},
+            key=len,
+            reverse=True,
+        )
+    )
+
+
+def _nickname_addresses_bot(
+    text: str,
+    bot_nickname: str | Collection[str],
+) -> bool:
     """判断文本是否以独立昵称形式直接称呼 Bot。"""
-    if not bot_nickname:
-        return False
     normalized = text.lstrip()
-    for prefix in (bot_nickname, f"@{bot_nickname}", f"＠{bot_nickname}"):
-        if not normalized.startswith(prefix):
-            continue
-        suffix = normalized[len(prefix):]
-        return not suffix or suffix[0].isspace() or suffix[0] in "，。！？、：:;；,.!?"
+    for nickname in _normalize_nicknames(bot_nickname):
+        for prefix in (nickname, f"@{nickname}", f"＠{nickname}"):
+            if not normalized.startswith(prefix):
+                continue
+            suffix = normalized[len(prefix):]
+            return not suffix or suffix[0].isspace() or suffix[0] in "，。！？、：:;；,.!?"
     return False
 
 
@@ -71,7 +85,7 @@ def hard_rule_decision(
     *,
     is_private: bool,
     bot_id: str,
-    bot_nickname: str,
+    bot_nickname: str | Collection[str],
     unread_messages: list[Any],
     bot_message_ids: set[str],
 ) -> ReplyDecision | None:
@@ -113,7 +127,7 @@ def extract_features(
     *,
     unread_messages: list[Any],
     bot_id: str,
-    bot_nickname: str,
+    bot_nickname: str | Collection[str],
     bot_message_ids: set[str],
     participation: ParticipationState,
     semantic_continuity: float | None,
