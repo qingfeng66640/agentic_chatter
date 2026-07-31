@@ -127,73 +127,306 @@ class AgenticChatterConfig(BaseConfig):
 
     @config_section("decision", title="回复决策", tag="ai")
     class DecisionSection(SectionBase):
-        """群聊是否自然介入的分层决策配置。"""
+        """群聊自然介入的分层决策配置。
+
+        决策顺序：私聊、可靠回复和直接召唤先由硬规则处理；其余群聊先提取
+        本地信号与 embedding 连续性，计算线性评分及其置信区间。区间明确越过
+        回复或静默边界时直接决定；两条边界之间属于灰区，才交给 sub_actor。
+        sub_actor 不可用时才按 fallback_mode 兜底。
+        """
 
         enabled: bool = Field(
             default=True,
-            description="是否在 act 前判断本轮是否应该回复；关闭后保持原有全量回复流程",
+            description=(
+                "是否在 act 前执行回复决策。关闭后跳过本地判断和 sub_actor，"
+                "保持原有的全量回复流程；适合临时排查决策行为。"
+            ),
             label="启用回复决策",
             tag="ai",
         )
         local_gate_enabled: bool = Field(
             default=True,
             description=(
-                "是否启用本地规则、embedding 与置信区间初判。关闭后除私聊和直接召唤外，"
-                "群聊全部交给 sub_actor 判断"
+                "是否启用本地规则、embedding 和置信区间初判。关闭后，除私聊和"
+                "直接召唤等硬规则外，普通群聊不做本地直通，全部交给 sub_actor；"
+                "这不会关闭回复功能。"
             ),
             label="启用本地初判",
             tag="ai",
         )
         model_task: str = Field(
             default="sub_actor",
-            description="灰区回复决策使用的模型任务名",
+            description=(
+                "灰区回复决策使用的模型任务名，对应 config/model.toml 中的 task key。"
+                "仅本地无法明确回复或静默时调用。"
+            ),
             label="决策模型任务",
             tag="ai",
         )
         embedding_task: str = Field(
             default="embedding",
-            description="每轮群聊语义相关性计算使用的 embedding 任务名",
+            description=(
+                "计算当前消息与近期话题、Bot 历史发言连续性时使用的 embedding 任务名。"
+                "该相关度只是本地信号之一，不能单独保证回复。"
+            ),
             label="Embedding 任务",
             tag="ai",
         )
-        max_input_tokens: int = Field(default=1500, description="决策模型总输入 token 软上限", label="决策输入上限", tag="performance")
-        max_unread_tokens: int = Field(default=700, description="决策输入中未读消息 token 软上限", label="未读输入上限", tag="performance")
-        history_message_limit: int = Field(default=10, description="决策最多读取的近期历史消息数", label="历史消息上限", tag="performance")
-        semantic_candidate_limit: int = Field(default=4, description="每类 embedding 语义候选的最大数量", label="语义候选上限", tag="performance")
-        semantic_candidate_max_chars: int = Field(default=360, description="单个 embedding 候选的字符上限", label="语义候选字数", tag="performance")
-        local_reply_lower_bound: float = Field(default=0.30, description="本地回复置信区间下界达到该值时直接进入回复流程", label="回复直通边界", tag="ai")
-        local_silent_upper_bound: float = Field(default=-0.25, description="本地静默置信区间上界低于该值时直接暂不回复", label="静默直通边界", tag="ai")
-        base_uncertainty: float = Field(default=0.12, description="本地判断的基础不确定度；语义不可用时会额外增加不确定度", label="基础不确定度", tag="ai")
-        gray_zone_randomness: float = Field(default=0.0, description="只作用于灰区附近的随机扰动；默认关闭以保证判断可复现", label="灰区随机扰动", tag="ai")
-        fallback_mode: str = Field(default="contextual", description="sub_actor 失败回退：contextual、fail_open 或 fail_closed", label="失败回退", tag="ai")
+        max_input_tokens: int = Field(
+            default=1500,
+            description=(
+                "决策模型总输入 token 的软上限，包含未读消息、历史和本地信号。"
+                "调大可保留更多上下文，但会增加模型成本和延迟；不改变评分公式。"
+            ),
+            label="决策输入上限",
+            tag="performance",
+        )
+        max_unread_tokens: int = Field(
+            default=700,
+            description=(
+                "决策输入中未读消息部分的 token 软上限。调大更利于理解长消息批次，"
+                "调小可限制成本；其余上下文预算仍由总输入上限约束。"
+            ),
+            label="未读输入上限",
+            tag="performance",
+        )
+        history_message_limit: int = Field(
+            default=10,
+            description=(
+                "决策最多读取的近期历史消息条数，用于判断话题和 Bot 发言连续性。"
+                "调大可参考更长上下文，但会增加输入量和延迟。"
+            ),
+            label="历史消息上限",
+            tag="performance",
+        )
+        semantic_candidate_limit: int = Field(
+            default=4,
+            description=(
+                "每类 embedding 语义候选的最大数量，分别从近期话题和 Bot 历史中选取。"
+                "调大可扩大语义参考范围，但会增加 embedding 输入量。"
+            ),
+            label="语义候选上限",
+            tag="performance",
+        )
+        semantic_candidate_max_chars: int = Field(
+            default=360,
+            description=(
+                "单个 embedding 语义候选的字符上限。调大可保留更完整的长消息，"
+                "调小可减少 embedding 成本；不会改变候选数量。"
+            ),
+            label="语义候选字数",
+            tag="performance",
+        )
+        local_reply_lower_bound: float = Field(
+            default=0.30,
+            description=(
+                "本地直接回复边界。实际比较的是 lower_bound = score - uncertainty，"
+                "而非原始 score；当下界大于等于此值时直接回复，不调用 sub_actor。"
+                "调高更谨慎、灰区更多；调低更积极、误插话风险更高。"
+            ),
+            label="回复直通边界",
+            tag="ai",
+        )
+        local_silent_upper_bound: float = Field(
+            default=-0.25,
+            description=(
+                "本地直接静默边界。实际比较的是 upper_bound = score + uncertainty，"
+                "当上界小于等于此值时直接暂不回复。两条直通边界之间属于灰区，"
+                "会交给 sub_actor；调高更容易本地静默，调低则更常进入灰区。"
+            ),
+            label="静默直通边界",
+            tag="ai",
+        )
+        base_uncertainty: float = Field(
+            default=0.12,
+            description=(
+                "置信区间的基础半径：lower_bound = score - uncertainty，"
+                "upper_bound = score + uncertainty。数值越大区间越宽，本地越难确定，"
+                "更多消息进入 sub_actor；语义不可用或信号冲突时还会额外增加不确定度。"
+            ),
+            label="基础不确定度",
+            tag="ai",
+        )
+        gray_zone_randomness: float = Field(
+            default=0.0,
+            description=(
+                "给本地评分加入的有限随机扰动，仅用于灰区附近的边界实验。默认 0 表示"
+                "相同输入可复现；调大后边界消息可能得到不同结果，不建议稳定生产环境开启。"
+            ),
+            label="灰区随机扰动",
+            tag="ai",
+        )
+        fallback_mode: str = Field(
+            default="contextual",
+            description=(
+                "sub_actor 调用失败时的兜底策略，不参与正常主路径：contextual 按当前"
+                "上下文倾向回复，fail_open 直接回复，fail_closed 直接静默。"
+            ),
+            label="失败回退",
+            tag="ai",
+        )
         enable_contextual_fallback_recent_reply_suppression: bool = Field(
             default=True,
-            description="近期已成功回复时，抑制 sub_actor 失败后的 contextual 自动回复；不影响私聊、可靠回复和结构化 @",
+            description=(
+                "近期已成功回复时，是否抑制 sub_actor 失败后的 contextual 自动回复，"
+                "避免故障回退时重复插话。不影响私聊、可靠回复和结构化 @ 等硬规则。"
+            ),
             label="启用 fallback 近期回复抑制",
             tag="ai",
         )
         contextual_fallback_recent_reply_window_seconds: float = Field(
             default=300.0,
-            description="contextual fallback 的近期成功回复抑制窗口（秒），设为 0 可关闭",
+            description=(
+                "contextual fallback 的近期成功回复抑制窗口（秒）。窗口内 sub_actor"
+                "失败会优先静默以避免重复插话；设为 0 可关闭该窗口。"
+            ),
             label="fallback 回复抑制窗口",
             tag="ai",
         )
-        participation_window_seconds: float = Field(default=600.0, description="近期参与惯性的衰减窗口", label="参与惯性窗口", tag="ai")
-        rhythm_cooldown_seconds: float = Field(default=35.0, description="bot 刚回复后的群聊节奏冷却", label="节奏冷却", tag="ai")
-        state_ttl_minutes: float = Field(default=180.0, description="流参与状态的过期时间", label="状态过期时间", tag="performance")
-        max_state_streams: int = Field(default=256, description="内存中最多保留的流参与状态数量", label="状态流上限", tag="performance")
-        weight_direct_address: float = Field(default=0.30, description="弱受话人信号权重", label="受话人权重", tag="ai")
-        weight_semantic_continuity: float = Field(default=0.26, description="当前话题 embedding 连续性权重", label="话题相关权重", tag="ai")
-        weight_bot_history_continuity: float = Field(default=0.18, description="与 bot 历史发言相关性的权重", label="历史相关权重", tag="ai")
-        weight_participation_momentum: float = Field(default=0.08, description="bot 近期参与惯性权重", label="参与惯性权重", tag="ai")
-        weight_question_or_request: float = Field(default=0.08, description="问题或请求形态权重", label="问题请求权重", tag="ai")
-        weight_contribution_value: float = Field(default=0.10, description="消息信息量与可贡献性权重", label="贡献价值权重", tag="ai")
-        weight_directed_elsewhere: float = Field(default=0.34, description="明确指向其他人的负向权重", label="他人定向权重", tag="ai")
-        weight_interruption_cost: float = Field(default=0.24, description="多人快速交谈的打断代价权重", label="打断代价权重", tag="ai")
-        weight_topic_closure: float = Field(default=0.24, description="话题闭合的负向权重", label="话题闭合权重", tag="ai")
-        weight_rhythm_cooldown: float = Field(default=0.20, description="刚回复后的节奏冷却权重", label="节奏冷却权重", tag="ai")
-        weight_silence_momentum: float = Field(default=0.04, description="连续静默惯性的负向权重", label="静默惯性权重", tag="ai")
-        weight_low_information: float = Field(default=0.10, description="低信息短消息的负向权重", label="低信息权重", tag="ai")
+        participation_window_seconds: float = Field(
+            default=600.0,
+            description=(
+                "近期参与惯性的衰减窗口（秒）。窗口越长，Bot 过去参与当前流的记录"
+                "保留越久；调大更易延续已参与话题，调小则更快回到中性状态。"
+            ),
+            label="参与惯性窗口",
+            tag="ai",
+        )
+        rhythm_cooldown_seconds: float = Field(
+            default=35.0,
+            description=(
+                "Bot 成功回复后的群聊节奏冷却时间（秒）。冷却内会提高重复插话的代价；"
+                "调大更克制，调小更容易连续参与。"
+            ),
+            label="节奏冷却",
+            tag="ai",
+        )
+        state_ttl_minutes: float = Field(
+            default=180.0,
+            description=(
+                "单个聊天流参与状态在无活动后保留的最长时间（分钟）。过期后会忘记"
+                "该流的近期回复与静默惯性；调大更连续，但会占用更多内存。"
+            ),
+            label="状态过期时间",
+            tag="performance",
+        )
+        max_state_streams: int = Field(
+            default=256,
+            description=(
+                "内存中最多保留参与状态的聊天流数量。超过上限时会淘汰较旧状态；"
+                "调大可覆盖更多活跃群，但会增加内存占用。"
+            ),
+            label="状态流上限",
+            tag="performance",
+        )
+        weight_direct_address: float = Field(
+            default=0.30,
+            description=(
+                "弱受话人信号的正向加分权重，例如消息看起来在向 Bot 提问但未满足硬规则。"
+                "权重越大，受话人信号越容易推动回复；不应单独作为插话依据。"
+            ),
+            label="受话人权重",
+            tag="ai",
+        )
+        weight_semantic_continuity: float = Field(
+            default=0.26,
+            description=(
+                "当前消息与近期话题 embedding 连续性的正向加分权重。权重越大，"
+                "承接当前话题越容易回复；语义相关本身不能单独保证回复。"
+            ),
+            label="话题相关权重",
+            tag="ai",
+        )
+        weight_bot_history_continuity: float = Field(
+            default=0.18,
+            description=(
+                "当前消息与 Bot 近期发言 embedding 连续性的正向加分权重。调大可"
+                "增强对 Bot 话题后续追问的响应；仍会受他人定向、冷却和打断成本保护。"
+            ),
+            label="历史相关权重",
+            tag="ai",
+        )
+        weight_participation_momentum: float = Field(
+            default=0.08,
+            description=(
+                "Bot 近期已参与当前流的正向加分权重。调大更倾向延续已参与对话，"
+                "调小则降低刷存在感风险。"
+            ),
+            label="参与惯性权重",
+            tag="ai",
+        )
+        weight_question_or_request: float = Field(
+            default=0.08,
+            description=(
+                "消息呈现问题或请求形态时的正向加分权重。调大更愿意响应提问；"
+                "泛问题、面向其他成员的问题仍可能进入灰区或静默。"
+            ),
+            label="问题请求权重",
+            tag="ai",
+        )
+        weight_contribution_value: float = Field(
+            default=0.10,
+            description=(
+                "消息信息量及 Bot 可提供有效贡献时的正向加分权重。调大更偏好有内容的"
+                "后续讨论；它需要与连续性等信号结合，不能单独触发回复。"
+            ),
+            label="贡献价值权重",
+            tag="ai",
+        )
+        weight_directed_elsewhere: float = Field(
+            default=0.34,
+            description=(
+                "消息明确面向其他成员时的惩罚强度。配置填写正数，代码会自动取负加入评分；"
+                "调大更不易打断他人对话。"
+            ),
+            label="他人定向权重",
+            tag="ai",
+        )
+        weight_interruption_cost: float = Field(
+            default=0.24,
+            description=(
+                "多人快速交谈时的打断代价惩罚强度。配置填写正数，代码会自动取负；"
+                "调大后 Bot 会更少插入节奏紧密、没有明确入口的对话。"
+            ),
+            label="打断代价权重",
+            tag="ai",
+        )
+        weight_topic_closure: float = Field(
+            default=0.24,
+            description=(
+                "话题已收尾时的惩罚强度。配置填写正数，代码会自动取负；调大后"
+                "更倾向让已结束的话题自然结束，减少无意义补话。"
+            ),
+            label="话题闭合权重",
+            tag="ai",
+        )
+        weight_rhythm_cooldown: float = Field(
+            default=0.20,
+            description=(
+                "刚回复后的节奏冷却惩罚强度。配置填写正数，代码会自动取负；调大后"
+                "冷却期内更克制，调小则更容易连续回复。"
+            ),
+            label="节奏冷却权重",
+            tag="ai",
+        )
+        weight_silence_momentum: float = Field(
+            default=0.04,
+            description=(
+                "连续静默后的轻微惩罚强度。配置填写正数，代码会自动取负；调大后"
+                "更保持沉默惯性，调小则更容易重新参与。"
+            ),
+            label="静默惯性权重",
+            tag="ai",
+        )
+        weight_low_information: float = Field(
+            default=0.10,
+            description=(
+                "低信息短消息的惩罚强度。配置填写正数，代码会自动取负；调大后"
+                "对“嗯”“好的”等缺少新信息的消息更倾向静默。"
+            ),
+            label="低信息权重",
+            tag="ai",
+        )
 
     @config_section("tools", title="工具策略", tag="ai")
     class ToolsSection(SectionBase):
