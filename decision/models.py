@@ -96,6 +96,7 @@ _REASON_TEXT = {
     "fast_flow_no_clear_entry": "多人快速对话中没有明确介入入口",
     "cooldown_low_value": "刚回复过且当前消息价值较低",
     "contextual_question_for_bot": "问题与当前话题或我的发言连续",
+    "contextual_nickname_address": "明确称呼了我，且当前没有明显冲突信号",
     "strong_contextual_followup": "高连续性且内容具有可贡献信息",
     "local_score_reply": "本地评分达到回复边界",
     "local_score_silent": "本地评分达到静默边界",
