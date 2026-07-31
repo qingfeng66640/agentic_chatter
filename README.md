@@ -1,6 +1,17 @@
 # Agentic Chatter
 
-`Agentic Chatter` 是 Neo-MoFox 的 Agent 式聊天器插件。它将一轮回复拆分为可编排的处理阶段，并在群聊中先判断“是否应当参与”，再决定如何生成、执行和收尾回复，避免 Bot 对每条消息机械接话。
+`Agentic Chatter` 是 Neo-MoFox 的 Agent 式聊天器插件（v0.1.0）。它将一轮回复拆分为可编排的处理阶段，并在群聊中先判断“是否应当参与”，再决定如何生成、执行和收尾回复，避免 Bot 对每条消息机械接话。
+
+- **维护者**：qf
+- **仓库**：`qingfeng66640/agentic_chatter`
+- **最低核心版本**：`1.2.0-alpha`
+- **许可证**：GPL-3.0，详见 [LICENSE](LICENSE)
+
+## 安装与启用
+
+将插件目录放入 Neo-MoFox 的插件目录，确保 `manifest.json` 与 `plugin.py` 位于插件根目录。启动 Neo-MoFox 后，插件管理器会按 manifest 加载 `agentic_chatter`；首次加载后会生成或更新插件配置文件。
+
+插件不包含平台适配器，必须先配置并启用对应平台的 Adapter。插件也依赖 Neo-MoFox 核心提供的模型任务、上下文、工具和消息发送能力，不需要额外的 Python 第三方依赖。
 
 ## 功能概览
 
@@ -16,46 +27,7 @@
 - **跨流全局心智**：在受控长度内共享情绪、各聊天流摘要和近期要闻，使 Bot 在不同会话中的人格与近期经历保持连贯。
 - **可解释日志**：记录决策来源、评分、置信区间与原因，便于定位为何回复、静默、进入 `sub_actor` 或触发故障回退。
 
-## 处理流程
-
-```text
-新消息
-  │
-  ├─ perceive（可选）：概括当前情境与话题
-  ├─ decide：判断是否自然参与
-  ├─ plan（可选）：形成行动意图
-  ├─ act：生成文本、调用工具或执行 Action
-  └─ reflect（可选）：更新情绪与跨流摘要
-```
-
-其中 `act` 是必需阶段；其余内置阶段可单独启用或关闭。其他插件也可以通过 `PipelineService` 注册自定义阶段，并把阶段名加入 `pipeline.stage_order`。
-
-## 回复决策
-
-回复决策只在启用 `decision.enabled` 时生效，优先级如下：
-
-1. **硬规则**
-   - 私聊；
-   - 回复 Bot 发出的消息；
-   - 平台明确确认当前 Bot 被 `@`。
-
-2. **本地决策**
-   - 提取本地信号并计算评分与置信区间；
-   - 明确的组合规则可直接回复或静默；
-   - 独立昵称召唤在没有“面向他人、话题收尾、冷却、多人快速对话”等冲突信号时会本地回复。
-
-3. **`sub_actor` 决策**
-   - 评分区间仍处于灰区时，将近期消息、历史和本地信号交给专用模型进一步判断。
-
-4. **故障回退**
-   - `sub_actor` 无法调用、无有效输出或返回格式非法时按 `fallback_mode` 处理：
-     - `contextual`：保留明显值得响应的上下文机会；近期已经回复时可抑制重复插话；
-     - `fail_open`：默认回复；
-     - `fail_closed`：默认静默。
-
-> 本地评分不是“回复概率”。它只是衡量当前 Bot 是否适合介入；评分区间越宽，说明本地越不确定，越可能进入 `sub_actor`。
-
-## 配置说明
+## 配置
 
 插件配置由 `AgenticChatterConfig` 提供，主要分为以下部分：
 
@@ -77,16 +49,65 @@ nickname = "Bot 本名"
 alias_names = ["别名一", "别名二"]
 ```
 
+## 使用与回复决策
+
+插件不提供用户命令；启用后由聊天器根据收到的消息自动参与。处理流程如下：
+
+```text
+新消息
+  │
+  ├─ perceive（可选）：概括当前情境与话题
+  ├─ decide：判断是否自然参与
+  ├─ plan（可选）：形成行动意图
+  ├─ act：生成文本、调用工具或执行 Action
+  └─ reflect（可选）：更新情绪与跨流摘要
+```
+
+其中 `act` 是必需阶段；其余内置阶段可单独启用或关闭。其他插件也可以通过 `PipelineService` 注册自定义阶段，并把阶段名加入 `pipeline.stage_order`。
+
+回复决策只在启用 `decision.enabled` 时生效，优先级如下：
+
+1. **硬规则**：私聊、回复 Bot 发出的消息、平台明确确认当前 Bot 被 `@`。
+2. **本地决策**：提取本地信号并计算评分与置信区间；明确组合规则可直接回复或静默。
+3. **`sub_actor` 决策**：评分区间仍处于灰区时，将近期消息、历史和本地信号交给专用模型进一步判断。
+4. **故障回退**：`sub_actor` 无法调用、无有效输出或返回格式非法时按 `fallback_mode` 处理：
+   - `contextual`：保留明显值得响应的上下文机会；近期已经回复时可抑制重复插话；
+   - `fail_open`：默认回复；
+   - `fail_closed`：默认静默。
+
+本地评分不是“回复概率”，而是衡量当前 Bot 是否适合介入；评分区间越宽，说明本地越不确定，越可能进入 `sub_actor`。
+
 ## 对外提供的组件
 
 插件加载后会注册以下组件：
 
-- `AgenticChatter`：主聊天器；
-- `PipelineService`：供其他插件注册自定义管线阶段、读写全局心智；
-- `ExploreToolsTool`：供模型按需展开折叠工具；
-- `SayAction`：发送文本消息；
-- `EndTurnAction`：结束当前 Agent 回合；
-- `StopConversationAction`：停止当前会话处理。
+- `agentic_chatter:chatter:agentic`：`AgenticChatter`，主聊天器；
+- `agentic_chatter:service:pipeline`：`PipelineService`，供其他插件注册自定义管线阶段、读写全局心智；
+- `agentic_chatter:tool:explore_tools`：`ExploreToolsTool`，供模型按需展开折叠工具；
+- `agentic_chatter:action:say`：`SayAction`，发送文本消息；
+- `agentic_chatter:action:end_turn`：`EndTurnAction`，结束当前 Agent 回合；
+- `agentic_chatter:action:stop_conversation`：`StopConversationAction`，停止当前会话处理。
+
+## 数据边界与限制
+
+- 插件会读取核心人格、当前聊天上下文、历史消息、工具信息和模型响应，用于生成回复和参与决策。
+- 跨流全局心智会持久化插件配置允许范围内的情绪、摘要和近期要闻；具体保留数量与长度由 `[global_mind]` 配置节限制。
+- 插件可能调用已注册的其他插件工具或 Action；这些副作用由被调用组件自身的权限和实现决定。
+- 插件不负责平台连接、账号认证或密钥管理；平台凭据应由核心配置和对应 Adapter 管理。
+- 这是 Agent 式生成插件，模型输出质量、可用性和平台能力会影响最终回复；建议先在测试环境验证配置。
+
+## 开发与验证
+
+在 Neo-MoFox 项目根目录执行：
+
+```bash
+ruff check plugins/agentic_chatter/
+mpdt plugin check plugins/agentic_chatter --level warning
+python -X utf8 -m pytest plugins/agentic_chatter/tests -q --no-cov -p no:randomly
+python -X utf8 "$SKILL_DIR/scripts/verify_plugin.py" plugins/agentic_chatter
+```
+
+`verify_plugin.py` 用于验证框架真实加载、组件注册和卸载；`$SKILL_DIR` 为本机 `mofox-plugin-workflow` Skill 的安装目录。
 
 ## 日志排查
 
@@ -107,14 +128,6 @@ alias_names = ["别名一", "别名二"]
 
 DEBUG 日志还会输出评分、置信区间、当前话题相关度、Bot 历史相关度、是否命中直接称呼以及内部原因码。若 INFO 日志显示“其他判断信号”，通常表示 `sub_actor` 返回了尚未被中文映射表收录的原因码；可在同轮 DEBUG 的“内部原因”中查看原始码。
 
-## 使用建议
+## 许可证与维护者
 
-- 普通群聊建议保持 `decision.enabled = true` 和 `local_gate_enabled = true`，让明确场景快速处理、模糊场景谨慎判断。
-- 不要仅为减少灰区而大幅降低 `local_reply_lower_bound`；这会增加 Bot 在无关对话中插话的概率。
-- 若希望更克制地处理决策模型故障，使用 `fallback_mode = "fail_closed"`；若希望保留问题和请求的响应机会，使用默认 `contextual`。
-- 工具很多时，优先配置 `always_visible` 与 `collapsed`，而不是无限制暴露全部工具。
-- 跨流全局心智应保持较小的字符与流数量上限，避免其他会话信息干扰当前对话。
-
-## 注意事项
-
-- 这只是个半成品，如遇到无法回复或消息混乱请不要使用😭
+本插件由 qf 维护，使用 GPL-3.0 许可证发布。仓库地址由市场发布参数指定为 `qingfeng66640/agentic_chatter`。
