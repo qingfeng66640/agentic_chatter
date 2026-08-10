@@ -82,7 +82,12 @@ from .tooling.explore import (
     consume_expansion,
     set_stream_catalog,
 )
-from .tooling.registry import build_encouragement_prompt, build_tool_layout
+from .tooling.registry import (
+    build_encouragement_prompt,
+    build_tool_layout,
+    is_blacklisted_component,
+    signature_matches,
+)
 
 if TYPE_CHECKING:
     from src.core.models.message import Message
@@ -587,9 +592,13 @@ class AgenticChatter(BaseChatter):
         usables = await self.modify_llm_usables(usables)  # type: ignore[arg-type]
 
         layout = self._build_layout(config, usables)
+        blacklist = [] if config is None else list(config.tools.blacklist)
         layout.exposed = [usable for usable in layout.exposed if usable is not ExploreToolsTool]
         explore_enabled = config is None or bool(config.tools.enable_explore_tools)
-        if explore_enabled:
+        explore_blacklisted = is_blacklisted_component(ExploreToolsTool, blacklist) or signature_matches(
+            "agentic_chatter:tool:explore_tools", blacklist
+        )
+        if explore_enabled and not explore_blacklisted:
             layout.exposed.insert(0, ExploreToolsTool)
             set_stream_catalog(
                 self.stream_id,
@@ -651,14 +660,19 @@ class AgenticChatter(BaseChatter):
                     normal_calls, response, state, registry, unread_msgs
                 )
                 expanded = consume_expansion(self.stream_id)
-                if expanded:
-                    for usable_cls in expanded:
+                allowed_expanded = [
+                    usable_cls
+                    for usable_cls in expanded
+                    if not is_blacklisted_component(usable_cls, blacklist)
+                ]
+                if allowed_expanded:
+                    for usable_cls in allowed_expanded:
                         try:
                             registry.register(usable_cls)  # type: ignore[arg-type]
                         except Exception as exc:
                             logger.debug(f"展开工具注册失败，已跳过：{exc}")
                     response.add_payload(
-                        LLMPayload(ROLE.TOOL, expanded)  # type: ignore[arg-type]
+                        LLMPayload(ROLE.TOOL, allowed_expanded)  # type: ignore[arg-type]
                     )
 
             append_control_tool_results(response, calls)

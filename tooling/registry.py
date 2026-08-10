@@ -96,6 +96,11 @@ def _extract_signature(component_cls: type) -> str:
     return ""
 
 
+def is_blacklisted_component(component_cls: type, blacklist: list[str]) -> bool:
+    """判断组件类是否命中工具黑名单。"""
+    return bool(blacklist and signature_matches(_extract_signature(component_cls), blacklist))
+
+
 def _category_of(signature: str) -> str:
     """从组件签名推导折叠分类名。
 

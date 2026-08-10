@@ -9,6 +9,7 @@ from __future__ import annotations
 from ..tooling.registry import (
     build_encouragement_prompt,
     build_tool_layout,
+    is_blacklisted_component,
     signature_matches,
 )
 
@@ -58,6 +59,13 @@ def test_blacklist_hides_component_entirely() -> None:
 
     assert layout.exposed == []
     assert layout.collapsed_signatures == {}
+
+
+def test_is_blacklisted_component_uses_signature_patterns() -> None:
+    component = _make_component("bad_plugin:tool:danger", "danger")
+
+    assert is_blacklisted_component(component, ["bad_plugin:tool:*"])
+    assert not is_blacklisted_component(component, ["good_plugin:tool:*"])
 
 
 def test_always_visible_components_are_pinned_first() -> None:

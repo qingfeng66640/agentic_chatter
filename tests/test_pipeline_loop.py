@@ -16,6 +16,7 @@ from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall, ToolResult
 from src.kernel.llm.context_structure import validate_payload_sequence
 
 from ..actions.control import MAX_STOP_MINUTES
+from .. import chatter as chatter_module
 from ..chatter import AgenticChatter
 from ..pipeline.loop import (
     append_control_tool_results,
@@ -374,7 +375,7 @@ class _RequestReturningResponse:
 
 
 class _InterruptConfig:
-    """仅包含 act 阶段所需字段的假配置。"""
+    """关闭探索工具的 act 阶段配置替身。"""
 
     class Plugin:
         model_task = "actor"
@@ -384,10 +385,125 @@ class _InterruptConfig:
 
     class Tools:
         enable_explore_tools = False
+        blacklist: list[str] = []
 
     plugin = Plugin()
     pipeline = Pipeline()
     tools = Tools()
+
+
+class _ToolConfig:
+    """包含工具筛选配置的 act 阶段替身。"""
+
+    class Plugin:
+        model_task = "actor"
+
+    class Pipeline:
+        max_iterations = 1
+
+    class Tools:
+        enable_explore_tools = True
+        blacklist: list[str] = []
+
+    class Humanize:
+        max_duplicate_streak = 2
+
+    plugin = Plugin()
+    pipeline = Pipeline()
+    tools = Tools()
+    humanize = Humanize()
+
+
+class _AllowedExpandedTool:
+    """允许在探索后注册的假工具。"""
+
+    tool_name = "allowed"
+
+    @classmethod
+    def get_signature(cls) -> str:
+        """返回测试组件签名。"""
+        return "allowed_plugin:tool:allowed"
+
+    @classmethod
+    def to_schema(cls) -> dict[str, dict[str, str]]:
+        """返回工具 schema。"""
+        return {"function": {"name": "tool-allowed"}}
+
+
+class _BlockedExpandedTool:
+    """必须被黑名单阻止的假工具。"""
+
+    tool_name = "blocked"
+
+    @classmethod
+    def get_signature(cls) -> str:
+        """返回测试组件签名。"""
+        return "blocked_plugin:tool:blocked"
+
+    @classmethod
+    def to_schema(cls) -> dict[str, dict[str, str]]:
+        """返回工具 schema。"""
+        return {"function": {"name": "tool-blocked"}}
+
+
+async def test_stage_act_does_not_inject_blacklisted_explore_tool() -> None:
+    """探索工具本身命中黑名单时不得被重新注入。"""
+    config = _ToolConfig()
+    config.tools.blacklist = ["agentic_chatter:tool:explore_tools"]
+    response = _PayloadResponse([], [])
+    request = _RequestReturningResponse(response)
+    chatter = AgenticChatter(stream_id="blocked-explore", plugin=object())
+    chatter.get_llm_usables = AsyncMock(return_value=[])
+    chatter.modify_llm_usables = AsyncMock(return_value=[])
+    chatter._build_layout = lambda _config, _usables: SimpleNamespace(
+        exposed=[],
+        collapsed_categories={"platform": ["get_info"]},
+        collapsed_classes={"platform": [_AllowedExpandedTool]},
+    )
+    chatter._build_system_prompt = AsyncMock(return_value="system")
+    chatter._build_user_prompt = AsyncMock(return_value="user")
+    chatter.create_request = lambda **_kwargs: request
+    chatter._has_new_unreads = AsyncMock(return_value=False)
+    chatter._deliver_message = AsyncMock(return_value=(False, False))
+
+    state = TurnState(stream_id="blocked-explore")
+    await chatter._stage_act(config, object(), state, [])
+
+    tool_payload = next(payload for payload in request.payloads if payload.role == ROLE.TOOL)
+    assert tool_payload.content == []
+
+
+async def test_stage_act_filters_blacklisted_expanded_tools(monkeypatch) -> None:
+    """展开结果在注册前仍必须遵守黑名单。"""
+    config = _ToolConfig()
+    config.tools.blacklist = ["blocked_plugin:tool:*"]
+    calls = [ToolCall(id="call_expand", name="tool-explore_tools", args={})]
+    response = _PayloadResponse([], calls)
+    request = _RequestReturningResponse(response)
+    chatter = AgenticChatter(stream_id="expanded-filter", plugin=object())
+    chatter.get_llm_usables = AsyncMock(return_value=[])
+    chatter.modify_llm_usables = AsyncMock(return_value=[])
+    chatter._build_layout = lambda _config, _usables: SimpleNamespace(
+        exposed=[],
+        collapsed_categories={},
+        collapsed_classes={},
+    )
+    chatter._build_system_prompt = AsyncMock(return_value="system")
+    chatter._build_user_prompt = AsyncMock(return_value="user")
+    chatter.create_request = lambda **_kwargs: request
+    chatter._has_new_unreads = AsyncMock(return_value=False)
+    chatter._deliver_message = AsyncMock(return_value=(False, False))
+    chatter._execute_calls = AsyncMock(return_value=1)
+    monkeypatch.setattr(
+        chatter_module,
+        "consume_expansion",
+        lambda _stream_id: [_AllowedExpandedTool, _BlockedExpandedTool],
+    )
+
+    await chatter._stage_act(config, object(), TurnState(stream_id="expanded-filter"), [])
+
+    tool_payloads = [payload for payload in response.payloads if payload.role == ROLE.TOOL]
+    assert tool_payloads[-1].content == [_AllowedExpandedTool]
 
 
 # ----------------------------------------------------------------------
