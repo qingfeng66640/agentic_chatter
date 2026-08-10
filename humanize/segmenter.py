@@ -15,10 +15,34 @@ SENTENCE_ENDINGS = "。！？!?…\n"
 # 次选切分点，语义边界较弱
 SOFT_BREAKS = "，,、；;："
 
-# 模型有时会把内心独白混进正文，这些前缀会被剥离
-_THOUGHT_PREFIX = re.compile(
-    r"^\s*(?:\[?(?:内心|心理|思考|OS|os)[:：\]]?\s*|__SUSPEND__\s*)",
+# 模型有时会把内心独白混进正文，仅清理具备明确边界的标记块
+_TAGGED_THOUGHT_BLOCK = re.compile(
+    r"<\s*(?P<tag>think|analysis|reasoning)\b[^>]*>.*?</\s*(?P=tag)\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
 )
+_BRACKETED_THOUGHT_BLOCK = re.compile(
+    r"(?:\[(?P<square>思考|分析|推理|内心|心理活动|OS)\]"
+    r".*?\[/(?P=square)\]"
+    r"|【(?P<corner>思考|分析|推理|内心|心理活动|OS)】"
+    r".*?【/(?P=corner)】)",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_THOUGHT_TO_REPLY = re.compile(
+    r"^\s*(?:\[(?:思考|分析|推理|内心|心理活动|OS)\]"
+    r"|【(?:思考|分析|推理|内心|心理活动|OS)】"
+    r"|(?:思考|分析|推理)(?:过程)?\s*[:：])"
+    r".*?(?:\[(?:最终)?回复\]|【(?:最终)?回复】|(?:最终)?回复\s*[:：])\s*",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_SUSPEND_PREFIX = re.compile(r"^\s*__SUSPEND__\s*")
+
+
+@dataclass(frozen=True)
+class CleanReplyResult:
+    """回复清洗结果及被移除的明确思考内容。"""
+
+    text: str
+    removed_thoughts: tuple[str, ...] = ()
 
 
 @dataclass
@@ -34,26 +58,58 @@ class Segment:
     delay: float = 0.0
 
 
-def clean_reply_text(text: str) -> str:
-    """清洗模型输出，剥离不该发出去的内容。
-
-    Args:
-        text: 模型的原始文本输出。
-
-    Returns:
-        str: 清洗后的文本；无有效内容时返回空字符串。
-    """
+def clean_reply_text_with_metadata(text: str) -> CleanReplyResult:
+    """清洗模型输出并保留被移除的明确思考内容。"""
     cleaned = str(text or "").strip()
     if not cleaned:
+        return CleanReplyResult("")
+
+    removed: list[str] = []
+
+    def remove_block(match: re.Match[str]) -> str:
+        value = match.group(0)
+        inner = re.sub(r"^\s*(?:<[^>]+>|\[[^]]+\]|【[^】]+】)", "", value)
+        inner = re.sub(r"(?:</[^>]+>|\[/[^]]+\]|【/[^】]+】)\s*$", "", inner)
+        inner = inner.strip()
+        if inner:
+            removed.append(inner)
         return ""
 
-    cleaned = _THOUGHT_PREFIX.sub("", cleaned).strip()
+    cleaned = _TAGGED_THOUGHT_BLOCK.sub(remove_block, cleaned)
+    cleaned = _BRACKETED_THOUGHT_BLOCK.sub(remove_block, cleaned)
 
-    # 剥离整体包裹的引号，模型偶尔会把回复整个引起来
+    thought_section = _THOUGHT_TO_REPLY.match(cleaned)
+    if thought_section is not None:
+        value = thought_section.group(0)
+        inner = re.sub(
+            r"^\s*(?:\[(?:思考|分析|推理|内心|心理活动|OS)\]"
+            r"|【(?:思考|分析|推理|内心|心理活动|OS)】"
+            r"|(?:思考|分析|推理)(?:过程)?\s*[:：])",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        inner = re.sub(
+            r"(?:\[(?:最终)?回复\]|【(?:最终)?回复】|(?:最终)?回复\s*[:：])\s*$",
+            "",
+            inner,
+            flags=re.IGNORECASE,
+        ).strip()
+        if inner:
+            removed.append(inner)
+        cleaned = cleaned[thought_section.end() :]
+
+    cleaned = _SUSPEND_PREFIX.sub("", cleaned).strip()
+
     if len(cleaned) >= 2 and cleaned[0] in "\"“'「" and cleaned[-1] in "\"”'」":
         cleaned = cleaned[1:-1].strip()
 
-    return cleaned
+    return CleanReplyResult(cleaned, tuple(removed))
+
+
+def clean_reply_text(text: str) -> str:
+    """清洗模型输出，剥离不该发出去的内容。"""
+    return clean_reply_text_with_metadata(text).text
 
 
 def _split_once(text: str, limit: int) -> tuple[str, str]:

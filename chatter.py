@@ -54,6 +54,7 @@ from .decision import (
 from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
+from .humanize.segmenter import clean_reply_text_with_metadata
 from .pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -97,6 +98,22 @@ logger = get_logger("agentic_chatter")
 
 # 摘要类小模型调用的最大输出长度，防止小模型话痨
 MAX_DIGEST_CHARS = 40
+# INFO 思考日志的单条最大长度
+MAX_THOUGHT_LOG_CHARS = 300
+
+
+def _thought_log_line(stream_id: str, source: str, content: str) -> str:
+    """构建单行、限长的主 Agent 思考日志。"""
+    normalized = " ".join(
+        "".join(character if character.isprintable() else " " for character in str(content)).split()
+    )
+    prefix = f"[{stream_id[:8]}] 主 Agent 思考 source={source} content="
+    if len(prefix) >= MAX_THOUGHT_LOG_CHARS:
+        return prefix[: MAX_THOUGHT_LOG_CHARS - 1] + "…"
+    available = MAX_THOUGHT_LOG_CHARS - len(prefix)
+    if len(normalized) > available:
+        normalized = normalized[: max(0, available - 1)] + "…"
+    return prefix + normalized
 
 
 class AgenticChatter(BaseChatter):
@@ -856,7 +873,9 @@ class AgenticChatter(BaseChatter):
         Returns:
             tuple[bool, bool]: 是否发送了消息、文本是否因复读被抑制。
         """
-        message = str(getattr(response, "message", "") or "").strip()
+        raw_message = str(getattr(response, "message", "") or "").strip()
+        cleaned_result = clean_reply_text_with_metadata(raw_message)
+        message = cleaned_result.text
         if not message:
             return False, False
 
@@ -895,6 +914,18 @@ class AgenticChatter(BaseChatter):
         segments = build_speak_segments(message, humanize)
         if not segments:
             return False, False
+
+        reasoning = str(getattr(response, "reasoning_content", "") or "").strip()
+        if reasoning:
+            logger.info(_thought_log_line(self.stream_id, "reasoning_content", reasoning))
+        if cleaned_result.removed_thoughts:
+            logger.info(
+                _thought_log_line(
+                    self.stream_id,
+                    "removed_message_block",
+                    " | ".join(cleaned_result.removed_thoughts),
+                )
+            )
 
         async def speak(text: str) -> bool:
             """发送单条消息。

@@ -4,13 +4,59 @@ from __future__ import annotations
 
 from ..humanize.segmenter import (
     clean_reply_text,
+    clean_reply_text_with_metadata,
     segment_reply,
 )
 
 
-def test_clean_strips_thought_prefix() -> None:
-    assert clean_reply_text("内心：我该回复他") == "我该回复他"
-    assert clean_reply_text("[思考] 嗯") == "嗯"
+def test_clean_metadata_contains_removed_thoughts() -> None:
+    result = clean_reply_text_with_metadata(
+        "<think>先分析语气</think>[思考]再确认一下[/思考]你好"
+    )
+
+    assert result.text == "你好"
+    assert result.removed_thoughts == ("先分析语气", "再确认一下")
+
+
+def test_clean_metadata_keeps_structured_reasoning_separate() -> None:
+    result = clean_reply_text_with_metadata("普通回复")
+
+    assert result.text == "普通回复"
+    assert result.removed_thoughts == ()
+
+
+def test_clean_removes_tagged_thought_blocks() -> None:
+    assert clean_reply_text("<think>内部推理</think>你好") == "你好"
+    assert clean_reply_text("<ANALYSIS data-x='1'>多行\n分析</ANALYSIS>答案") == "答案"
+    assert clean_reply_text("<analysis>步骤一</analysis><reasoning>步骤二</reasoning>结果") == "结果"
+
+
+def test_clean_removes_bracketed_thought_blocks() -> None:
+    assert clean_reply_text("[思考]内部推理[/思考]你好") == "你好"
+    assert clean_reply_text("【内心】不该发送【/内心】在的") == "在的"
+    assert clean_reply_text("[OS]internal[/OS]收到") == "收到"
+
+
+def test_clean_keeps_reply_after_explicit_thought_section() -> None:
+    assert clean_reply_text("[思考]先判断语气\n[最终回复]你好呀") == "你好呀"
+    assert clean_reply_text("分析过程：先看上下文\n回复：可以的") == "可以的"
+
+
+def test_clean_returns_empty_for_thought_only_output() -> None:
+    assert clean_reply_text("<think>只有推理</think>") == ""
+    assert clean_reply_text("【思考】只有独白【/思考】") == ""
+    assert segment_reply("<analysis>只有分析</analysis>") == []
+
+
+def test_clean_does_not_remove_unclosed_or_mismatched_tags() -> None:
+    assert clean_reply_text("<think>未闭合内容\n最终回复") == "<think>未闭合内容\n最终回复"
+    assert clean_reply_text("<think>内容</analysis>回答") == "<think>内容</analysis>回答"
+
+
+def test_clean_preserves_normal_visible_reasoning_words() -> None:
+    assert clean_reply_text("我想先确认一下需求。") == "我想先确认一下需求。"
+    assert clean_reply_text("我觉得这个方案可行。") == "我觉得这个方案可行。"
+    assert clean_reply_text("我的分析：问题来自配置缺失。") == "我的分析：问题来自配置缺失。"
 
 
 def test_clean_strips_suspend_marker() -> None:

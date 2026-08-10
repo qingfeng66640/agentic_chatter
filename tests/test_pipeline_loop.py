@@ -10,14 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall, ToolResult
 from src.kernel.llm.context_structure import validate_payload_sequence
 
 from ..actions.control import MAX_STOP_MINUTES
 from .. import chatter as chatter_module
-from ..chatter import AgenticChatter
+from ..chatter import AgenticChatter, _thought_log_line
 from ..pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -56,6 +56,73 @@ class _FakeHumanize:
     max_segments = 3
     typing_cps = 0.0
     max_typing_delay = 2.0
+
+
+def test_thought_log_line_is_single_line_and_bounded() -> None:
+    line = _thought_log_line("stream", "reasoning_content", "a\n\t" + "长" * 500)
+
+    assert "\n" not in line
+    assert "\t" not in line
+    assert len(line) <= 300
+    assert line.endswith("…")
+
+
+async def test_deliver_message_logs_structured_and_removed_thoughts(monkeypatch) -> None:
+    """主 Agent 应在 INFO 中记录结构化和正文清洗思考。"""
+    sent: list[str] = []
+
+    async def send_text(*, content: str, stream_id: str) -> bool:
+        sent.append(content)
+        return bool(stream_id)
+
+    info = Mock()
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    monkeypatch.setattr(chatter_module.logger, "info", info)
+    chatter = AgenticChatter(stream_id="thought-stream", plugin=object())
+    response = SimpleNamespace(
+        message="<think>正文里的思考</think>最终回复",
+        reasoning_content="结构化\n推理",
+    )
+
+    spoken, duplicate = await chatter._deliver_message(
+        None,
+        response,
+        TurnState(stream_id="thought-stream"),
+    )
+
+    assert spoken
+    assert not duplicate
+    assert sent == ["最终回复"]
+    logs = [str(call.args[0]) for call in info.call_args_list]
+    assert len(logs) == 2
+    assert any("source=reasoning_content" in line and "结构化 推理" in line for line in logs)
+    assert any(
+        "source=removed_message_block" in line and "正文里的思考" in line
+        for line in logs
+    )
+    assert all("\n" not in line and len(line) <= 300 for line in logs)
+
+
+async def test_deliver_message_does_not_log_thought_only_output(monkeypatch) -> None:
+    """只有思考而无可见回复时不得发送或记录 INFO。"""
+    send_text = AsyncMock(return_value=True)
+    info = Mock()
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    monkeypatch.setattr(chatter_module.logger, "info", info)
+    chatter = AgenticChatter(stream_id="thought-only", plugin=object())
+
+    result = await chatter._deliver_message(
+        None,
+        SimpleNamespace(
+            message="<analysis>只有分析</analysis>",
+            reasoning_content="结构化推理",
+        ),
+        TurnState(stream_id="thought-only"),
+    )
+
+    assert result == (False, False)
+    send_text.assert_not_awaited()
+    info.assert_not_called()
 
 
 def test_normalize_reply_text_ignores_spacing_and_punctuation() -> None:
