@@ -1,6 +1,6 @@
 # Agentic Chatter
 
-`Agentic Chatter` 是 Neo-MoFox 的 Agent 式聊天器插件（v0.1.0）。它将一轮回复拆分为可编排的处理阶段，并在群聊中先判断“是否应当参与”，再决定如何生成、执行和收尾回复，避免 Bot 对每条消息机械接话。
+`Agentic Chatter` 是 Neo-MoFox 的 Agent 式聊天器插件（v0.2.2）。它将一轮回复拆分为可编排的处理阶段，并在群聊中先判断“是否应当参与”，再决定如何生成、执行和收尾回复，避免 Bot 对每条消息机械接话。
 
 - **维护者**：qf
 - **仓库**：`qingfeng66640/agentic_chatter`
@@ -33,7 +33,7 @@
 
 | 配置节          | 用途                                                                         |
 | --------------- | ---------------------------------------------------------------------------- |
-| `[plugin]`      | 插件开关和主回复模型任务。                                                   |
+| `[plugin]`      | 插件开关、主回复模型任务、私聊接管及私聊专用模型。                           |
 | `[pipeline]`    | 阶段顺序、感知/规划/反思开关，以及单轮迭代和可见发言上限。                   |
 | `[decision]`    | 本地评分权重、置信区间边界、语义任务、节奏冷却、`sub_actor` 和故障回退策略。 |
 | `[tools]`       | 工具可见性、折叠/黑名单、渐进探索及重复调用去重。                            |
@@ -77,6 +77,23 @@ alias_names = ["别名一", "别名二"]
 
 本地评分不是“回复概率”，而是衡量当前 Bot 是否适合介入；评分区间越宽，说明本地越不确定，越可能进入 `sub_actor`。
 
+### 私聊接管与专用模型
+
+`[plugin]` 可单独控制私聊接管，并为私聊主 Agent 指定模型：
+
+```toml
+[plugin]
+enabled = true
+model_task = "actor"
+private_enabled = true
+private_model_name = "private-chat-model"
+```
+
+- `private_enabled` 默认开启；关闭后不注册私聊 Chatter，新私聊会由其他兼容 Chatter 接管；修改后需重载插件或重启；
+- `private_model_name` 填写 `config/model.toml` 中 `[[models]].name`，不是上游 `model_identifier` 或 `[model_tasks.*]` 的 task key；
+- 留空时私聊继续使用 `model_task`；指定后私聊 `act` 主循环固定使用该单模型，不使用主 task 的多模型回退列表；
+- 该覆盖不影响 perceive、plan、`sub_actor`、embedding 和全局心智摘要等辅助任务。
+
 ### QQBot C2C 实时流式输出
 
 在 `[humanize]` 中启用 `streaming_enabled` 后，QQBot C2C 私聊会按 LLM 可见文本 token 实时更新同一条流式消息。还需在 `qqbot_adapter` 中启用 `features.streaming`。
@@ -92,7 +109,9 @@ alias_names = ["别名一", "别名二"]
 
 插件加载后会注册以下组件：
 
-- `agentic_chatter:chatter:agentic`：`AgenticChatter`，主聊天器；
+- `agentic_chatter:chatter:agentic`：`AgenticChatter`，群聊聊天器；
+- `agentic_chatter:chatter:agentic_private`：`AgenticPrivateChatter`，可配置启用的私聊聊天器；
+- `agentic_chatter:chatter:agentic_discuss`：`AgenticDiscussChatter`，讨论组聊天器；
 - `agentic_chatter:service:pipeline`：`PipelineService`，供其他插件注册自定义管线阶段、读写全局心智；
 - `agentic_chatter:tool:explore_tools`：`ExploreToolsTool`，供模型按需展开折叠工具；
 - `agentic_chatter:action:say`：`SayAction`，发送文本消息；

@@ -37,6 +37,21 @@ class AgenticChatterConfig(BaseConfig):
             label="主模型任务",
             tag="ai",
         )
+        private_enabled: bool = Field(
+            default=True,
+            description="是否由 AgenticChatter 接管私聊；修改后需重载插件或重启",
+            label="接管私聊",
+            tag="plugin",
+        )
+        private_model_name: str = Field(
+            default="",
+            description=(
+                "私聊主回复使用的模型名称，对应 config/model.toml 中 "
+                "[[models]].name；留空时使用主模型任务"
+            ),
+            label="私聊模型名称",
+            tag="ai",
+        )
 
     @config_section("pipeline", title="回复管线", tag="ai")
     class PipelineSection(SectionBase):

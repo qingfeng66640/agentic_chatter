@@ -21,7 +21,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
-from src.app.plugin_system.api import send_api
+from src.app.plugin_system.api import llm_api, send_api
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.components.base.chatter import (
     BaseChatter,
@@ -35,7 +35,15 @@ from src.core.components.base.chatter import (
 from src.core.components.types import ChatType
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
-from src.kernel.llm import LLMPayload, ROLE, Text, ToolRegistry
+from src.core.utils.context_compression import default_chat_context_compression_handler
+from src.kernel.llm import (
+    LLMContextManager,
+    LLMRequest,
+    LLMPayload,
+    ROLE,
+    Text,
+    ToolRegistry,
+)
 
 from .config import AgenticChatterConfig
 from .decision import (
@@ -121,14 +129,11 @@ def _thought_log_line(stream_id: str, source: str, content: str) -> str:
     return prefix + normalized
 
 
-class AgenticChatter(BaseChatter):
-    """Agent 式聊天器。"""
+class _AgenticChatterBase(BaseChatter):
+    """不同聊天类型共享的 Agent 式聊天器实现。"""
 
-    chatter_name = "agentic"
-    chatter_description = (
-        "Agent 式回复流程：文本即回复、工具分层暴露、跨流全局心智"
-    )
-    chat_type = ChatType.ALL
+    name = "agentic_base"
+    description = "Agent 式回复流程：文本即回复、工具分层暴露、跨流全局心智"
 
     def __init__(self, stream_id: str, plugin: Any) -> None:
         """初始化聊天器。
@@ -640,8 +645,7 @@ class AgenticChatter(BaseChatter):
         system_text = await self._build_system_prompt(config, chat_stream, layout)
         user_text = await self._build_user_prompt(config, chat_stream, state, unread_msgs)
 
-        task = "actor" if config is None else str(config.plugin.model_task or "actor")
-        request = self.create_request(task=task, request_name=self.chatter_name)
+        request = self._create_act_request(config)
         request.add_payload(LLMPayload(ROLE.SYSTEM, Text(system_text)))
         request.add_payload(LLMPayload(ROLE.TOOL, registry.get_all()))  # type: ignore[arg-type]
         request.add_payload(LLMPayload(ROLE.USER, Text(user_text)))
@@ -848,6 +852,40 @@ class AgenticChatter(BaseChatter):
     # ------------------------------------------------------------------
     # 辅助
     # ------------------------------------------------------------------
+
+    def _create_act_request(
+        self,
+        config: AgenticChatterConfig | None,
+    ) -> LLMRequest:
+        """根据聊天类型创建主 Agent 请求。"""
+        task = "actor" if config is None else str(config.plugin.model_task or "actor")
+        private_model_name = (
+            ""
+            if config is None or self.chat_type != ChatType.PRIVATE
+            else str(config.plugin.private_model_name or "").strip()
+        )
+        if not private_model_name:
+            return self.create_request(task=task, request_name=self.name)
+
+        task_model_set = llm_api.get_model_set_by_task(task)
+        first_task_model = task_model_set[0] if task_model_set else {}
+        model_set = llm_api.get_model_set_by_name(
+            private_model_name,
+            temperature=first_task_model.get("temperature"),
+            max_tokens=first_task_model.get("max_tokens"),
+        )
+        logger.info(
+            f"[{self.stream_id[:8]}] 私聊主 Agent 使用指定模型 "
+            f"model_name={private_model_name}"
+        )
+        return LLMRequest(
+            model_set=model_set,
+            request_name=self.name,
+            meta_data={"stream_id": self.stream_id},
+            context_manager=LLMContextManager(
+                context_compression_handler=default_chat_context_compression_handler,
+            ),
+        )
 
     def _build_layout(
         self,
@@ -1304,3 +1342,27 @@ class AgenticChatter(BaseChatter):
             .set("extra", "\n".join(extra_parts))
             .build()
         )
+
+
+class AgenticChatter(_AgenticChatterBase):
+    """群聊 Agent 式聊天器。"""
+
+    name = "agentic"
+    description = "Agent 式回复流程：文本即回复、工具分层暴露、跨流全局心智"
+    chat_type = ChatType.GROUP
+
+
+class AgenticPrivateChatter(_AgenticChatterBase):
+    """私聊 Agent 式聊天器。"""
+
+    name = "agentic_private"
+    description = "私聊 Agent 式回复流程：文本即回复、工具分层暴露、跨流全局心智"
+    chat_type = ChatType.PRIVATE
+
+
+class AgenticDiscussChatter(_AgenticChatterBase):
+    """讨论组 Agent 式聊天器。"""
+
+    name = "agentic_discuss"
+    description = "讨论组 Agent 式回复流程：文本即回复、工具分层暴露、跨流全局心智"
+    chat_type = ChatType.DISCUSS

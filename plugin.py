@@ -15,7 +15,11 @@ from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager, min_len, optional, wrap
 
 from .actions import EndTurnAction, SayAction, StopConversationAction
-from .chatter import AgenticChatter
+from .chatter import (
+    AgenticChatter,
+    AgenticDiscussChatter,
+    AgenticPrivateChatter,
+)
 from .config import AgenticChatterConfig
 from .prompts import (
     perceive_prompt,
@@ -35,7 +39,7 @@ class AgenticChatterPlugin(BasePlugin):
     """Agentic Chatter 插件。"""
 
     plugin_name = "agentic_chatter"
-    plugin_version = "0.2.1"
+    plugin_version = "0.2.2"
     plugin_author = "qf"
     plugin_description = (
         "Agent 式回复流程聊天器：分层回复决策、纯文本即回复、"
@@ -137,11 +141,19 @@ class AgenticChatterPlugin(BasePlugin):
         Returns:
             list[type]: 组件类列表。
         """
-        return [
+        config = self.config
+        if config is not None and not config.plugin.enabled:
+            return []
+
+        components: list[type] = [
             AgenticChatter,
+            AgenticDiscussChatter,
             PipelineService,
             ExploreToolsTool,
             SayAction,
             EndTurnAction,
             StopConversationAction,
         ]
+        if config is None or config.plugin.private_enabled:
+            components.insert(1, AgenticPrivateChatter)
+        return components

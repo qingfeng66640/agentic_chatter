@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.2] - 2026-08-11
+
+### Added
+
+- 新增可独立启停的私聊 Chatter 接管开关，默认保持接管私聊。
+- 支持通过 `config/model.toml` 中的 `[[models]].name` 为私聊主 Agent 指定单模型。
+- 将群聊、私聊和讨论组拆分为精确 `ChatType` 组件，关闭私聊接管时可交由其他兼容 Chatter 处理。
+
+### Changed
+
+- 私聊指定模型继承主模型任务的 `temperature` 与 `max_tokens`，且仅覆盖 `act` 主回复循环，不影响其他辅助模型任务。
+
 ## [0.2.1] - 2026-08-11
 
 ### Fixed
