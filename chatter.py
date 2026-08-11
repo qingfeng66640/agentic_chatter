@@ -54,7 +54,8 @@ from .decision import (
 from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
-from .humanize.segmenter import clean_reply_text_with_metadata
+from .humanize.qqbot_streaming import create_streaming_session
+from .humanize.segmenter import CleanReplyResult, clean_reply_text_with_metadata
 from .pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -647,10 +648,21 @@ class AgenticChatter(BaseChatter):
         while should_continue_loop(state, max_iterations):
             state.iterations += 1
 
+            stream_session = self._create_qqbot_streaming_session(
+                config,
+                unread_msgs,
+            ) if self._streaming_allowed(config, state) else None
             try:
-                response = await response.send()
-                await response
+                response = await response.send(stream=True)
+                if stream_session is not None:
+                    await response.stream_events_with_callback(stream_session.on_event)
+                else:
+                    await response
             except Exception as exc:
+                if stream_session is not None and stream_session.started:
+                    await stream_session.finalize(
+                        str(getattr(response, "message", "") or "")
+                    )
                 state.failed = True
                 state.error = str(exc)
                 logger.error(f"[{self.stream_id[:8]}] 语言模型调用失败：{exc}")
@@ -659,6 +671,10 @@ class AgenticChatter(BaseChatter):
 
             calls = list(getattr(response, "call_list", None) or [])
             if await self._has_new_unreads(config, unread_msgs):
+                if stream_session is not None and stream_session.started:
+                    await stream_session.finalize(
+                        str(getattr(response, "message", "") or "")
+                    )
                 append_interrupted_tool_results(response, calls)
                 state.failed = True
                 state.error = "生成期间收到新消息，重新规划"
@@ -667,9 +683,20 @@ class AgenticChatter(BaseChatter):
 
             had_spoken_before_iteration = state.spoke
             normal_calls, end_seconds, stop_minutes = classify_calls(calls)
-            spoke_now, duplicate_text = await self._deliver_message(
-                config, response, state
-            )
+            if stream_session is not None and stream_session.started:
+                cleaned_result = await stream_session.finalize(
+                    str(getattr(response, "message", "") or "")
+                )
+                spoke_now, duplicate_text = self._record_streamed_message(
+                    config,
+                    response,
+                    state,
+                    cleaned_result,
+                )
+            else:
+                spoke_now, duplicate_text = await self._deliver_message(
+                    config, response, state
+                )
 
             tool_progress = 0
             if normal_calls:
@@ -854,6 +881,103 @@ class AgenticChatter(BaseChatter):
         )
         return layout
 
+    def _streaming_allowed(
+        self,
+        config: AgenticChatterConfig | None,
+        state: TurnState,
+    ) -> bool:
+        """确认本轮仍允许启动一条新的可见流式消息。"""
+        max_emissions = max(
+            1,
+            int(
+                getattr(
+                    getattr(config, "pipeline", None),
+                    "max_visible_text_emissions",
+                    3,
+                )
+            ),
+        )
+        return state.visible_text_emissions == 0 and max_emissions > 0
+
+    def _create_qqbot_streaming_session(
+        self,
+        config: AgenticChatterConfig | None,
+        unread_msgs: list["Message"],
+    ) -> Any | None:
+        """为当前 QQBot C2C 触发消息创建实时流式会话。"""
+        humanize = getattr(config, "humanize", None)
+        trigger_message = unread_msgs[-1] if unread_msgs else None
+        return create_streaming_session(
+            trigger_message,
+            enabled=bool(getattr(humanize, "streaming_enabled", False)),
+            service_signature=str(
+                getattr(
+                    humanize,
+                    "streaming_service_signature",
+                    "qqbot_adapter:service:qqbot",
+                )
+                or ""
+            ),
+            initial_chars=int(getattr(humanize, "streaming_initial_chars", 1)),
+            update_min_chars=int(
+                getattr(humanize, "streaming_update_min_chars", 1)
+            ),
+        )
+
+    def _log_main_agent_thoughts(
+        self,
+        response: Any,
+        cleaned_result: CleanReplyResult,
+    ) -> None:
+        """记录结构化推理和正文中被清洗的明确思考块。"""
+        reasoning = str(getattr(response, "reasoning_content", "") or "").strip()
+        if reasoning:
+            logger.info(_thought_log_line(self.stream_id, "reasoning_content", reasoning))
+        if cleaned_result.removed_thoughts:
+            logger.info(
+                _thought_log_line(
+                    self.stream_id,
+                    "removed_message_block",
+                    " | ".join(cleaned_result.removed_thoughts),
+                )
+            )
+
+    def _record_streamed_message(
+        self,
+        config: AgenticChatterConfig | None,
+        response: Any,
+        state: TurnState,
+        cleaned_result: CleanReplyResult,
+    ) -> tuple[bool, bool]:
+        """把已由 QQBot controller 输出的最终正文计入回合状态。"""
+        message = cleaned_result.text
+        if not message:
+            return False, False
+
+        humanize = getattr(config, "humanize", None)
+        dedup_enabled = bool(getattr(humanize, "enable_reply_dedup", True))
+        if dedup_enabled and is_repeated_reply(
+            message,
+            state.sent_texts,
+            similarity_threshold=float(
+                getattr(humanize, "reply_similarity_threshold", 0.88)
+            ),
+            containment_threshold=float(
+                getattr(humanize, "reply_containment_threshold", 0.90)
+            ),
+        ):
+            logger.warning(
+                f"[{self.stream_id[:8]}] 流式正文与本轮已有回复重复，"
+                "无法撤回已发送内容"
+            )
+
+        self._log_main_agent_thoughts(response, cleaned_result)
+        state.spoke = True
+        state.sent_texts.append(message)
+        state.visible_text_emissions += 1
+        state.duplicate_text_streak = 0
+        return True, False
+
     async def _deliver_message(
         self,
         config: AgenticChatterConfig | None,
@@ -915,17 +1039,7 @@ class AgenticChatter(BaseChatter):
         if not segments:
             return False, False
 
-        reasoning = str(getattr(response, "reasoning_content", "") or "").strip()
-        if reasoning:
-            logger.info(_thought_log_line(self.stream_id, "reasoning_content", reasoning))
-        if cleaned_result.removed_thoughts:
-            logger.info(
-                _thought_log_line(
-                    self.stream_id,
-                    "removed_message_block",
-                    " | ".join(cleaned_result.removed_thoughts),
-                )
-            )
+        self._log_main_agent_thoughts(response, cleaned_result)
 
         async def speak(text: str) -> bool:
             """发送单条消息。

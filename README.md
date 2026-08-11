@@ -37,7 +37,7 @@
 | `[pipeline]`    | 阶段顺序、感知/规划/反思开关，以及单轮迭代和可见发言上限。                   |
 | `[decision]`    | 本地评分权重、置信区间边界、语义任务、节奏冷却、`sub_actor` 和故障回退策略。 |
 | `[tools]`       | 工具可见性、折叠/黑名单、渐进探索及重复调用去重。                            |
-| `[humanize]`    | 分段发送、打字延迟、情绪、主动性、复读抑制和打断重规划。                     |
+| `[humanize]`    | 分段发送、打字延迟、QQBot C2C 实时流式输出、情绪、主动性、复读抑制和打断重规划。             |
 | `[global_mind]` | 跨流情绪、摘要、近期要闻和注入长度限制。                                     |
 | `[persona]`     | 私聊、群聊及额外系统提示词引导。                                             |
 
@@ -76,6 +76,17 @@ alias_names = ["别名一", "别名二"]
    - `fail_closed`：默认静默。
 
 本地评分不是“回复概率”，而是衡量当前 Bot 是否适合介入；评分区间越宽，说明本地越不确定，越可能进入 `sub_actor`。
+
+### QQBot C2C 实时流式输出
+
+在 `[humanize]` 中启用 `streaming_enabled` 后，QQBot C2C 私聊会按 LLM 可见文本 token 实时更新同一条流式消息。还需在 `qqbot_adapter` 中启用 `features.streaming`。
+
+- 默认 Service 签名为 `qqbot_adapter:service:qqbot`，可通过 `streaming_service_signature` 调整；
+- `streaming_initial_chars` 控制累计多少个安全可见字符后启动流；
+- `streaming_update_min_chars` 控制正文至少增加多少字符后请求更新，时间节流由 QQBot Adapter 自身处理；
+- 只处理 `text_delta`，结构化 reasoning 及 `<think>` / `<analysis>` / `<reasoning>` 块不会发给用户；
+- 非 QQ、群聊、元数据不完整、流式 Service 不可用或启动失败时自动使用原有普通分段发送；
+- controller 已启动后的更新或收尾失败不会再补发普通消息，以避免重复内容。
 
 ## 对外提供的组件
 

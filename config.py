@@ -557,6 +557,34 @@ class AgenticChatterConfig(BaseConfig):
             label="最大打字延迟",
             tag="performance",
         )
+        streaming_enabled: bool = Field(
+            default=False,
+            description="是否对 QQBot C2C 私聊启用实时 token 流式输出；默认关闭",
+            label="启用 QQBot 实时流式输出",
+            tag="ai",
+        )
+        streaming_service_signature: str = Field(
+            default="qqbot_adapter:service:qqbot",
+            description="QQBot 流式 Service 签名；留空时仅在唯一能力 Service 存在时自动发现",
+            label="流式 Service 签名",
+            tag="ai",
+        )
+        streaming_initial_chars: int = Field(
+            default=1,
+            description="累计到指定可见字符数后才启动 QQBot 流式消息，避免发送空内容",
+            label="流式首发字符数",
+            ge=1,
+            le=100,
+            tag="ai",
+        )
+        streaming_update_min_chars: int = Field(
+            default=1,
+            description="可见正文至少新增指定字符后才请求一次流式更新；适配器仍负责时间节流",
+            label="流式最小更新字符数",
+            ge=1,
+            le=100,
+            tag="performance",
+        )
         enable_mood: bool = Field(
             default=True,
             description=(

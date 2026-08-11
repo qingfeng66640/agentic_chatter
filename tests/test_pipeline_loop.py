@@ -437,7 +437,7 @@ class _RequestReturningResponse:
     def add_payload(self, payload: LLMPayload) -> None:
         self.payloads.append(payload)
 
-    async def send(self) -> _PayloadResponse:
+    async def send(self, *, stream: bool = False) -> _PayloadResponse:
         return self.response
 
 
