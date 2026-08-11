@@ -55,7 +55,11 @@ from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
 from .humanize.qqbot_streaming import create_streaming_session
-from .humanize.segmenter import CleanReplyResult, clean_reply_text_with_metadata
+from .humanize.segmenter import (
+    CleanReplyResult,
+    clean_reply_text_with_metadata,
+    is_framework_message_line,
+)
 from .pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -1001,6 +1005,14 @@ class AgenticChatter(BaseChatter):
         cleaned_result = clean_reply_text_with_metadata(raw_message)
         message = cleaned_result.text
         if not message:
+            return False, False
+        if is_framework_message_line(message):
+            logger.warning(
+                f"[{self.stream_id[:8]}] "
+                "event=framework_message_line_intercepted "
+                "reason=complete_framework_message_line "
+                f"chars={len(message)}"
+            )
             return False, False
 
         humanize = config.humanize if config is not None else None

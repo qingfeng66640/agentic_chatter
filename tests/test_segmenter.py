@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..humanize.segmenter import (
     clean_reply_text,
     clean_reply_text_with_metadata,
+    is_framework_message_line,
     segment_reply,
 )
 
@@ -71,6 +72,19 @@ def test_clean_strips_wrapping_quotes() -> None:
 def test_clean_returns_empty_for_blank() -> None:
     assert clean_reply_text("") == ""
     assert clean_reply_text("   ") == ""
+
+
+def test_framework_message_line_detection_requires_complete_single_line() -> None:
+    assert is_framework_message_line(
+        "【13:47】<机器人> [6264745991384149877] 我是打工蝶😭 ："
+    )
+    assert is_framework_message_line(
+        "【13:47】<成员> [user-id] 小豆 [message-id]：你好"
+    )
+    assert not is_framework_message_line("机器人说：你好")
+    assert not is_framework_message_line("说明： 【13:47】<机器人> [1] 小蝶 ：你好")
+    assert not is_framework_message_line("【13:47】<机器人> [1] 小蝶 ：你好\n补充说明")
+    assert not is_framework_message_line("【13:47】<机器人> [1] 小蝶: 你好")
 
 
 def test_segmentation_disabled_returns_single_segment() -> None:

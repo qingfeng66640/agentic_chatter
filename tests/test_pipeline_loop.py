@@ -125,6 +125,53 @@ async def test_deliver_message_does_not_log_thought_only_output(monkeypatch) -> 
     info.assert_not_called()
 
 
+async def test_deliver_message_intercepts_complete_framework_message_line(monkeypatch) -> None:
+    """模型完整复述框架消息行时不得再次发送给用户。"""
+    send_text = AsyncMock(return_value=True)
+    warning = Mock()
+    text = "【13:47】<机器人> [6264745991384149877] 我是打工蝶😭 ："
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    monkeypatch.setattr(chatter_module.logger, "warning", warning)
+    chatter = AgenticChatter(stream_id="intercept-stream", plugin=object())
+    state = TurnState(stream_id="intercept-stream")
+
+    result = await chatter._deliver_message(
+        None,
+        SimpleNamespace(message=text),
+        state,
+    )
+
+    assert result == (False, False)
+    send_text.assert_not_awaited()
+    warning.assert_called_once()
+    log_line = str(warning.call_args.args[0])
+    assert "framework_message_line_intercepted" in log_line
+    assert f"chars={len(text)}" in log_line
+    assert text not in log_line
+    assert not state.spoke
+    assert state.visible_text_emissions == 0
+
+
+async def test_deliver_message_allows_normal_text_with_framework_keywords(monkeypatch) -> None:
+    """普通正文包含相似关键词时仍应正常发送。"""
+    send_text = AsyncMock(return_value=True)
+    text = "机器人刚才的回答让我很开心。"
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    chatter = AgenticChatter(stream_id="normal-framework-keywords", plugin=object())
+
+    result = await chatter._deliver_message(
+        None,
+        SimpleNamespace(message=text),
+        TurnState(stream_id="normal-framework-keywords"),
+    )
+
+    assert result == (True, False)
+    send_text.assert_awaited_once_with(
+        content=text,
+        stream_id="normal-framework-keywords",
+    )
+
+
 def test_normalize_reply_text_ignores_spacing_and_punctuation() -> None:
     """空白和标点差异不应绕过精确复读判断。"""
     assert normalize_reply_text("你好， 世界！") == normalize_reply_text("你好世界")

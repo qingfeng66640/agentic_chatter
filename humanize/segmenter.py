@@ -35,6 +35,13 @@ _THOUGHT_TO_REPLY = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 _SUSPEND_PREFIX = re.compile(r"^\s*__SUSPEND__\s*")
+_FRAMEWORK_MESSAGE_LINE = re.compile(
+    r"【[^】\r\n]+】"
+    r"(?:<[^<>\r\n]+> )?"
+    r"(?:\[[^\[\]\r\n]+\] )?"
+    r"[^\r\n]+?"
+    r" (?:\[[^\[\]\r\n]+\])?： ?[^\r\n]*"
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +117,11 @@ def clean_reply_text_with_metadata(text: str) -> CleanReplyResult:
 def clean_reply_text(text: str) -> str:
     """清洗模型输出，剥离不该发出去的内容。"""
     return clean_reply_text_with_metadata(text).text
+
+
+def is_framework_message_line(text: str) -> bool:
+    """判断文本是否完整复述了一条框架格式化消息行。"""
+    return _FRAMEWORK_MESSAGE_LINE.fullmatch(str(text or "").strip()) is not None
 
 
 def _split_once(text: str, limit: int) -> tuple[str, str]:

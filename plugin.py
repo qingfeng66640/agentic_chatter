@@ -35,7 +35,7 @@ class AgenticChatterPlugin(BasePlugin):
     """Agentic Chatter 插件。"""
 
     plugin_name = "agentic_chatter"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "qf"
     plugin_description = (
         "Agent 式回复流程聊天器：分层回复决策、纯文本即回复、"

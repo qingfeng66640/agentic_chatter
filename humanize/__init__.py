@@ -16,6 +16,7 @@ from .segmenter import (
     Segment,
     clean_reply_text,
     clean_reply_text_with_metadata,
+    is_framework_message_line,
     segment_reply,
 )
 
@@ -30,6 +31,7 @@ __all__ = [
     "describe_mood_for_prompt",
     "extract_streaming_context",
     "infer_mood_delta",
+    "is_framework_message_line",
     "segment_reply",
     "should_get_distracted",
     "should_interrupt",
