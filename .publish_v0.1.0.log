@@ -1,0 +1,39 @@
+ℹ️  正在加载插件信息...
+✅ 插件: agentic_chatter v0.1.0
+ℹ️  正在验证分类和标签...
+✅ 分类和标签验证通过
+ℹ️  正在构建插件包...
+⚠️  目标文件已存在，将覆盖: 
+X:\WorkSpace\py\neo-mofox\Neo-MoFox\plugins\agentic_chatter\dist\agentic_chatte
+r-0.1.0.mfp
+┌─ 📦 构建插件: agentic_chatter ─┐
+│ ✓ 构建完成                     │
+└────────────────────────────────┘
+  插件名称      agentic_chatter                                                
+  版本          0.1.0                                                          
+  作者          qf                                                             
+  入口文件      plugin.py                                                      
+  打包文件数    47                                                             
+  原始大小      299.0 KB                                                       
+  包大小        103.0 KB                                                       
+  SHA256        7638263d1481946b...                                            
+  输出路径      X:\WorkSpace\py\neo-mofox\Neo-MoFox\plugins\agentic_chatter\…  
+
+✅ 构建完成: agentic_chatter-0.1.0.mfp
+✅ 插件包已构建: agentic_chatter-0.1.0.mfp
+ℹ️  GitHub 仓库: qingfeng66640/agentic_chatter
+ℹ️  正在检查 GitHub 权限...
+✅ 权限检查通过：仓库已存在且有足够的权限
+ℹ️  正在准备 GitHub 仓库...
+✅ 仓库地址: https://github.com/qingfeng66640/agentic_chatter
+ℹ️  正在提交代码...
+ℹ️  正在创建标签: v0.1.0
+ℹ️  正在推送到 GitHub...
+✅ 代码已推送
+ℹ️  正在创建 Release: v0.1.0
+✅ Release 已创建
+ℹ️  正在上传资产: agentic_chatter-0.1.0.mfp
+✅ 资产已上传
+ℹ️  正在检查插件注册状态...
+❌ 插件 agentic_chatter 已在市场注册
+ℹ️  如果要发布新版本，请使用 'mpdt market package-new-version' 命令
