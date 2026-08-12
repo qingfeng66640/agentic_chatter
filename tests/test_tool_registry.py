@@ -171,5 +171,7 @@ def test_describe_categories_empty_when_nothing_collapsed() -> None:
 
 def test_encouragement_prompt_mentions_tool_usage() -> None:
     text = build_encouragement_prompt()
-    assert "查" in text
+    assert "优先调用实际可用的工具" in text
+    assert "查询、读取、计算、记录或执行动作" in text
     assert "表情包" in text
+    assert "只有工具结果带来新信息时才补充正文" in text

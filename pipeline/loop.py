@@ -1,16 +1,8 @@
 """Agent 主循环。
 
-本模块实现「说话 → 做事 → 观察 → 继续」的 agent 循环，这是本插件
-与 DFC 最本质的差异所在。
-
-DFC 的问题（``session.py:729-750``）：一旦某轮的 tool call 全部是
-action（也就是模型说完话了），就立刻注入 ``__SUSPEND__`` 并 yield
-Wait 结束本轮。模型永远没有机会在说完话之后再想想「要不要顺手查
-一下、记一下」。这是工具调用率低的最直接原因。
-
-本模块的循环不做这个截断：说完话之后仍然继续迭代，只有模型显式
-调用 ``end_turn`` / ``stop_conversation``，或达到 ``max_iterations``
-上限时才结束。
+本模块实现「说话与工具同轮并行 → 观察工具结果 → 必要时补充」的
+agent 循环。文本与普通工具同时出现时，工具结果可以驱动后续迭代；
+仅有文本而没有普通工具时，由聊天器结束本轮，避免无意义续写。
 """
 
 from __future__ import annotations
@@ -124,9 +116,8 @@ def classify_calls(calls: list[Any]) -> tuple[list[Any], float | None, float | N
 def should_continue_loop(state: TurnState, max_iterations: int) -> bool:
     """判断 agent 循环是否应当继续下一次迭代。
 
-    这是与 DFC 行为差异的核心：即使本轮已经说过话（``state.spoke``
-    为 True），只要模型没有显式结束，循环仍然继续。模型因此可以在
-    说完话之后继续调用工具。
+    基础循环只处理显式控制请求和迭代上限。文本发送后的终止由
+    ``_stage_act`` 结合本次是否存在普通工具调用决定。
 
     Args:
         state: 当前回合状态。
@@ -278,21 +269,6 @@ def is_repeated_reply(
         if similarity >= similarity_threshold or containment >= containment_threshold:
             return True
     return False
-
-
-def append_post_speech_nudge(response: Any, *, duplicate: bool = False) -> None:
-    """提示模型不要复述已发送文本，并继续工具或结束本轮。"""
-    prefix = "刚才的文本与已发送内容重复，已被抑制。" if duplicate else "刚才的文本已经发送。"
-    response.add_payload(
-        LLMPayload(
-            ROLE.USER,
-            Text(
-                prefix
-                + "不要复述或改写已发送内容。若仍需查证或执行任务，只调用相关工具；"
-                "只有工具结果带来新信息时才补充，否则调用 end_turn。"
-            ),
-        )
-    )
 
 
 def append_no_op_nudge(response: Any) -> None:

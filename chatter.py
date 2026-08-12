@@ -23,9 +23,8 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 from src.app.plugin_system.api import llm_api, send_api
 from src.app.plugin_system.api.log_api import get_logger
-from src.core.components.base.chatter import (
+from src.app.plugin_system.base import (
     BaseChatter,
-    ChatterResult,
     Failure,
     Stop,
     Success,
@@ -72,7 +71,6 @@ from .pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
     append_no_op_nudge,
-    append_post_speech_nudge,
     append_tool_result,
     build_speak_segments,
     classify_calls,
@@ -104,6 +102,7 @@ from .tooling.registry import (
 )
 
 if TYPE_CHECKING:
+    from src.core.components.types import ChatterResult
     from src.core.models.message import Message
     from src.core.models.stream import ChatStream
 
@@ -728,6 +727,13 @@ class _AgenticChatterBase(BaseChatter):
                     )
 
             append_control_tool_results(response, calls)
+            control_call_count = len(calls) - len(normal_calls)
+            logger.info(
+                f"[{self.stream_id[:8]}] event=act_iteration "
+                f"iteration={state.iterations} normal_calls={len(normal_calls)} "
+                f"control_calls={control_call_count} tool_success={tool_progress} "
+                f"spoke={spoke_now} duplicate={duplicate_text}"
+            )
 
             if stop_minutes is not None:
                 state.stop_requested = True
@@ -738,6 +744,18 @@ class _AgenticChatterBase(BaseChatter):
             if end_seconds is not None:
                 state.end_turn_requested = True
                 state.end_turn_seconds = end_seconds
+                clear_stream_catalog(self.stream_id)
+                return
+
+            if not normal_calls and (spoke_now or duplicate_text):
+                reason = (
+                    "duplicate_text_without_tool"
+                    if duplicate_text
+                    else "text_sent_without_tool"
+                )
+                logger.info(
+                    f"[{self.stream_id[:8]}] event=act_auto_end reason={reason}"
+                )
                 clear_stream_catalog(self.stream_id)
                 return
 
@@ -774,19 +792,21 @@ class _AgenticChatterBase(BaseChatter):
                 or state.post_speech_iterations >= max_post_speech
                 or state.duplicate_text_streak >= max_duplicate_streak
             ):
+                if state.duplicate_text_streak >= max_duplicate_streak:
+                    reason = "max_duplicate_streak"
+                elif state.post_speech_iterations >= max_post_speech:
+                    reason = "max_post_speech"
+                else:
+                    reason = "max_no_progress"
                 logger.info(
-                    f"[{self.stream_id[:8]}] 本轮没有新增进展，自动结束："
-                    f"无进展次数={state.no_progress_iterations}，"
-                    f"重复次数={state.duplicate_text_streak}"
+                    f"[{self.stream_id[:8]}] event=act_auto_end reason={reason} "
+                    f"no_progress={state.no_progress_iterations} "
+                    f"duplicate={state.duplicate_text_streak}"
                 )
                 clear_stream_catalog(self.stream_id)
                 return
 
-            if duplicate_text:
-                append_post_speech_nudge(response, duplicate=True)
-            elif spoke_now and not normal_calls:
-                append_post_speech_nudge(response)
-            elif not spoke_now and not normal_calls:
+            if not spoke_now and not normal_calls:
                 append_no_op_nudge(response)
 
         clear_stream_catalog(self.stream_id)
@@ -1008,10 +1028,12 @@ class _AgenticChatterBase(BaseChatter):
                 getattr(humanize, "reply_containment_threshold", 0.90)
             ),
         ):
+            state.duplicate_text_streak += 1
             logger.warning(
-                f"[{self.stream_id[:8]}] 流式正文与本轮已有回复重复，"
-                "无法撤回已发送内容"
+                f"[{self.stream_id[:8]}] event=stream_duplicate_already_emitted "
+                f"chars={len(message)} duplicate_streak={state.duplicate_text_streak}"
             )
+            return False, True
 
         self._log_main_agent_thoughts(response, cleaned_result)
         state.spoke = True
@@ -1133,7 +1155,7 @@ class _AgenticChatterBase(BaseChatter):
             unread_msgs: 本轮未读消息，用于恢复动作的发送上下文。
 
         Returns:
-            int: 实际放行并执行的工具调用数量。
+            int: 执行成功的工具调用数量。
         """
         trigger = unread_msgs[-1] if unread_msgs else None
         runnable: list[Any] = []
@@ -1154,6 +1176,7 @@ class _AgenticChatterBase(BaseChatter):
             return 0
 
         results = await self.run_tool_call(runnable, response, registry, trigger)
+        success_count = 0
         for call, (_, success) in zip(runnable, results, strict=False):
             args = getattr(call, "args", None)
             state.deduper.record_result(
@@ -1161,7 +1184,9 @@ class _AgenticChatterBase(BaseChatter):
                 args if isinstance(args, dict) else {},
                 "执行成功" if success else "执行失败",
             )
-        return len(runnable)
+            if success:
+                success_count += 1
+        return success_count
 
     async def _has_new_unreads(
         self,

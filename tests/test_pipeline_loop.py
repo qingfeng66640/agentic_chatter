@@ -1,8 +1,7 @@
 """Agent 主循环测试。
 
-最重要的是 ``test_loop_continues_after_speaking``：它守护本插件
-对 DFC 最关键的修复 —— 说完话之后循环不应终止，模型必须还有
-机会继续调用工具。
+重点守护文本与工具同轮并行、工具结果跟进，以及纯文本回复后的
+确定性结束行为。
 """
 
 from __future__ import annotations
@@ -214,12 +213,8 @@ def test_reply_similarity_keeps_new_tool_information() -> None:
     )
 
 
-def test_loop_continues_after_speaking() -> None:
-    """核心回归测试：说完话之后必须还能继续调工具。
-
-    DFC 在这里会直接挂起（session.py:729-750 注入 __SUSPEND__），
-    导致模型没有机会在说完话后查证或记录。本插件必须继续循环。
-    """
+def test_base_loop_does_not_stop_only_because_state_spoke() -> None:
+    """基础循环不负责判断本次是否有工具，迭代级结束由 act 阶段处理。"""
     state = TurnState(stream_id="s", spoke=True, iterations=1)
     assert should_continue_loop(state, max_iterations=6)
 
@@ -558,6 +553,118 @@ class _BlockedExpandedTool:
     def to_schema(cls) -> dict[str, dict[str, str]]:
         """返回工具 schema。"""
         return {"function": {"name": "tool-blocked"}}
+
+
+async def test_record_streamed_duplicate_is_not_new_progress() -> None:
+    """已发出的流式复读应标记重复，不得再次计入有效发言。"""
+    chatter = AgenticChatter(stream_id="stream-duplicate", plugin=object())
+    state = TurnState(
+        stream_id="stream-duplicate",
+        spoke=True,
+        sent_texts=["建议你先重启一下服务"],
+        visible_text_emissions=1,
+    )
+    cleaned = SimpleNamespace(
+        text="建议你先重启一下服务！",
+        removed_thoughts=(),
+    )
+
+    result = chatter._record_streamed_message(
+        None,
+        SimpleNamespace(reasoning_content=""),
+        state,
+        cleaned,
+    )
+
+    assert result == (False, True)
+    assert state.sent_texts == ["建议你先重启一下服务"]
+    assert state.visible_text_emissions == 1
+    assert state.duplicate_text_streak == 1
+
+
+async def test_stage_act_ends_after_text_without_tools() -> None:
+    """纯文本回复发送后应立即结束，不再生成确认型尾句。"""
+    response = _PayloadResponse([], [])
+    request = _RequestReturningResponse(response)
+    chatter = AgenticChatter(stream_id="text-auto-end", plugin=object())
+    chatter.get_llm_usables = AsyncMock(return_value=[])
+    chatter.modify_llm_usables = AsyncMock(return_value=[])
+    chatter._build_layout = lambda _config, _usables: SimpleNamespace(
+        exposed=[],
+        collapsed_categories={},
+        collapsed_classes={},
+    )
+    chatter._build_system_prompt = AsyncMock(return_value="system")
+    chatter._build_user_prompt = AsyncMock(return_value="user")
+    chatter.create_request = lambda **_kwargs: request
+    chatter._has_new_unreads = AsyncMock(return_value=False)
+    chatter._deliver_message = AsyncMock(return_value=(True, False))
+    chatter._execute_calls = AsyncMock()
+
+    await chatter._stage_act(
+        _InterruptConfig(),
+        object(),
+        TurnState(stream_id="text-auto-end"),
+        [],
+    )
+
+    chatter._deliver_message.assert_awaited_once()
+    chatter._execute_calls.assert_not_awaited()
+    assert not any(payload.role == ROLE.USER for payload in response.payloads)
+
+
+async def test_stage_act_continues_when_text_has_tool_call() -> None:
+    """文本和普通工具同轮出现时应执行工具并保留后续迭代能力。"""
+    config = _ToolConfig()
+    config.pipeline.max_iterations = 1
+    calls = [ToolCall(id="call_tool", name="tool-search", args={"q": "天气"})]
+    response = _PayloadResponse([], calls)
+    request = _RequestReturningResponse(response)
+    chatter = AgenticChatter(stream_id="text-with-tool", plugin=object())
+    chatter.get_llm_usables = AsyncMock(return_value=[])
+    chatter.modify_llm_usables = AsyncMock(return_value=[])
+    chatter._build_layout = lambda _config, _usables: SimpleNamespace(
+        exposed=[],
+        collapsed_categories={},
+        collapsed_classes={},
+    )
+    chatter._build_system_prompt = AsyncMock(return_value="system")
+    chatter._build_user_prompt = AsyncMock(return_value="user")
+    chatter.create_request = lambda **_kwargs: request
+    chatter._has_new_unreads = AsyncMock(return_value=False)
+    chatter._deliver_message = AsyncMock(return_value=(True, False))
+    chatter._execute_calls = AsyncMock(return_value=1)
+
+    await chatter._stage_act(
+        config,
+        object(),
+        TurnState(stream_id="text-with-tool"),
+        [],
+    )
+
+    chatter._execute_calls.assert_awaited_once()
+
+
+async def test_execute_calls_counts_only_successful_tools() -> None:
+    """失败工具不得被当作有效进展。"""
+    calls = [
+        ToolCall(id="success", name="tool-success", args={}),
+        ToolCall(id="failure", name="tool-failure", args={}),
+    ]
+    chatter = AgenticChatter(stream_id="tool-progress", plugin=object())
+    chatter.run_tool_call = AsyncMock(
+        return_value=[("ok", True), ("failed", False)]
+    )
+
+    count = await chatter._execute_calls(
+        calls,
+        SimpleNamespace(),
+        TurnState(stream_id="tool-progress"),
+        SimpleNamespace(),
+        [],
+    )
+
+    assert count == 1
 
 
 async def test_stage_act_does_not_inject_blacklisted_explore_tool() -> None:
