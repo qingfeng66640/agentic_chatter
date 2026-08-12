@@ -1,6 +1,6 @@
 # Agentic Chatter
 
-`Agentic Chatter` 是 Neo-MoFox 的 Agent 式聊天器插件（v0.2.2）。它将一轮回复拆分为可编排的处理阶段，并在群聊中先判断“是否应当参与”，再决定如何生成、执行和收尾回复，避免 Bot 对每条消息机械接话。
+`Agentic Chatter` 是 Neo-MoFox 的 Agent 式聊天器插件（v0.2.3）。它将一轮回复拆分为可编排的处理阶段，并在群聊中先判断“是否应当参与”，再决定如何生成、执行和收尾回复，避免 Bot 对每条消息机械接话。
 
 - **维护者**：qf
 - **仓库**：`qingfeng66640/agentic_chatter`
