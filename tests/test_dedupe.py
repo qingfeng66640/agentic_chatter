@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from ..tooling.dedupe import CallDeduper, build_call_key
+from ..tooling.dedupe import CallDeduper, build_call_key, build_result_preview
 
 
 def test_build_call_key_ignores_reason_field() -> None:
@@ -82,6 +82,17 @@ def test_record_result_serializes_dict() -> None:
 
     decision = deduper.check("tool-a", {"x": 1})
     assert "temp" in decision.note
+
+
+
+def test_result_preview_redacts_secrets_and_bounds_text() -> None:
+    preview, truncated = build_result_preview(
+        {"token": "secret-value", "message": "长" * 300}
+    )
+    assert "secret-value" not in preview
+    assert "[REDACTED]" in preview
+    assert truncated
+    assert len(preview) == 200
 
 
 def test_reset_clears_state() -> None:

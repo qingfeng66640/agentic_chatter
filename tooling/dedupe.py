@@ -12,12 +12,49 @@ DFC 采用硬去重：同名同参的调用跨轮被直接拒绝执行，并向�
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 DedupeMode = Literal["soft", "hard", "off"]
 
-# 附在软去重提醒中的上次结果的最大长度
+
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(token|secret|password|authorization|cookie|api[_-]?key)",
+    re.IGNORECASE,
+)
+
+
+def build_result_preview(value: Any) -> tuple[str, bool]:
+    """将工具结果转换为安全、有界的单行摘要。"""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, (dict, list, tuple, int, float, bool)) or value is None:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            text = "[工具结果不可序列化]"
+    else:
+        text = "[工具结果未展开]"
+
+    if isinstance(value, dict):
+        text = re.sub(
+            r'("(?:token|secret|password|authorization|cookie|api[_-]?key)"\s*:\s*)"[^"]*"',
+            r'\1"[REDACTED]"',
+            text,
+            flags=re.IGNORECASE,
+        )
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(
+        r"(?i)(token|secret|password|authorization|cookie|api[_-]?key)\s*[:=]\s*[^,;\s]+",
+        r"\1=[REDACTED]",
+        text,
+    )
+    truncated = len(text) > MAX_ECHO_CHARS
+    if truncated:
+        text = text[: MAX_ECHO_CHARS - 1] + "…"
+    return text, truncated
+
 MAX_ECHO_CHARS = 200
 
 
@@ -128,26 +165,13 @@ class CallDeduper:
         return DedupeDecision(allow=True)
 
     def record_result(self, name: str, args: Any, result: Any) -> None:
-        """记录一次调用的执行结果，供后续重复调用时回显。
-
-        Args:
-            name: 工具调用名称。
-            args: 工具调用参数。
-            result: 执行结果。
-        """
+        """记录一次已经处理过的结果摘要。"""
         key = build_call_key(name, args)
-        if isinstance(result, str):
-            text = result
-        else:
-            try:
-                text = json.dumps(result, ensure_ascii=False, default=str)
-            except TypeError:
-                text = str(result)
-
-        cleaned = " ".join(text.split())
-        if len(cleaned) > MAX_ECHO_CHARS:
-            cleaned = cleaned[: MAX_ECHO_CHARS - 1] + "…"
-        self.last_results[key] = cleaned
+        if isinstance(result, str) and len(result) <= MAX_ECHO_CHARS:
+            self.last_results[key] = result
+            return
+        preview, _ = build_result_preview(result)
+        self.last_results[key] = preview
 
     def reset(self) -> None:
         """清空去重状态，通常在一轮对话结束时调用。"""

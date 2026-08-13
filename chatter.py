@@ -73,7 +73,10 @@ from .pipeline.loop import (
     append_no_op_nudge,
     append_tool_result,
     build_speak_segments,
+    build_tool_execution_records,
     classify_calls,
+    collect_tool_result_delta,
+    decide_iteration,
     deliver_segments,
     is_repeated_reply,
     should_continue_loop,
@@ -86,7 +89,7 @@ from .pipeline.stages import (
     STAGE_REFLECT,
     resolve_stage_order,
 )
-from .pipeline.state import TurnState
+from .pipeline.state import ToolExecutionRecord, TurnState
 from .tooling.dedupe import CallDeduper
 from .tooling.explore import (
     ExploreToolsTool,
@@ -727,44 +730,12 @@ class _AgenticChatterBase(BaseChatter):
                     )
 
             append_control_tool_results(response, calls)
-            control_call_count = len(calls) - len(normal_calls)
-            logger.info(
-                f"[{self.stream_id[:8]}] event=act_iteration "
-                f"iteration={state.iterations} normal_calls={len(normal_calls)} "
-                f"control_calls={control_call_count} tool_success={tool_progress} "
-                f"spoke={spoke_now} duplicate={duplicate_text}"
-            )
-
-            if stop_minutes is not None:
-                state.stop_requested = True
-                state.stop_minutes = stop_minutes
-                clear_stream_catalog(self.stream_id)
-                return
-
-            if end_seconds is not None:
-                state.end_turn_requested = True
-                state.end_turn_seconds = end_seconds
-                clear_stream_catalog(self.stream_id)
-                return
-
-            if not normal_calls and (spoke_now or duplicate_text):
-                reason = (
-                    "duplicate_text_without_tool"
-                    if duplicate_text
-                    else "text_sent_without_tool"
-                )
-                logger.info(
-                    f"[{self.stream_id[:8]}] event=act_auto_end reason={reason}"
-                )
-                clear_stream_catalog(self.stream_id)
-                return
 
             made_progress = spoke_now or tool_progress > 0
             if made_progress:
                 state.no_progress_iterations = 0
             else:
                 state.no_progress_iterations += 1
-
             if had_spoken_before_iteration:
                 state.post_speech_iterations += 1
 
@@ -781,27 +752,45 @@ class _AgenticChatterBase(BaseChatter):
                 1,
                 int(
                     getattr(
-                        config.humanize if config is not None else None,
+                        getattr(config, "humanize", None),
                         "max_duplicate_streak",
                         2,
                     )
                 ),
             )
-            if tool_progress == 0 and (
-                state.no_progress_iterations >= max_no_progress
-                or state.post_speech_iterations >= max_post_speech
-                or state.duplicate_text_streak >= max_duplicate_streak
-            ):
-                if state.duplicate_text_streak >= max_duplicate_streak:
-                    reason = "max_duplicate_streak"
-                elif state.post_speech_iterations >= max_post_speech:
-                    reason = "max_post_speech"
-                else:
-                    reason = "max_no_progress"
+            iteration_decision = decide_iteration(
+                normal_call_count=len(normal_calls),
+                end_seconds=end_seconds,
+                stop_minutes=stop_minutes,
+                spoke_now=spoke_now,
+                duplicate_text=duplicate_text,
+                tool_progress=tool_progress,
+                no_progress_iterations=state.no_progress_iterations,
+                post_speech_iterations=state.post_speech_iterations,
+                duplicate_text_streak=state.duplicate_text_streak,
+                max_no_progress=max_no_progress,
+                max_post_speech=max_post_speech,
+                max_duplicate_streak=max_duplicate_streak,
+            )
+            control_call_count = len(calls) - len(normal_calls)
+            logger.info(
+                f"[{self.stream_id[:8]}] event=act_iteration "
+                f"iteration={state.iterations} normal_calls={len(normal_calls)} "
+                f"control_calls={control_call_count} tool_success={tool_progress} "
+                f"spoke={spoke_now} duplicate={duplicate_text} "
+                f"termination={iteration_decision.reason or 'continue'}"
+            )
+            if not iteration_decision.should_continue:
+                state.termination = iteration_decision
+                if stop_minutes is not None:
+                    state.stop_requested = True
+                    state.stop_minutes = stop_minutes
+                elif end_seconds is not None:
+                    state.end_turn_requested = True
+                    state.end_turn_seconds = end_seconds
                 logger.info(
-                    f"[{self.stream_id[:8]}] event=act_auto_end reason={reason} "
-                    f"no_progress={state.no_progress_iterations} "
-                    f"duplicate={state.duplicate_text_streak}"
+                    f"[{self.stream_id[:8]}] event=act_auto_end "
+                    f"reason={iteration_decision.reason}"
                 )
                 clear_stream_catalog(self.stream_id)
                 return
@@ -809,6 +798,11 @@ class _AgenticChatterBase(BaseChatter):
             if not spoke_now and not normal_calls:
                 append_no_op_nudge(response)
 
+        if state.termination is not None:
+            logger.info(
+                f"[{self.stream_id[:8]}] event=act_auto_end "
+                f"reason={state.termination.reason}"
+            )
         clear_stream_catalog(self.stream_id)
 
     async def _stage_reflect(
@@ -1169,23 +1163,54 @@ class _AgenticChatterBase(BaseChatter):
             decision = state.deduper.check(name, args)
             if not decision.allow:
                 append_tool_result(response, call, decision.note)
+                state.tool_ledger.append(
+                    ToolExecutionRecord(
+                        iteration=state.iterations,
+                        call_id=(
+                            str(getattr(call, "id", None))
+                            if getattr(call, "id", None) is not None
+                            else None
+                        ),
+                        name=name,
+                        outcome="skipped",
+                        result_capture="not_applicable",
+                        result_preview=decision.note,
+                        counts_as_progress=False,
+                    )
+                )
                 continue
             runnable.append(call)
 
         if not runnable:
             return 0
 
+        payload_start = len(list(getattr(response, "payloads", None) or []))
         results = await self.run_tool_call(runnable, response, registry, trigger)
+        captured = collect_tool_result_delta(response, payload_start)
+        records = build_tool_execution_records(
+            runnable,
+            results,
+            captured,
+            iteration=state.iterations,
+        )
+        state.tool_ledger.extend(records)
+
         success_count = 0
-        for call, (_, success) in zip(runnable, results, strict=False):
+        for call, record in zip(runnable, records, strict=False):
             args = getattr(call, "args", None)
             state.deduper.record_result(
-                str(getattr(call, "name", "") or ""),
+                record.name,
                 args if isinstance(args, dict) else {},
-                "执行成功" if success else "执行失败",
+                record.result_preview,
             )
-            if success:
+            if record.counts_as_progress:
                 success_count += 1
+            logger.info(
+                f"[{self.stream_id[:8]}] event=tool_result "
+                f"iteration={record.iteration} name={record.name} "
+                f"outcome={record.outcome} capture={record.result_capture} "
+                f"preview_chars={len(record.result_preview)}"
+            )
         return success_count
 
     async def _has_new_unreads(

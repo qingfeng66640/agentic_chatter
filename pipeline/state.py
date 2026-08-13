@@ -7,26 +7,52 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from enum import StrEnum
+from typing import Any, Literal
 
 from ..decision.models import ReplyDecision
 from ..tooling.dedupe import CallDeduper
 
 
+class TerminationReason(StrEnum):
+    """Agent 回合结束原因。"""
+
+    STOP_REQUESTED = "stop_requested"
+    END_TURN_REQUESTED = "end_turn_requested"
+    TEXT_WITHOUT_TOOL = "text_without_tool"
+    DUPLICATE_TEXT_WITHOUT_TOOL = "duplicate_text_without_tool"
+    MAX_DUPLICATE_STREAK = "max_duplicate_streak"
+    MAX_POST_SPEECH = "max_post_speech"
+    MAX_NO_PROGRESS = "max_no_progress"
+    MAX_ITERATIONS = "max_iterations"
+
+
+@dataclass(frozen=True)
+class LoopDecision:
+    """一次 act 迭代的继续或终止裁决。"""
+
+    should_continue: bool
+    reason: TerminationReason | None = None
+    wait_seconds: float | None = None
+    stop_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class ToolExecutionRecord:
+    """一次工具调用的有界运行记录。"""
+
+    iteration: int
+    call_id: str | None
+    name: str
+    outcome: Literal["success", "failure", "skipped"]
+    result_capture: Literal["captured", "missing", "ambiguous", "not_applicable"]
+    result_preview: str
+    counts_as_progress: bool
+
+
 @dataclass
 class TurnOutcome:
-    """一轮 agent 循环的最终结果。
-
-    Attributes:
-        should_wait: 是否进入等待。
-        wait_seconds: 等待秒数；None 表示等待新消息。
-        should_stop: 是否进入冷却。
-        stop_seconds: 冷却秒数。
-        spoke: 本轮是否真的说过话。
-        iterations: 实际执行的迭代次数。
-        tool_calls: 本轮执行过的工具调用名列表。
-        topic: 本轮对话的一句话主题，用于写回全局心智。
-    """
+    """一轮 agent 循环的最终结果。"""
 
     should_wait: bool = True
     wait_seconds: float | None = None
@@ -40,23 +66,7 @@ class TurnOutcome:
 
 @dataclass
 class TurnState:
-    """单轮对话的运行时状态。
-
-    Attributes:
-        stream_id: 当前聊天流 ID。
-        unread_texts: 本轮处理的未读消息文本，用于情绪推断与摘要。
-        deduper: 工具调用去重器。
-        iterations: 已执行的迭代次数。
-        spoke: 本轮是否已经说过话。
-        tool_calls: 已执行的工具调用名列表。
-        end_turn_requested: 模型是否已请求结束本轮。
-        end_turn_seconds: 结束本轮时请求的等待秒数。
-        stop_requested: 模型是否已请求冷却。
-        stop_minutes: 冷却分钟数。
-        perceived_topic: 感知阶段产出的话题摘要。
-        plan_note: 规划阶段产出的意图说明。
-        extras: 供自定义阶段存放任意数据。
-    """
+    """单轮对话的运行时状态。"""
 
     stream_id: str
     unread_texts: str = ""
@@ -69,10 +79,12 @@ class TurnState:
     visible_text_emissions: int = 0
     post_speech_iterations: int = 0
     tool_calls: list[str] = field(default_factory=list)
+    tool_ledger: list[ToolExecutionRecord] = field(default_factory=list)
     end_turn_requested: bool = False
     end_turn_seconds: float = 0.0
     stop_requested: bool = False
     stop_minutes: float = 0.0
+    termination: LoopDecision | None = None
     perceived_topic: str = ""
     plan_note: str = ""
     decision: ReplyDecision | None = None
@@ -81,16 +93,20 @@ class TurnState:
     extras: dict[str, Any] = field(default_factory=dict)
 
     def to_outcome(self) -> TurnOutcome:
-        """将当前状态收敛为一轮的最终结果。
-
-        Returns:
-            TurnOutcome: 本轮结果。
-        """
+        """将当前状态收敛为一轮的最终结果。"""
+        decision = self.termination
+        should_stop = self.stop_requested
+        stop_seconds = max(0.0, self.stop_minutes * 60.0)
+        wait_seconds = self.end_turn_seconds if self.end_turn_seconds > 0 else None
+        if decision is not None:
+            should_stop = decision.stop_seconds > 0
+            stop_seconds = decision.stop_seconds
+            wait_seconds = decision.wait_seconds
         return TurnOutcome(
-            should_wait=not self.stop_requested,
-            wait_seconds=self.end_turn_seconds if self.end_turn_seconds > 0 else None,
-            should_stop=self.stop_requested,
-            stop_seconds=max(0.0, self.stop_minutes * 60.0),
+            should_wait=not should_stop,
+            wait_seconds=wait_seconds,
+            should_stop=should_stop,
+            stop_seconds=stop_seconds,
             spoke=self.spoke,
             iterations=self.iterations,
             tool_calls=list(self.tool_calls),

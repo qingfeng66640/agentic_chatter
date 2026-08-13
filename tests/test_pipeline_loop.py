@@ -21,7 +21,10 @@ from ..pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
     build_speak_segments,
+    build_tool_execution_records,
     classify_calls,
+    collect_tool_result_delta,
+    decide_iteration,
     deliver_segments,
     is_repeated_reply,
     normalize_reply_text,
@@ -35,7 +38,7 @@ from ..pipeline.stages import (
     STAGE_REFLECT,
     resolve_stage_order,
 )
-from ..pipeline.state import TurnState
+from ..pipeline.state import TerminationReason, TurnState
 
 
 @dataclass
@@ -646,25 +649,114 @@ async def test_stage_act_continues_when_text_has_tool_call() -> None:
 
 
 async def test_execute_calls_counts_only_successful_tools() -> None:
-    """失败工具不得被当作有效进展。"""
+    """失败工具不得被当作有效进展，并应记录结果账本。"""
     calls = [
         ToolCall(id="success", name="tool-success", args={}),
         ToolCall(id="failure", name="tool-failure", args={}),
     ]
+    response = _PayloadResponse([], calls)
+
+    async def run_tool_call(*_args: Any) -> list[tuple[str, bool]]:
+        response.add_payload(
+            LLMPayload(
+                ROLE.TOOL_RESULT,
+                ToolResult(value="晴天", call_id="success", name="tool-success"),
+            )
+        )
+        response.add_payload(
+            LLMPayload(
+                ROLE.TOOL_RESULT,
+                ToolResult(value="查询失败", call_id="failure", name="tool-failure"),
+            )
+        )
+        return [("ok", True), ("failed", False)]
+
     chatter = AgenticChatter(stream_id="tool-progress", plugin=object())
-    chatter.run_tool_call = AsyncMock(
-        return_value=[("ok", True), ("failed", False)]
-    )
+    chatter.run_tool_call = AsyncMock(side_effect=run_tool_call)
+    state = TurnState(stream_id="tool-progress")
 
     count = await chatter._execute_calls(
         calls,
-        SimpleNamespace(),
-        TurnState(stream_id="tool-progress"),
+        response,
+        state,
         SimpleNamespace(),
         [],
     )
 
     assert count == 1
+    assert [record.outcome for record in state.tool_ledger] == ["success", "failure"]
+    assert [record.result_preview for record in state.tool_ledger] == ["晴天", "查询失败"]
+    assert "晴天" in state.deduper.check("tool-success", {}).note
+
+
+def test_decide_iteration_preserves_control_and_text_priority() -> None:
+    stop = decide_iteration(
+        normal_call_count=1,
+        end_seconds=2.0,
+        stop_minutes=3.0,
+        spoke_now=True,
+        duplicate_text=False,
+        tool_progress=1,
+        no_progress_iterations=0,
+        post_speech_iterations=0,
+        duplicate_text_streak=0,
+        max_no_progress=2,
+        max_post_speech=3,
+        max_duplicate_streak=2,
+    )
+    assert stop.reason == TerminationReason.STOP_REQUESTED
+    assert stop.stop_seconds == 180.0
+
+    text = decide_iteration(
+        normal_call_count=0,
+        end_seconds=None,
+        stop_minutes=None,
+        spoke_now=True,
+        duplicate_text=False,
+        tool_progress=0,
+        no_progress_iterations=1,
+        post_speech_iterations=0,
+        duplicate_text_streak=0,
+        max_no_progress=1,
+        max_post_speech=1,
+        max_duplicate_streak=1,
+    )
+    assert text.reason == TerminationReason.TEXT_WITHOUT_TOOL
+
+
+def test_tool_result_delta_matches_calls_by_id() -> None:
+    calls = [
+        ToolCall(id="first", name="tool-a", args={}),
+        ToolCall(id="second", name="tool-b", args={}),
+    ]
+    response = _PayloadResponse(
+        [LLMPayload(ROLE.USER, Text("before"))],
+        calls,
+    )
+    start = len(response.payloads)
+    response.add_payload(
+        LLMPayload(
+            ROLE.TOOL_RESULT,
+            ToolResult(value="B", call_id="second", name="tool-b"),
+        )
+    )
+    response.add_payload(
+        LLMPayload(
+            ROLE.TOOL_RESULT,
+            ToolResult(value="A", call_id="first", name="tool-a"),
+        )
+    )
+
+    captured = collect_tool_result_delta(response, start)
+    records = build_tool_execution_records(
+        calls,
+        [("a", True), ("b", True)],
+        captured,
+        iteration=2,
+    )
+
+    assert [record.result_preview for record in records] == ["A", "B"]
+    assert all(record.result_capture == "captured" for record in records)
 
 
 async def test_stage_act_does_not_inject_blacklisted_explore_tool() -> None:

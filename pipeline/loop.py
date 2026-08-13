@@ -16,7 +16,13 @@ from src.kernel.llm import LLMPayload, ROLE, Text, ToolResult
 
 from ..actions.control import DEFAULT_STOP_MINUTES, MAX_STOP_MINUTES
 from ..humanize.segmenter import Segment, segment_reply
-from .state import TurnState
+from ..tooling.dedupe import build_result_preview
+from .state import (
+    LoopDecision,
+    TerminationReason,
+    ToolExecutionRecord,
+    TurnState,
+)
 
 # 控制流动作名，这些调用不进入普通工具执行路径
 END_TURN_CALL = "action-end_turn"
@@ -114,23 +120,129 @@ def classify_calls(calls: list[Any]) -> tuple[list[Any], float | None, float | N
 
 
 def should_continue_loop(state: TurnState, max_iterations: int) -> bool:
-    """判断 agent 循环是否应当继续下一次迭代。
-
-    基础循环只处理显式控制请求和迭代上限。文本发送后的终止由
-    ``_stage_act`` 结合本次是否存在普通工具调用决定。
-
-    Args:
-        state: 当前回合状态。
-        max_iterations: 最大迭代次数上限。
-
-    Returns:
-        bool: 是否继续循环。
-    """
-    if state.end_turn_requested or state.stop_requested:
+    """判断 agent 循环是否应当继续下一次迭代。"""
+    if state.termination is not None or state.end_turn_requested or state.stop_requested:
         return False
     if max_iterations > 0 and state.iterations >= max_iterations:
+        state.termination = LoopDecision(
+            should_continue=False,
+            reason=TerminationReason.MAX_ITERATIONS,
+        )
         return False
     return True
+
+
+def decide_iteration(
+    *,
+    normal_call_count: int,
+    end_seconds: float | None,
+    stop_minutes: float | None,
+    spoke_now: bool,
+    duplicate_text: bool,
+    tool_progress: int,
+    no_progress_iterations: int,
+    post_speech_iterations: int,
+    duplicate_text_streak: int,
+    max_no_progress: int,
+    max_post_speech: int,
+    max_duplicate_streak: int,
+) -> LoopDecision:
+    """根据本次迭代状态生成统一继续或终止裁决。"""
+    if stop_minutes is not None:
+        return LoopDecision(
+            should_continue=False,
+            reason=TerminationReason.STOP_REQUESTED,
+            stop_seconds=max(0.0, stop_minutes * 60.0),
+        )
+    if end_seconds is not None:
+        return LoopDecision(
+            should_continue=False,
+            reason=TerminationReason.END_TURN_REQUESTED,
+            wait_seconds=end_seconds if end_seconds > 0 else None,
+        )
+    if normal_call_count == 0 and (spoke_now or duplicate_text):
+        reason = (
+            TerminationReason.DUPLICATE_TEXT_WITHOUT_TOOL
+            if duplicate_text
+            else TerminationReason.TEXT_WITHOUT_TOOL
+        )
+        return LoopDecision(should_continue=False, reason=reason)
+    if tool_progress == 0:
+        if duplicate_text_streak >= max_duplicate_streak:
+            return LoopDecision(
+                should_continue=False,
+                reason=TerminationReason.MAX_DUPLICATE_STREAK,
+            )
+        if post_speech_iterations >= max_post_speech:
+            return LoopDecision(
+                should_continue=False,
+                reason=TerminationReason.MAX_POST_SPEECH,
+            )
+        if no_progress_iterations >= max_no_progress:
+            return LoopDecision(
+                should_continue=False,
+                reason=TerminationReason.MAX_NO_PROGRESS,
+            )
+    return LoopDecision(should_continue=True)
+
+
+def collect_tool_result_delta(response: Any, start_index: int) -> list[ToolResult]:
+    """读取指定 payload 位置之后新增的工具结果。"""
+    captured: list[ToolResult] = []
+    payloads = list(getattr(response, "payloads", None) or [])
+    for payload in payloads[start_index:]:
+        if getattr(payload, "role", None) != ROLE.TOOL_RESULT:
+            continue
+        content = getattr(payload, "content", None)
+        parts = content if isinstance(content, list) else [content]
+        captured.extend(part for part in parts if isinstance(part, ToolResult))
+    return captured
+
+
+def build_tool_execution_records(
+    calls: list[Any],
+    results: list[tuple[Any, bool]],
+    captured: list[ToolResult],
+    *,
+    iteration: int,
+) -> list[ToolExecutionRecord]:
+    """将底层执行结果与新增 ToolResult 匹配为结构化账本记录。"""
+    remaining = list(captured)
+    records: list[ToolExecutionRecord] = []
+    for index, call in enumerate(calls):
+        call_id = getattr(call, "id", None)
+        name = str(getattr(call, "name", "") or "")
+        match = next(
+            (item for item in remaining if call_id and item.call_id == call_id),
+            None,
+        )
+        capture = "captured"
+        if match is None:
+            same_name = [item for item in remaining if item.name == name]
+            if len(same_name) == 1:
+                match = same_name[0]
+            elif len(same_name) > 1:
+                capture = "ambiguous"
+            else:
+                capture = "missing"
+        if match is not None:
+            remaining.remove(match)
+            preview, _ = build_result_preview(match.value)
+        else:
+            preview = "上次调用已完成，但未能可靠读取可回显的结果。"
+        success = bool(results[index][1]) if index < len(results) else False
+        records.append(
+            ToolExecutionRecord(
+                iteration=iteration,
+                call_id=str(call_id) if call_id is not None else None,
+                name=name,
+                outcome="success" if success else "failure",
+                result_capture=capture,
+                result_preview=preview,
+                counts_as_progress=success,
+            )
+        )
+    return records
 
 
 def build_speak_segments(message: str | None, humanize_config: Any) -> list[Segment]:
