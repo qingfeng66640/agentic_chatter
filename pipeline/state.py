@@ -77,6 +77,8 @@ class TurnState:
     duplicate_text_streak: int = 0
     no_progress_iterations: int = 0
     visible_text_emissions: int = 0
+    input_confirmed: bool = False
+    interrupted_by_new_input: bool = False
     post_speech_iterations: int = 0
     tool_calls: list[str] = field(default_factory=list)
     tool_ledger: list[ToolExecutionRecord] = field(default_factory=list)

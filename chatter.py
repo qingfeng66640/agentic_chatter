@@ -21,7 +21,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
-from src.app.plugin_system.api import llm_api, send_api
+from src.app.plugin_system.api import llm_api, send_api, stream_api
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import (
     BaseChatter,
@@ -67,6 +67,7 @@ from .humanize.segmenter import (
     clean_reply_text_with_metadata,
     is_framework_message_line,
 )
+from .pipeline.mailbox import TurnClaim, get_stream_mailbox, message_key
 from .pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -200,53 +201,102 @@ class _AgenticChatterBase(BaseChatter):
         from src.core.managers import get_stream_manager
 
         while True:
-            chat_stream = await get_stream_manager().get_or_create_stream(
-                stream_id=self.stream_id
-            )
-            unread_text, unread_msgs = await self.fetch_unreads()
-
-            if not unread_msgs:
+            mailbox = get_stream_mailbox(self.stream_id)
+            owner = object()
+            generation = await mailbox.try_acquire(owner)
+            if generation is None:
                 yield Wait()
                 continue
 
-            state = TurnState(
-                stream_id=self.stream_id,
-                unread_texts=unread_text,
-                deduper=self._build_deduper(config),
-            )
+            claim: TurnClaim | None = None
+            turn_result: ChatterResult = Wait()
+            try:
+                _, unread_snapshot = await self.fetch_unreads()
+                await mailbox.merge_snapshot(unread_snapshot)
+                claim = await mailbox.claim_pending(owner, generation)
+                if claim is not None:
+                    unread_msgs = list(claim.messages)
+                    unread_text = "\n".join(
+                        self.format_message_line(message) for message in unread_msgs
+                    )
+                    chat_stream = await get_stream_manager().get_or_create_stream(
+                        stream_id=self.stream_id
+                    )
+                    state = TurnState(
+                        stream_id=self.stream_id,
+                        unread_texts=unread_text,
+                        deduper=self._build_deduper(config),
+                    )
 
-            outcome_result = await self._run_pipeline(
-                config=config,
-                chat_stream=chat_stream,
-                state=state,
-                unread_msgs=unread_msgs,
-            )
+                    outcome_result = await self._run_pipeline(
+                        config=config,
+                        chat_stream=chat_stream,
+                        state=state,
+                        unread_msgs=unread_msgs,
+                        claim=claim,
+                    )
 
-            if state.failed:
-                logger.warning(
-                    f"[{self.stream_id[:8]}] 本轮未完成，保留未读消息等待重试: {state.error}"
-                )
-                yield Wait(time=5.0)
-                continue
+                    if state.failed:
+                        await mailbox.release_claim(claim)
+                        claim = None
+                        logger.warning(
+                            f"[{self.stream_id[:8]}] event=turn_released "
+                            f"generation={generation} messages={len(unread_msgs)} "
+                            f"visible={state.spoke} reason={state.error}"
+                        )
+                        turn_result = Wait(time=5.0)
+                    else:
+                        if config is not None and config.decision.enabled:
+                            get_participation_store().record(
+                                self.stream_id,
+                                responded=state.spoke,
+                                topic=state.perceived_topic,
+                                ttl_seconds=max(
+                                    60.0,
+                                    float(config.decision.state_ttl_minutes) * 60.0,
+                                ),
+                                max_streams=max(
+                                    1,
+                                    int(config.decision.max_state_streams),
+                                ),
+                            )
 
-            if config is not None and config.decision.enabled:
-                get_participation_store().record(
-                    self.stream_id,
-                    responded=state.spoke,
-                    topic=state.perceived_topic,
-                    ttl_seconds=max(
-                        60.0, float(config.decision.state_ttl_minutes) * 60.0
-                    ),
-                    max_streams=max(1, int(config.decision.max_state_streams)),
-                )
+                        flushed_count = await self._flush_claim_unreads(unread_msgs)
+                        if flushed_count != len(unread_msgs):
+                            raise RuntimeError(
+                                "未读消息确认不完整："
+                                f"expected={len(unread_msgs)} actual={flushed_count}"
+                            )
+                        await mailbox.commit_claim(claim)
+                        claim = None
+                        state.input_confirmed = True
+                        logger.info(
+                            f"[{self.stream_id[:8]}] event=turn_committed "
+                            f"generation={generation} messages={len(unread_msgs)} "
+                            f"visible={state.spoke}"
+                        )
+                        turn_result = (
+                            Stop(outcome_result.stop_seconds)
+                            if outcome_result.should_stop
+                            else Wait(time=outcome_result.wait_seconds)
+                        )
+            except asyncio.CancelledError:
+                if claim is not None:
+                    await mailbox.release_claim(claim)
+                    claim = None
+                raise
+            except Exception as exc:
+                if claim is not None:
+                    await mailbox.release_claim(claim)
+                    claim = None
+                logger.error(f"[{self.stream_id[:8]}] 回合执行失败：{exc}")
+                turn_result = Wait(time=5.0)
+            finally:
+                if claim is not None:
+                    await mailbox.release_claim(claim)
+                await mailbox.release_owner(owner, generation)
 
-            await self.flush_unreads(unread_msgs)
-
-            if outcome_result.should_stop:
-                yield Stop(outcome_result.stop_seconds)
-                continue
-
-            yield Wait(time=outcome_result.wait_seconds)
+            yield turn_result
 
     def _build_deduper(self, config: AgenticChatterConfig | None) -> CallDeduper:
         """按配置构建本轮的去重器。
@@ -276,6 +326,7 @@ class _AgenticChatterBase(BaseChatter):
         chat_stream: "ChatStream",
         state: TurnState,
         unread_msgs: list["Message"],
+        claim: TurnClaim | None = None,
     ) -> Any:
         """按配置的阶段顺序执行管线。
 
@@ -284,6 +335,7 @@ class _AgenticChatterBase(BaseChatter):
             chat_stream: 当前聊天流。
             state: 回合状态。
             unread_msgs: 本轮未读消息。
+            claim: mailbox 固定的本轮输入；兼容直接调用时可为空。
 
         Returns:
             TurnOutcome: 本轮结果。
@@ -309,7 +361,13 @@ class _AgenticChatterBase(BaseChatter):
                     await self._stage_plan(config, state)
             elif stage_name == STAGE_ACT:
                 if state.decision is None or state.decision.should_respond:
-                    await self._stage_act(config, chat_stream, state, unread_msgs)
+                    await self._stage_act(
+                        config,
+                        chat_stream,
+                        state,
+                        unread_msgs,
+                        claim=claim,
+                    )
             elif stage_name == STAGE_REFLECT:
                 await self._stage_reflect(config, chat_stream, state)
             else:
@@ -605,6 +663,8 @@ class _AgenticChatterBase(BaseChatter):
         chat_stream: "ChatStream",
         state: TurnState,
         unread_msgs: list["Message"],
+        *,
+        claim: TurnClaim | None = None,
     ) -> None:
         """行动阶段：agent 主循环。
 
@@ -616,6 +676,7 @@ class _AgenticChatterBase(BaseChatter):
             chat_stream: 当前聊天流。
             state: 回合状态。
             unread_msgs: 本轮未读消息。
+            claim: mailbox 固定的本轮输入；兼容直接调用时可为空。
         """
         usables = await self.get_llm_usables()
         usables = await self.modify_llm_usables(usables)  # type: ignore[arg-type]
@@ -680,12 +741,13 @@ class _AgenticChatterBase(BaseChatter):
                 return
 
             calls = list(getattr(response, "call_list", None) or [])
-            if await self._has_new_unreads(config, unread_msgs):
+            if await self._has_new_unreads(config, unread_msgs, claim=claim):
                 if stream_session is not None and stream_session.started:
                     await stream_session.finalize(
                         str(getattr(response, "message", "") or "")
                     )
                 append_interrupted_tool_results(response, calls)
+                state.interrupted_by_new_input = True
                 state.failed = True
                 state.error = "生成期间收到新消息，重新规划"
                 clear_stream_catalog(self.stream_id)
@@ -1213,16 +1275,60 @@ class _AgenticChatterBase(BaseChatter):
             )
         return success_count
 
+    async def _flush_claim_unreads(self, unread_messages: list["Message"]) -> int:
+        """确认本轮 claim 的未读消息，兼容缺少 message_id 的消息。"""
+        if not unread_messages:
+            return 0
+
+        identified = [
+            message
+            for message in unread_messages
+            if str(getattr(message, "message_id", "") or "").strip()
+        ]
+        unidentified = [
+            message
+            for message in unread_messages
+            if not str(getattr(message, "message_id", "") or "").strip()
+        ]
+        flushed = await self.flush_unreads(identified)
+        if not unidentified:
+            return flushed
+
+        chat_stream = await stream_api.get_stream(stream_id=self.stream_id)
+        if not chat_stream:
+            return flushed
+
+        fallback_counts: dict[str, int] = {}
+        for message in unidentified:
+            key = message_key(message)
+            fallback_counts[key] = fallback_counts.get(key, 0) + 1
+
+        remained = []
+        for message in chat_stream.context.unread_messages:
+            key = message_key(message)
+            count = fallback_counts.get(key, 0)
+            if count > 0:
+                chat_stream.context.add_history_message(message)
+                fallback_counts[key] = count - 1
+                flushed += 1
+            else:
+                remained.append(message)
+        chat_stream.context.unread_messages = remained
+        return flushed
+
     async def _has_new_unreads(
         self,
         config: AgenticChatterConfig | None,
         original_unreads: list["Message"],
+        *,
+        claim: TurnClaim | None = None,
     ) -> bool:
         """检测生成期间是否到达了新的未读消息。
 
         Args:
             config: 插件配置。
             original_unreads: 本轮开始时的未读消息快照。
+            claim: 当前 mailbox claim；直接调用时可为空。
 
         Returns:
             bool: 是否应当中止当前生成并重新规划。
@@ -1230,8 +1336,14 @@ class _AgenticChatterBase(BaseChatter):
         if config is None or not config.humanize.enable_interrupt:
             return False
         _, current_unreads = await self.fetch_unreads()
-        original_ids = {id(message) for message in original_unreads}
-        new_count = sum(id(message) not in original_ids for message in current_unreads)
+        if claim is not None:
+            mailbox = get_stream_mailbox(self.stream_id)
+            await mailbox.merge_snapshot(current_unreads)
+            pending_keys = set(await mailbox.pending_keys())
+            new_count = len(pending_keys)
+        else:
+            original_ids = {id(message) for message in original_unreads}
+            new_count = sum(id(message) not in original_ids for message in current_unreads)
         return should_interrupt(enabled=True, new_unread_count=new_count)
 
     async def _summarize(

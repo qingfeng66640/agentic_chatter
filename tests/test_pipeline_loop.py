@@ -17,6 +17,7 @@ from src.kernel.llm.context_structure import validate_payload_sequence
 from ..actions.control import MAX_STOP_MINUTES
 from .. import chatter as chatter_module
 from ..chatter import AgenticChatter, _thought_log_line
+from ..pipeline.mailbox import StreamMailbox
 from ..pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -499,9 +500,13 @@ class _InterruptConfig:
         enable_explore_tools = False
         blacklist: list[str] = []
 
+    class Humanize:
+        enable_interrupt = True
+
     plugin = Plugin()
     pipeline = Pipeline()
     tools = Tools()
+    humanize = Humanize()
 
 
 class _ToolConfig:
@@ -914,6 +919,70 @@ async def test_stage_act_consumes_stream_before_reading_calls() -> None:
     assert state.end_turn_seconds == 30.0
     chatter._execute_calls.assert_not_awaited()
     validate_payload_sequence(response.payloads, allow_incomplete_tail=False)
+
+
+async def test_flush_claim_unreads_supports_rehydrated_idless_message(
+    monkeypatch,
+) -> None:
+    """无 ID claim 应按稳定键从当前未读快照移入 history。"""
+    claimed = SimpleNamespace(
+        message_id="",
+        stream_id="flush-idless",
+        time=123.0,
+        sender_id="user",
+        sender_name="用户",
+        message_type="text",
+        reply_to=None,
+        content="无 ID 消息",
+        processed_plain_text="无 ID 消息",
+    )
+    current = SimpleNamespace(**vars(claimed))
+    context = SimpleNamespace(unread_messages=[current], history=[])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-idless", plugin=object())
+
+    flushed = await chatter._flush_claim_unreads([claimed])
+
+    assert flushed == 1
+    assert context.history == [current]
+    assert context.unread_messages == []
+
+
+async def test_mailbox_interrupt_ignores_claim_and_keeps_new_input(monkeypatch) -> None:
+    """claim 重现不算新输入，新 ID 应进入 pending 并触发中断。"""
+    old = SimpleNamespace(message_id="old")
+    repeated_old = SimpleNamespace(message_id="old")
+    new = SimpleNamespace(message_id="new")
+    mailbox = StreamMailbox("mailbox-interrupt")
+    owner = object()
+    generation = await mailbox.try_acquire(owner)
+    assert generation is not None
+    await mailbox.merge_snapshot([old])
+    claim = await mailbox.claim_pending(owner, generation)
+    assert claim is not None
+
+    chatter = AgenticChatter(stream_id="mailbox-interrupt", plugin=object())
+    chatter.fetch_unreads = AsyncMock(return_value=("", [repeated_old]))
+    monkeypatch.setattr(chatter_module, "get_stream_mailbox", Mock(return_value=mailbox))
+
+    assert not await chatter._has_new_unreads(
+        _InterruptConfig(),
+        [old],
+        claim=claim,
+    )
+
+    chatter.fetch_unreads = AsyncMock(return_value=("", [repeated_old, new]))
+    assert await chatter._has_new_unreads(
+        _InterruptConfig(),
+        [old],
+        claim=claim,
+    )
+    assert await mailbox.pending_keys() == ("id:new",)
 
 
 async def test_stage_act_closes_calls_before_interrupting() -> None:
