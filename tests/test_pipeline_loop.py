@@ -128,6 +128,59 @@ async def test_deliver_message_does_not_log_thought_only_output(monkeypatch) -> 
     info.assert_not_called()
 
 
+async def test_deliver_message_intercepts_provider_error_text(monkeypatch) -> None:
+    """供应商审核错误正文不得进入发送 API。"""
+    send_text = AsyncMock(return_value=True)
+    warning = Mock()
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    monkeypatch.setattr(chatter_module.logger, "warning", warning)
+    chatter = AgenticChatter(stream_id="provider-error", plugin=object())
+    state = TurnState(stream_id="provider-error")
+    visible_text = (
+        "The prompt could not be submitted. The prompt contains sensitive words "
+        "that violate Google's [Generative AI Prohibited Use Policy]. "
+        "Try rephrasing the prompt."
+    )
+
+    result = await chatter._deliver_message(
+        None,
+        SimpleNamespace(message=f"<think>内部内容</think> {visible_text}"),
+        state,
+    )
+
+    assert result == (False, False)
+    send_text.assert_not_awaited()
+    warning.assert_called_once()
+    log_line = str(warning.call_args.args[0])
+    assert "event=provider_error_text_intercepted" in log_line
+    assert "rule=google_prompt_policy_block" in log_line
+    assert f"chars={len(visible_text)}" in log_line
+    assert visible_text not in log_line
+    assert not state.spoke
+    assert not state.sent_texts
+    assert state.visible_text_emissions == 0
+
+
+async def test_deliver_message_allows_provider_error_discussion(monkeypatch) -> None:
+    """正常讨论供应商错误的回复不应被误拦截。"""
+    send_text = AsyncMock(return_value=True)
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    chatter = AgenticChatter(stream_id="provider-discussion", plugin=object())
+    text = "我可以解释 content policy 和 API error 的区别。"
+
+    result = await chatter._deliver_message(
+        None,
+        SimpleNamespace(message=text),
+        TurnState(stream_id="provider-discussion"),
+    )
+
+    assert result == (True, False)
+    send_text.assert_awaited_once_with(
+        content=text,
+        stream_id="provider-discussion",
+    )
+
+
 async def test_deliver_message_intercepts_complete_framework_message_line(monkeypatch) -> None:
     """模型完整复述框架消息行时不得再次发送给用户。"""
     send_text = AsyncMock(return_value=True)

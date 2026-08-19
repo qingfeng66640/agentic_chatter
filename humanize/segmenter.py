@@ -124,6 +124,30 @@ def is_framework_message_line(text: str) -> bool:
     return _FRAMEWORK_MESSAGE_LINE.fullmatch(str(text or "").strip()) is not None
 
 
+def detect_provider_error_text(text: str) -> str | None:
+    """识别被上游错误包装为正常正文的明显供应商异常。"""
+    normalized = " ".join(str(text or "").lower().split())
+    if not normalized:
+        return None
+
+    submission_blocked = "the prompt could not be submitted" in normalized
+    sensitive_prompt = (
+        "prompt contains sensitive words" in normalized
+        or "prompt contains sensitive content" in normalized
+    )
+    google_policy = (
+        "generative ai prohibited use policy" in normalized
+        or "policies.google.com/terms/generative-ai/use-policy" in normalized
+    )
+    gemini_guidance = (
+        "try rephrasing the prompt" in normalized
+        or "ai.google.dev/gemini-api/docs/troubleshooting" in normalized
+    )
+    if submission_blocked and sensitive_prompt and (google_policy or gemini_guidance):
+        return "google_prompt_policy_block"
+    return None
+
+
 def _split_once(text: str, limit: int) -> tuple[str, str]:
     """在长度上限附近寻找最佳切分点，切成两段。
 

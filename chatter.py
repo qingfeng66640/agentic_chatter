@@ -65,6 +65,7 @@ from .humanize.qqbot_streaming import create_streaming_session
 from .humanize.segmenter import (
     CleanReplyResult,
     clean_reply_text_with_metadata,
+    detect_provider_error_text,
     is_framework_message_line,
 )
 from .pipeline.mailbox import TurnClaim, get_stream_mailbox, message_key
@@ -1121,6 +1122,13 @@ class _AgenticChatterBase(BaseChatter):
         cleaned_result = clean_reply_text_with_metadata(raw_message)
         message = cleaned_result.text
         if not message:
+            return False, False
+        provider_error_rule = detect_provider_error_text(message)
+        if provider_error_rule is not None:
+            logger.warning(
+                f"[{self.stream_id[:8]}] event=provider_error_text_intercepted "
+                f"rule={provider_error_rule} chars={len(message)}"
+            )
             return False, False
         if is_framework_message_line(message):
             logger.warning(

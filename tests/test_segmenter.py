@@ -5,9 +5,40 @@ from __future__ import annotations
 from ..humanize.segmenter import (
     clean_reply_text,
     clean_reply_text_with_metadata,
+    detect_provider_error_text,
     is_framework_message_line,
     segment_reply,
 )
+
+
+def test_detect_provider_error_text_matches_google_policy_response() -> None:
+    text = (
+        "The prompt could not be submitted. The prompt contains sensitive words "
+        "that violate Google's [Generative AI Prohibited Use Policy]. "
+        "Try rephrasing the prompt."
+    )
+    assert detect_provider_error_text(text) == "google_prompt_policy_block"
+
+
+def test_detect_provider_error_text_normalizes_case_and_whitespace() -> None:
+    text = (
+        "THE PROMPT COULD NOT BE SUBMITTED.\n"
+        "The prompt contains sensitive content.\n"
+        "Try rephrasing the prompt."
+    )
+    assert detect_provider_error_text(text) == "google_prompt_policy_block"
+
+
+def test_detect_provider_error_text_does_not_match_generic_discussion() -> None:
+    assert detect_provider_error_text("请解释 content policy 和 API error 的区别。") is None
+    assert detect_provider_error_text("The prompt could not be submitted.") is None
+    assert detect_provider_error_text("Try rephrasing the prompt.") is None
+
+
+def test_detect_provider_error_text_requires_complete_provider_signal() -> None:
+    assert detect_provider_error_text(
+        "The prompt could not be submitted. The prompt contains sensitive words."
+    ) is None
 
 
 def test_clean_metadata_contains_removed_thoughts() -> None:
