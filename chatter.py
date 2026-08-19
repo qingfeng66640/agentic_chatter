@@ -92,7 +92,7 @@ from .pipeline.stages import (
     resolve_stage_order,
 )
 from .pipeline.state import ToolExecutionRecord, TurnState
-from .tooling.dedupe import CallDeduper
+from .tooling.dedupe import CallDeduper, build_log_args
 from .tooling.explore import (
     ExploreToolsTool,
     clear_stream_catalog,
@@ -806,7 +806,14 @@ class _AgenticChatterBase(BaseChatter):
             tool_progress = 0
             if normal_calls:
                 tool_progress = await self._execute_calls(
-                    normal_calls, response, state, registry, unread_msgs
+                    normal_calls,
+                    response,
+                    state,
+                    registry,
+                    unread_msgs,
+                    log_tool_calls=bool(
+                        getattr(getattr(config, "tools", None), "log_tool_calls", False)
+                    ),
                 )
                 expanded = consume_expansion(self.stream_id)
                 allowed_expanded = [
@@ -1240,6 +1247,8 @@ class _AgenticChatterBase(BaseChatter):
         state: TurnState,
         registry: ToolRegistry,
         unread_msgs: list["Message"],
+        *,
+        log_tool_calls: bool = False,
     ) -> int:
         """执行本轮的普通工具调用并回灌结果。
 
@@ -1285,6 +1294,16 @@ class _AgenticChatterBase(BaseChatter):
 
         if not runnable:
             return 0
+
+        if log_tool_calls:
+            for call in runnable:
+                name = str(getattr(call, "name", "") or "")
+                args = getattr(call, "args", None)
+                logger.info(
+                    f"[{self.stream_id[:8]}] event=tool_call "
+                    f"iteration={state.iterations} name={name} "
+                    f"args={build_log_args(args if isinstance(args, dict) else {})}"
+                )
 
         payload_start = len(list(getattr(response, "payloads", None) or []))
         results = await self.run_tool_call(runnable, response, registry, trigger)

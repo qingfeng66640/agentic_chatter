@@ -25,6 +25,35 @@ _SENSITIVE_KEY_PATTERN = re.compile(
 )
 
 
+def build_log_args(value: Any) -> str:
+    """将工具参数转换为安全、有界的单行日志文本。"""
+    def redact(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                key: "[REDACTED]" if _SENSITIVE_KEY_PATTERN.search(str(key)) else redact(child)
+                for key, child in item.items()
+            }
+        if isinstance(item, (list, tuple)):
+            return [redact(child) for child in item]
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            return item
+        return "[UNSERIALIZABLE]"
+
+    try:
+        text = json.dumps(
+            redact(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError):
+        text = '"[UNSERIALIZABLE]"'
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > MAX_LOG_ARGS_CHARS:
+        return text[: MAX_LOG_ARGS_CHARS - 1] + "…"
+    return text
+
+
 def build_result_preview(value: Any) -> tuple[str, bool]:
     """将工具结果转换为安全、有界的单行摘要。"""
     if isinstance(value, str):
@@ -56,6 +85,7 @@ def build_result_preview(value: Any) -> tuple[str, bool]:
     return text, truncated
 
 MAX_ECHO_CHARS = 200
+MAX_LOG_ARGS_CHARS = 1000
 
 
 def build_call_key(name: str, args: Any) -> str:

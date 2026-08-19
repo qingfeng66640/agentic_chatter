@@ -747,6 +747,54 @@ async def test_execute_calls_counts_only_successful_tools() -> None:
     assert "晴天" in state.deduper.check("tool-success", {}).note
 
 
+async def test_execute_calls_logs_tool_name_and_safe_args(monkeypatch) -> None:
+    calls = [
+        ToolCall(
+            id="logged",
+            name="tool-search",
+            args={"query": "天气", "api_key": "secret-value"},
+        )
+    ]
+    response = _PayloadResponse([], calls)
+    chatter = AgenticChatter(stream_id="tool-log", plugin=object())
+    chatter.run_tool_call = AsyncMock(return_value=[("ok", True)])
+    state = TurnState(stream_id="tool-log", iterations=2)
+    info = Mock()
+    monkeypatch.setattr(chatter_module.logger, "info", info)
+
+    await chatter._execute_calls(
+        calls,
+        response,
+        state,
+        SimpleNamespace(),
+        [],
+        log_tool_calls=True,
+    )
+
+    logs = [str(call.args[0]) for call in info.call_args_list]
+    tool_logs = [line for line in logs if "event=tool_call" in line]
+    assert len(tool_logs) == 1
+    assert "name=tool-search" in tool_logs[0]
+    assert '"query":"天气"' in tool_logs[0]
+    assert "secret-value" not in tool_logs[0]
+    assert "[REDACTED]" in tool_logs[0]
+
+
+async def test_execute_calls_does_not_log_when_disabled(monkeypatch) -> None:
+    call = ToolCall(id="quiet", name="tool-search", args={"query": "天气"})
+    response = _PayloadResponse([], [call])
+    chatter = AgenticChatter(stream_id="tool-log-off", plugin=object())
+    chatter.run_tool_call = AsyncMock(return_value=[("ok", True)])
+    info = Mock()
+    monkeypatch.setattr(chatter_module.logger, "info", info)
+
+    await chatter._execute_calls(
+        [call], response, TurnState(stream_id="tool-log-off"), SimpleNamespace(), [],
+    )
+
+    assert not any("event=tool_call" in str(call.args[0]) for call in info.call_args_list)
+
+
 def test_decide_iteration_preserves_control_and_text_priority() -> None:
     stop = decide_iteration(
         normal_call_count=1,

@@ -6,7 +6,36 @@
 
 from __future__ import annotations
 
-from ..tooling.dedupe import CallDeduper, build_call_key, build_result_preview
+from ..tooling.dedupe import (
+    CallDeduper,
+    build_call_key,
+    build_log_args,
+    build_result_preview,
+)
+
+
+def test_build_log_args_redacts_sensitive_values() -> None:
+    text = build_log_args(
+        {"query": "天气", "nested": {"api_key": "secret-value"}}
+    )
+
+    assert '"query":"天气"' in text
+    assert "secret-value" not in text
+    assert "[REDACTED]" in text
+
+
+def test_build_log_args_is_bounded_and_single_line() -> None:
+    text = build_log_args({"value": "a\n" * 1000})
+
+    assert "\n" not in text
+    assert len(text) <= 1000
+    assert text.endswith("…")
+
+
+def test_build_log_args_replaces_unserializable_values() -> None:
+    text = build_log_args({"value": object()})
+
+    assert text == '{"value":"[UNSERIALIZABLE]"}'
 
 
 def test_build_call_key_ignores_reason_field() -> None:

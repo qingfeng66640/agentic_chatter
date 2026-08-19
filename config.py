@@ -520,6 +520,12 @@ class AgenticChatterConfig(BaseConfig):
             label="软去重上限",
             tag="ai",
         )
+        log_tool_calls: bool = Field(
+            default=False,
+            description="是否记录实际工具调用的名称和安全处理后的参数，不记录工具返回正文",
+            label="记录工具调用日志",
+            tag="debug",
+        )
         encourage_prompt: bool = Field(
             default=True,
             description=(
