@@ -842,6 +842,7 @@ class _AgenticChatterBase(BaseChatter):
                     log_tool_calls=bool(
                         getattr(getattr(config, "tools", None), "log_tool_calls", False)
                     ),
+                    tool_call_mode=self._tool_call_mode(config),
                 )
                 expanded = consume_expansion(self.stream_id)
                 allowed_expanded = [
@@ -1280,6 +1281,7 @@ class _AgenticChatterBase(BaseChatter):
         unread_msgs: list["Message"],
         *,
         log_tool_calls: bool = False,
+        tool_call_mode: str = "planning",
     ) -> int:
         """执行本轮的普通工具调用并回灌结果。
 
@@ -1295,6 +1297,9 @@ class _AgenticChatterBase(BaseChatter):
         """
         trigger = unread_msgs[-1] if unread_msgs else None
         runnable: list[Any] = []
+        tool_call_mode = tool_call_mode.strip().lower()
+        if tool_call_mode not in ("planning", "batch"):
+            tool_call_mode = "planning"
 
         for call in calls:
             name = str(getattr(call, "name", "") or "")
@@ -1326,46 +1331,48 @@ class _AgenticChatterBase(BaseChatter):
         if not runnable:
             return 0
 
-        if log_tool_calls:
-            for call in runnable:
-                name = str(getattr(call, "name", "") or "")
-                args = getattr(call, "args", None)
-                logger.info(
-                    f"[{self.stream_id[:8]}] 调用工具 event=tool_call "
-                    f"iteration={state.iterations} name={name} "
-                    f"args={build_log_args(args if isinstance(args, dict) else {})}"
-                )
-
-        payload_start = len(list(getattr(response, "payloads", None) or []))
-        results = await self.run_tool_call(runnable, response, registry, trigger)
-        captured = collect_tool_result_delta(response, payload_start)
-        records = build_tool_execution_records(
-            runnable,
-            results,
-            captured,
-            iteration=state.iterations,
-        )
-        state.tool_ledger.extend(records)
-
         success_count = 0
-        for call, record in zip(runnable, records, strict=False):
-            args = getattr(call, "args", None)
-            state.deduper.record_result(
-                record.name,
-                args if isinstance(args, dict) else {},
-                record.result_preview,
+        batches = [runnable] if tool_call_mode == "batch" else [[call] for call in runnable]
+        for batch in batches:
+            if log_tool_calls:
+                for call in batch:
+                    name = str(getattr(call, "name", "") or "")
+                    args = getattr(call, "args", None)
+                    logger.info(
+                        f"[{self.stream_id[:8]}] 调用工具 event=tool_call "
+                        f"iteration={state.iterations} name={name} "
+                        f"args={build_log_args(args if isinstance(args, dict) else {})}"
+                    )
+
+            payload_start = len(list(getattr(response, "payloads", None) or []))
+            results = await self.run_tool_call(batch, response, registry, trigger)
+            captured = collect_tool_result_delta(response, payload_start)
+            records = build_tool_execution_records(
+                batch,
+                results,
+                captured,
+                iteration=state.iterations,
             )
-            if record.counts_as_progress:
-                success_count += 1
-            logger.info(
-                f"[{self.stream_id[:8]}] 工具结果 event=tool_result "
-                f"iteration={record.iteration} name={record.name} "
-                f"outcome={record.outcome} "
-                f"outcome_label={_label(_TOOL_OUTCOME_LABELS, record.outcome)} "
-                f"capture={record.result_capture} "
-                f"capture_label={_label(_RESULT_CAPTURE_LABELS, record.result_capture)} "
-                f"preview_chars={len(record.result_preview)}"
-            )
+            state.tool_ledger.extend(records)
+
+            for call, record in zip(batch, records, strict=False):
+                args = getattr(call, "args", None)
+                state.deduper.record_result(
+                    record.name,
+                    args if isinstance(args, dict) else {},
+                    record.result_preview,
+                )
+                if record.counts_as_progress:
+                    success_count += 1
+                logger.info(
+                    f"[{self.stream_id[:8]}] 工具结果 event=tool_result "
+                    f"iteration={record.iteration} name={record.name} "
+                    f"outcome={record.outcome} "
+                    f"outcome_label={_label(_TOOL_OUTCOME_LABELS, record.outcome)} "
+                    f"capture={record.result_capture} "
+                    f"capture_label={_label(_RESULT_CAPTURE_LABELS, record.result_capture)} "
+                    f"preview_chars={len(record.result_preview)}"
+                )
         return success_count
 
     async def _flush_claim_unreads(self, unread_messages: list["Message"]) -> int:
@@ -1519,6 +1526,29 @@ class _AgenticChatterBase(BaseChatter):
             return text[:MAX_DIGEST_CHARS] if text else ""
         return text
 
+    def _tool_call_mode(self, config: AgenticChatterConfig | None) -> str:
+        """读取并规范化工具调用模式。"""
+        if config is None:
+            return "planning"
+        mode = str(getattr(config.tools, "tool_call_mode", "planning") or "planning")
+        mode = mode.strip().lower()
+        return mode if mode in ("planning", "batch") else "planning"
+
+    def _tool_call_mode_guidance(self, mode: str) -> str:
+        """构建工具调用模式提示。"""
+        if mode == "batch":
+            return (
+                "当前工具调用模式为批量调度模式：本轮普通 Tool Call 会整批交给 "
+                "MoFox Core 调度。不要依赖同一批调用中的先后顺序；如果后续工具需要前置工具的真实结果，"
+                "必须拆分到下一轮，等待 Tool Result 后再调用。只有互相独立的工具才适合同轮组合，"
+                "批量调度不代表绝对并行或固定执行顺序。"
+            )
+        return (
+            "当前工具调用模式为规划模式：Agent 会按规划顺序逐个提交普通 Tool Call。"
+            "如果工具之间存在结果依赖，先调用前置工具，等待 Tool Result 后再在下一轮规划后续调用；"
+            "互相独立的工具仍可以组合调用。"
+        )
+
     async def _build_system_prompt(
         self,
         config: AgenticChatterConfig | None,
@@ -1544,6 +1574,8 @@ class _AgenticChatterBase(BaseChatter):
         encouragement = ""
         awareness = ""
         mood_text = ""
+        tool_call_mode = self._tool_call_mode(config)
+        tool_call_mode_guidance = self._tool_call_mode_guidance(tool_call_mode)
 
         if config is not None:
             chat_type = str(chat_stream.chat_type or "").lower()
@@ -1587,6 +1619,7 @@ class _AgenticChatterBase(BaseChatter):
             .set("nickname", str(getattr(chat_stream, "bot_nickname", "") or ""))
             .set("theme_guide", theme_guide)
             .set("tool_encouragement", encouragement)
+            .set("tool_call_mode_guidance", tool_call_mode_guidance)
             .set("collapsed_tools", layout.describe_categories())
             .set("global_awareness", awareness)
             .set("mood_guidance", mood_text)

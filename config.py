@@ -526,6 +526,17 @@ class AgenticChatterConfig(BaseConfig):
             label="记录工具调用日志",
             tag="debug",
         )
+        tool_call_mode: str = Field(
+            default="planning",
+            description=(
+                "工具调用模式。planning：按依赖顺序逐个提交工具调用；"
+                "batch：将本轮普通工具调用整批交给 MoFox Core 调度，"
+                "不代表绝对并行或固定执行顺序。"
+            ),
+            label="工具调用模式",
+            tag="ai",
+            hint="可选 planning 或 batch，默认 planning",
+        )
         encourage_prompt: bool = Field(
             default=True,
             description=(
