@@ -774,6 +774,7 @@ async def test_execute_calls_logs_tool_name_and_safe_args(monkeypatch) -> None:
     logs = [str(call.args[0]) for call in info.call_args_list]
     tool_logs = [line for line in logs if "event=tool_call" in line]
     assert len(tool_logs) == 1
+    assert "调用工具" in tool_logs[0]
     assert "name=tool-search" in tool_logs[0]
     assert '"query":"天气"' in tool_logs[0]
     assert "secret-value" not in tool_logs[0]

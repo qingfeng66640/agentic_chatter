@@ -113,6 +113,34 @@ if TYPE_CHECKING:
 
 logger = get_logger("agentic_chatter")
 
+_TERMINATION_LABELS = {
+    "stop_requested": "请求停止",
+    "end_turn_requested": "请求结束本轮",
+    "text_without_tool": "纯文本无工具调用",
+    "duplicate_text_without_tool": "重复文本无工具调用",
+    "max_duplicate_streak": "达到重复文本上限",
+    "max_post_speech": "达到发言后迭代上限",
+    "max_no_progress": "达到无进展上限",
+    "max_iterations": "达到最大迭代次数",
+}
+_TOOL_OUTCOME_LABELS = {
+    "success": "成功",
+    "failure": "失败",
+    "skipped": "已跳过",
+}
+_RESULT_CAPTURE_LABELS = {
+    "captured": "已捕获",
+    "missing": "缺失",
+    "ambiguous": "有歧义",
+    "not_applicable": "不适用",
+}
+
+
+def _label(mapping: dict[str, str], value: object, default: str = "未知") -> str:
+    """将结构化日志枚举转换为中文说明。"""
+    return mapping.get(str(value), default)
+
+
 # 摘要类小模型调用的最大输出长度，防止小模型话痨
 MAX_DIGEST_CHARS = 40
 # INFO 思考日志的单条最大长度
@@ -876,11 +904,12 @@ class _AgenticChatterBase(BaseChatter):
             )
             control_call_count = len(calls) - len(normal_calls)
             logger.info(
-                f"[{self.stream_id[:8]}] event=act_iteration "
+                f"[{self.stream_id[:8]}] 行动迭代 event=act_iteration "
                 f"iteration={state.iterations} normal_calls={len(normal_calls)} "
                 f"control_calls={control_call_count} tool_success={tool_progress} "
                 f"spoke={spoke_now} duplicate={duplicate_text} "
-                f"termination={iteration_decision.reason or 'continue'}"
+                f"termination={iteration_decision.reason or 'continue'} "
+                f"termination_label={_label(_TERMINATION_LABELS, iteration_decision.reason or 'continue', '继续')}"
             )
             if not iteration_decision.should_continue:
                 state.termination = iteration_decision
@@ -891,8 +920,9 @@ class _AgenticChatterBase(BaseChatter):
                     state.end_turn_requested = True
                     state.end_turn_seconds = end_seconds
                 logger.info(
-                    f"[{self.stream_id[:8]}] event=act_auto_end "
-                    f"reason={iteration_decision.reason}"
+                    f"[{self.stream_id[:8]}] 行动自动结束 event=act_auto_end "
+                    f"reason={iteration_decision.reason} "
+                    f"reason_label={_label(_TERMINATION_LABELS, iteration_decision.reason)}"
                 )
                 clear_stream_catalog(self.stream_id)
                 return
@@ -902,8 +932,9 @@ class _AgenticChatterBase(BaseChatter):
 
         if state.termination is not None:
             logger.info(
-                f"[{self.stream_id[:8]}] event=act_auto_end "
-                f"reason={state.termination.reason}"
+                f"[{self.stream_id[:8]}] 行动自动结束 event=act_auto_end "
+                f"reason={state.termination.reason} "
+                f"reason_label={_label(_TERMINATION_LABELS, state.termination.reason)}"
             )
         clear_stream_catalog(self.stream_id)
 
@@ -1300,7 +1331,7 @@ class _AgenticChatterBase(BaseChatter):
                 name = str(getattr(call, "name", "") or "")
                 args = getattr(call, "args", None)
                 logger.info(
-                    f"[{self.stream_id[:8]}] event=tool_call "
+                    f"[{self.stream_id[:8]}] 调用工具 event=tool_call "
                     f"iteration={state.iterations} name={name} "
                     f"args={build_log_args(args if isinstance(args, dict) else {})}"
                 )
@@ -1327,9 +1358,12 @@ class _AgenticChatterBase(BaseChatter):
             if record.counts_as_progress:
                 success_count += 1
             logger.info(
-                f"[{self.stream_id[:8]}] event=tool_result "
+                f"[{self.stream_id[:8]}] 工具结果 event=tool_result "
                 f"iteration={record.iteration} name={record.name} "
-                f"outcome={record.outcome} capture={record.result_capture} "
+                f"outcome={record.outcome} "
+                f"outcome_label={_label(_TOOL_OUTCOME_LABELS, record.outcome)} "
+                f"capture={record.result_capture} "
+                f"capture_label={_label(_RESULT_CAPTURE_LABELS, record.result_capture)} "
                 f"preview_chars={len(record.result_preview)}"
             )
         return success_count
