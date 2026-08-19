@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,7 +64,46 @@ class StreamMailbox:
         self._owner: object | None = None
         self._generation = 0
         self._pending: dict[str, Any] = {}
+        self._pending_started_at: float | None = None
+        self._consecutive_interruptions = 0
         self._claim: TurnClaim | None = None
+
+    async def pending_state(self, window_seconds: float) -> tuple[int, float]:
+        """返回 pending 数量及固定合并窗口剩余秒数。"""
+        async with self._lock:
+            if not self._pending or self._pending_started_at is None:
+                return 0, 0.0
+            remaining = max(
+                0.0,
+                float(window_seconds) - (time.monotonic() - self._pending_started_at),
+            )
+            return len(self._pending), remaining
+
+    async def interruption_state(self) -> int:
+        """返回当前 stream 的连续输入中断次数。"""
+        async with self._lock:
+            return self._consecutive_interruptions
+
+    async def record_interruption(self) -> int:
+        """记录一次实际发生的输入中断并返回最新次数。"""
+        async with self._lock:
+            self._consecutive_interruptions += 1
+            return self._consecutive_interruptions
+
+    async def reset_interruptions(self) -> None:
+        """重置当前 stream 的连续输入中断次数。"""
+        async with self._lock:
+            self._consecutive_interruptions = 0
+
+    async def has_pending_key(self, key: str) -> bool:
+        """判断指定消息键是否仍在 pending。"""
+        async with self._lock:
+            return key in self._pending
+
+    async def pending_count(self) -> int:
+        """返回当前 pending 消息数量。"""
+        async with self._lock:
+            return len(self._pending)
 
     async def try_acquire(self, owner: object) -> int | None:
         """尝试取得当前 stream 的执行所有权。"""
@@ -85,6 +125,8 @@ class StreamMailbox:
                     continue
                 self._pending[key] = message
                 added += 1
+            if added and self._pending_started_at is None:
+                self._pending_started_at = time.monotonic()
             return added
 
     async def claim_pending(self, owner: object, generation: int) -> TurnClaim | None:
@@ -102,6 +144,7 @@ class StreamMailbox:
                 messages=tuple(self._pending.values()),
             )
             self._pending.clear()
+            self._pending_started_at = None
             self._claim = claim
             return claim
 
@@ -113,6 +156,8 @@ class StreamMailbox:
             restored = dict(zip(claim.keys, claim.messages, strict=True))
             restored.update(self._pending)
             self._pending = restored
+            if self._pending and self._pending_started_at is None:
+                self._pending_started_at = time.monotonic()
             self._claim = None
             return True
 
@@ -122,6 +167,7 @@ class StreamMailbox:
             if not self._is_current_claim(claim):
                 return False
             self._claim = None
+            self._consecutive_interruptions = 0
             return True
 
     async def release_owner(self, owner: object, generation: int) -> bool:

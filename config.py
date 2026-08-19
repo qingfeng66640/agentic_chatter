@@ -665,6 +665,20 @@ class AgenticChatterConfig(BaseConfig):
             label="启用打断重规划",
             tag="ai",
         )
+        input_merge_window_seconds: float = Field(
+            default=0.0,
+            description="新回合领取输入前的固定合并窗口；0 表示立即处理，不额外增加延迟",
+            label="输入合并窗口（秒）",
+            ge=0.0,
+            tag="performance",
+        )
+        max_consecutive_interruptions: int = Field(
+            default=3,
+            description="同一聊天流连续因新输入中断的上限；0 表示不限制",
+            label="连续中断上限",
+            ge=0,
+            tag="performance",
+        )
 
     @config_section("global_mind", title="全局心智", tag="ai")
     class GlobalMindSection(SectionBase):

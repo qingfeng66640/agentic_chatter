@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from ..pipeline import mailbox as mailbox_module
 from ..pipeline.mailbox import (
     StreamMailbox,
     clear_mailbox_registry,
@@ -51,6 +52,64 @@ async def test_message_without_id_has_stable_fallback_across_snapshots() -> None
 
     mailbox = StreamMailbox("stream")
     assert await mailbox.merge_snapshot([first, second]) == 1
+
+
+async def test_pending_merge_window_starts_once(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(mailbox_module.time, "monotonic", lambda: now)
+    mailbox = StreamMailbox("stream")
+
+    assert await mailbox.merge_snapshot([_message("first")]) == 1
+    assert await mailbox.pending_state(5.0) == (1, 5.0)
+
+    now = 102.0
+    assert await mailbox.merge_snapshot([_message("second")]) == 1
+    assert await mailbox.pending_state(5.0) == (2, 3.0)
+
+    now = 106.0
+    assert await mailbox.pending_state(5.0) == (2, 0.0)
+
+
+async def test_claim_clears_pending_merge_window() -> None:
+    mailbox = StreamMailbox("stream")
+    owner = object()
+    generation = await mailbox.try_acquire(owner)
+    assert generation is not None
+    await mailbox.merge_snapshot([_message("first")])
+    claim = await mailbox.claim_pending(owner, generation)
+
+    assert claim is not None
+    assert await mailbox.pending_state(5.0) == (0, 0.0)
+
+
+async def test_interruption_streak_resets_only_on_commit() -> None:
+    mailbox = StreamMailbox("stream")
+    assert await mailbox.record_interruption() == 1
+    assert await mailbox.record_interruption() == 2
+
+    owner = object()
+    generation = await mailbox.try_acquire(owner)
+    assert generation is not None
+    await mailbox.merge_snapshot([_message("first")])
+    claim = await mailbox.claim_pending(owner, generation)
+    assert claim is not None
+    assert await mailbox.release_claim(claim)
+    assert await mailbox.interruption_state() == 2
+
+    retry = await mailbox.claim_pending(owner, generation)
+    assert retry is not None
+    assert await mailbox.commit_claim(retry)
+    assert await mailbox.interruption_state() == 0
+
+
+async def test_interruption_streak_is_isolated_by_stream() -> None:
+    first = StreamMailbox("first")
+    second = StreamMailbox("second")
+
+    await first.record_interruption()
+
+    assert await first.interruption_state() == 1
+    assert await second.interruption_state() == 0
 
 
 async def test_release_restores_claim_before_new_pending() -> None:

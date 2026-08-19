@@ -213,7 +213,34 @@ class _AgenticChatterBase(BaseChatter):
             turn_result: ChatterResult = Wait()
             try:
                 _, unread_snapshot = await self.fetch_unreads()
-                await mailbox.merge_snapshot(unread_snapshot)
+                added = await mailbox.merge_snapshot(unread_snapshot)
+                merge_window = max(
+                    0.0,
+                    float(
+                        getattr(
+                            getattr(config, "humanize", None),
+                            "input_merge_window_seconds",
+                            0.0,
+                        )
+                    ),
+                )
+                pending_count, wait_seconds = await mailbox.pending_state(merge_window)
+                if added:
+                    logger.info(
+                        f"[{self.stream_id[:8]}] event=input_merged "
+                        f"generation={generation} added={added} pending={pending_count} "
+                        f"window_seconds={merge_window:.3f}"
+                    )
+                if pending_count and wait_seconds > 0:
+                    logger.info(
+                        f"[{self.stream_id[:8]}] event=turn_delayed_for_input_merge "
+                        f"pending={pending_count} wait_seconds={wait_seconds:.3f} "
+                        f"window_seconds={merge_window:.3f}"
+                    )
+                    await mailbox.release_owner(owner, generation)
+                    yield Wait(time=wait_seconds)
+                    continue
+
                 claim = await mailbox.claim_pending(owner, generation)
                 if claim is not None:
                     unread_msgs = list(claim.messages)
@@ -238,12 +265,16 @@ class _AgenticChatterBase(BaseChatter):
                     )
 
                     if state.failed:
+                        interruption_streak = await mailbox.interruption_state()
+                        pending_after_release = await mailbox.pending_count()
                         await mailbox.release_claim(claim)
                         claim = None
                         logger.warning(
                             f"[{self.stream_id[:8]}] event=turn_released "
                             f"generation={generation} messages={len(unread_msgs)} "
-                            f"visible={state.spoke} reason={state.error}"
+                            f"visible={state.spoke} reason_code=input_interrupt "
+                            f"reason={state.error} pending={pending_after_release} "
+                            f"consecutive_interruptions={interruption_streak}"
                         )
                         turn_result = Wait(time=5.0)
                     else:
@@ -274,7 +305,8 @@ class _AgenticChatterBase(BaseChatter):
                         logger.info(
                             f"[{self.stream_id[:8]}] event=turn_committed "
                             f"generation={generation} messages={len(unread_msgs)} "
-                            f"visible={state.spoke}"
+                            f"visible={state.spoke} "
+                            "consecutive_interruptions_reset=true"
                         )
                         turn_result = (
                             Stop(outcome_result.stop_seconds)
@@ -1346,13 +1378,58 @@ class _AgenticChatterBase(BaseChatter):
         _, current_unreads = await self.fetch_unreads()
         if claim is not None:
             mailbox = get_stream_mailbox(self.stream_id)
-            await mailbox.merge_snapshot(current_unreads)
-            pending_keys = set(await mailbox.pending_keys())
-            new_count = len(pending_keys)
+            added = await mailbox.merge_snapshot(current_unreads)
+            pending_count, merge_wait = await mailbox.pending_state(
+                max(
+                    0.0,
+                    float(
+                        getattr(
+                            config.humanize,
+                            "input_merge_window_seconds",
+                            0.0,
+                        )
+                    ),
+                )
+            )
+            if not added:
+                return False
+            if merge_wait > 0:
+                logger.info(
+                    f"[{self.stream_id[:8]}] event=input_interrupt_suppressed "
+                    f"reason=merge_window pending={pending_count} "
+                    f"wait_seconds={merge_wait:.3f}"
+                )
+                return False
+            max_interruptions = max(
+                0,
+                int(
+                    getattr(
+                        config.humanize,
+                        "max_consecutive_interruptions",
+                        3,
+                    )
+                ),
+            )
+            streak = await mailbox.interruption_state()
+            if max_interruptions and streak >= max_interruptions:
+                logger.info(
+                    f"[{self.stream_id[:8]}] event=input_interrupt_suppressed "
+                    f"reason=consecutive_limit pending={pending_count} "
+                    f"consecutive_interruptions={streak} "
+                    f"max_consecutive_interruptions={max_interruptions}"
+                )
+                return False
+            new_streak = await mailbox.record_interruption()
+            logger.info(
+                f"[{self.stream_id[:8]}] event=input_interrupt_triggered "
+                f"pending={pending_count} consecutive_interruptions={new_streak} "
+                f"max_consecutive_interruptions={max_interruptions}"
+            )
         else:
             original_ids = {id(message) for message in original_unreads}
             new_count = sum(id(message) not in original_ids for message in current_unreads)
-        return should_interrupt(enabled=True, new_unread_count=new_count)
+            return should_interrupt(enabled=True, new_unread_count=new_count)
+        return True
 
     async def _summarize(
         self,
