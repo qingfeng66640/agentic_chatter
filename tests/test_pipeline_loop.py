@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall, ToolResult
 from src.kernel.llm.context_structure import validate_payload_sequence
@@ -714,20 +714,25 @@ async def test_execute_calls_counts_only_successful_tools() -> None:
     ]
     response = _PayloadResponse([], calls)
 
-    async def run_tool_call(*_args: Any) -> list[tuple[str, bool]]:
-        response.add_payload(
-            LLMPayload(
-                ROLE.TOOL_RESULT,
-                ToolResult(value="晴天", call_id="success", name="tool-success"),
+    async def run_tool_call(
+        batch: list[ToolCall], *_args: Any
+    ) -> list[tuple[str, bool]]:
+        call = batch[0]
+        if call.id == "success":
+            response.add_payload(
+                LLMPayload(
+                    ROLE.TOOL_RESULT,
+                    ToolResult(value="晴天", call_id="success", name="tool-success"),
+                )
             )
-        )
+            return [("ok", True)]
         response.add_payload(
             LLMPayload(
                 ROLE.TOOL_RESULT,
                 ToolResult(value="查询失败", call_id="failure", name="tool-failure"),
             )
         )
-        return [("ok", True), ("failed", False)]
+        return [("failed", False)]
 
     chatter = AgenticChatter(stream_id="tool-progress", plugin=object())
     chatter.run_tool_call = AsyncMock(side_effect=run_tool_call)
@@ -745,6 +750,78 @@ async def test_execute_calls_counts_only_successful_tools() -> None:
     assert [record.outcome for record in state.tool_ledger] == ["success", "failure"]
     assert [record.result_preview for record in state.tool_ledger] == ["晴天", "查询失败"]
     assert "晴天" in state.deduper.check("tool-success", {}).note
+
+
+async def test_execute_calls_batch_mode_submits_all_calls_once() -> None:
+    calls = [
+        ToolCall(id="first", name="tool-first", args={}),
+        ToolCall(id="second", name="tool-second", args={}),
+    ]
+    response = _PayloadResponse([], calls)
+    chatter = AgenticChatter(stream_id="tool-batch", plugin=object())
+    chatter.run_tool_call = AsyncMock(return_value=[("ok", True), ("ok", True)])
+    state = TurnState(stream_id="tool-batch")
+
+    count = await chatter._execute_calls(
+        calls,
+        response,
+        state,
+        SimpleNamespace(),
+        [],
+        tool_call_mode="batch",
+    )
+
+    chatter.run_tool_call.assert_awaited_once()
+    submitted = chatter.run_tool_call.await_args.args[0]
+    assert submitted == calls
+    assert count == 2
+
+
+async def test_execute_calls_planning_mode_submits_calls_one_by_one() -> None:
+    calls = [
+        ToolCall(id="first", name="tool-first", args={}),
+        ToolCall(id="second", name="tool-second", args={}),
+    ]
+    response = _PayloadResponse([], calls)
+    chatter = AgenticChatter(stream_id="tool-planning", plugin=object())
+    chatter.run_tool_call = AsyncMock(side_effect=[[('ok', True)], [('ok', True)]])
+    state = TurnState(stream_id="tool-planning")
+
+    count = await chatter._execute_calls(
+        calls,
+        response,
+        state,
+        SimpleNamespace(),
+        [],
+        tool_call_mode="planning",
+    )
+
+    assert chatter.run_tool_call.await_count == 2
+    assert [call.args[0] for call in chatter.run_tool_call.await_args_list] == [
+        [calls[0]],
+        [calls[1]],
+    ]
+    assert count == 2
+
+
+async def test_execute_calls_invalid_mode_falls_back_to_planning() -> None:
+    call = ToolCall(id="fallback", name="tool-fallback", args={})
+    response = _PayloadResponse([], [call])
+    chatter = AgenticChatter(stream_id="tool-mode-fallback", plugin=object())
+    chatter.run_tool_call = AsyncMock(return_value=[("ok", True)])
+
+    await chatter._execute_calls(
+        [call],
+        response,
+        TurnState(stream_id="tool-mode-fallback"),
+        SimpleNamespace(),
+        [],
+        tool_call_mode="unknown",
+    )
+
+    chatter.run_tool_call.assert_awaited_once_with(
+        [call], response, ANY, None,
+    )
 
 
 async def test_execute_calls_logs_tool_name_and_safe_args(monkeypatch) -> None:

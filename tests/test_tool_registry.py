@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from ..chatter import AgenticChatter
+from ..config import AgenticChatterConfig
 from ..tooling.registry import (
     build_encouragement_prompt,
     build_tool_layout,
@@ -169,9 +171,45 @@ def test_describe_categories_empty_when_nothing_collapsed() -> None:
     assert layout.describe_categories() == ""
 
 
+def test_tool_call_mode_defaults_to_planning() -> None:
+    config = AgenticChatterConfig()
+    chatter = AgenticChatter(stream_id="tool-mode", plugin=object())
+
+    assert config.tools.tool_call_mode == "planning"
+    assert chatter._tool_call_mode(config) == "planning"
+    assert chatter._tool_call_mode(None) == "planning"
+
+
+def test_tool_call_mode_invalid_value_falls_back_to_planning() -> None:
+    config = AgenticChatterConfig()
+    config.tools.tool_call_mode = "invalid"
+    chatter = AgenticChatter(stream_id="tool-mode-invalid", plugin=object())
+
+    assert chatter._tool_call_mode(config) == "planning"
+
+
+def test_tool_call_mode_guidance_describes_planning_and_batch() -> None:
+    chatter = AgenticChatter(stream_id="tool-mode-guidance", plugin=object())
+
+    planning = chatter._tool_call_mode_guidance("planning")
+    batch = chatter._tool_call_mode_guidance("batch")
+
+    assert "规划模式" in planning
+    assert "逐个提交普通 Tool Call" in planning
+    assert "等待 Tool Result" in planning
+    assert "批量调度模式" in batch
+    assert "整批交给 MoFox Core 调度" in batch
+    assert "绝对并行" in batch
+    assert "固定执行顺序" in batch
+
+
 def test_encouragement_prompt_mentions_tool_usage() -> None:
     text = build_encouragement_prompt()
     assert "优先调用实际可用的工具" in text
     assert "查询、读取、计算、记录或执行动作" in text
     assert "表情包" in text
+    assert "排序、排队和调度" in text
+    assert "真实结果、生成的 ID、查询内容或执行状态" in text
+    assert "不要在同一轮预先发出后一个调用" in text
+    assert "互相独立且没有顺序要求的工具可以在同一轮组合调用" in text
     assert "只有工具结果带来新信息时才补充正文" in text
