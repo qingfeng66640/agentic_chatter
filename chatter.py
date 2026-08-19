@@ -255,13 +255,13 @@ class _AgenticChatterBase(BaseChatter):
                 pending_count, wait_seconds = await mailbox.pending_state(merge_window)
                 if added:
                     logger.info(
-                        f"[{self.stream_id[:8]}] event=input_merged "
+                        f"[{self.stream_id[:8]}] 输入已合并 event=input_merged "
                         f"generation={generation} added={added} pending={pending_count} "
                         f"window_seconds={merge_window:.3f}"
                     )
                 if pending_count and wait_seconds > 0:
                     logger.info(
-                        f"[{self.stream_id[:8]}] event=turn_delayed_for_input_merge "
+                        f"[{self.stream_id[:8]}] 等待合并输入 event=turn_delayed_for_input_merge "
                         f"pending={pending_count} wait_seconds={wait_seconds:.3f} "
                         f"window_seconds={merge_window:.3f}"
                     )
@@ -298,7 +298,7 @@ class _AgenticChatterBase(BaseChatter):
                         await mailbox.release_claim(claim)
                         claim = None
                         logger.warning(
-                            f"[{self.stream_id[:8]}] event=turn_released "
+                            f"[{self.stream_id[:8]}] 回合已释放 event=turn_released "
                             f"generation={generation} messages={len(unread_msgs)} "
                             f"visible={state.spoke} reason_code=input_interrupt "
                             f"reason={state.error} pending={pending_after_release} "
@@ -331,7 +331,7 @@ class _AgenticChatterBase(BaseChatter):
                         claim = None
                         state.input_confirmed = True
                         logger.info(
-                            f"[{self.stream_id[:8]}] event=turn_committed "
+                            f"[{self.stream_id[:8]}] 回合已确认 event=turn_committed "
                             f"generation={generation} messages={len(unread_msgs)} "
                             f"visible={state.spoke} "
                             "consecutive_interruptions_reset=true"
