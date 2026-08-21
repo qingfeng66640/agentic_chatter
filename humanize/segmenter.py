@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from dataclasses import dataclass
 
@@ -146,6 +148,51 @@ def detect_provider_error_text(text: str) -> str | None:
     if submission_blocked and sensitive_prompt and (google_policy or gemini_guidance):
         return "google_prompt_policy_block"
     return None
+
+
+def detect_reply_decision_json_text(text: str) -> str | None:
+    """识别被错误作为可见回复输出的完整子决策 JSON。"""
+    candidate = str(text or "").strip()
+    if candidate.startswith("```json") and candidate.endswith("```"):
+        candidate = candidate[7:-3].strip()
+    elif not candidate.startswith("{") or not candidate.endswith("}"):
+        return None
+    try:
+        payload = json.loads(candidate)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    action = payload.get("action")
+    if action not in {"respond", "silent"}:
+        return None
+    confidence = payload.get("confidence")
+    interrupt_cost = payload.get("interrupt_cost")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not math.isfinite(confidence)
+        or not 0.0 <= confidence <= 1.0
+    ):
+        return None
+    if (
+        isinstance(interrupt_cost, bool)
+        or not isinstance(interrupt_cost, (int, float))
+        or not math.isfinite(interrupt_cost)
+        or not 0.0 <= interrupt_cost <= 1.0
+    ):
+        return None
+    if not isinstance(payload.get("addressee"), str):
+        return None
+    reason_codes = payload.get("reason_codes")
+    if not isinstance(reason_codes, list) or not all(
+        isinstance(value, str) for value in reason_codes
+    ):
+        return None
+    if not isinstance(payload.get("brief_reason"), str):
+        return None
+    return action
 
 
 def _split_once(text: str, limit: int) -> tuple[str, str]:

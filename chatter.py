@@ -66,6 +66,7 @@ from .humanize.segmenter import (
     CleanReplyResult,
     clean_reply_text_with_metadata,
     detect_provider_error_text,
+    detect_reply_decision_json_text,
     is_framework_message_line,
 )
 from .pipeline.mailbox import TurnClaim, get_stream_mailbox, message_key
@@ -1199,6 +1200,14 @@ class _AgenticChatterBase(BaseChatter):
             logger.warning(
                 f"[{self.stream_id[:8]}] event=provider_error_text_intercepted "
                 f"rule={provider_error_rule} chars={len(message)}"
+            )
+            return False, False
+        decision_json_action = detect_reply_decision_json_text(message)
+        if decision_json_action is not None:
+            logger.warning(
+                f"[{self.stream_id[:8]}] 已拦截主 Agent 输出的子决策 JSON "
+                f"event=reply_decision_json_intercepted "
+                f"action={decision_json_action} chars={len(message)}"
             )
             return False, False
         if is_framework_message_line(message):

@@ -181,6 +181,59 @@ async def test_deliver_message_allows_provider_error_discussion(monkeypatch) -> 
     )
 
 
+async def test_deliver_message_intercepts_reply_decision_json(monkeypatch) -> None:
+    """子决策 JSON 被主 Agent 输出时不得进入发送 API。"""
+    send_text = AsyncMock(return_value=True)
+    warning = Mock()
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    monkeypatch.setattr(chatter_module.logger, "warning", warning)
+    chatter = AgenticChatter(stream_id="decision-json", plugin=object())
+    state = TurnState(stream_id="decision-json")
+    text = (
+        '{"action":"silent","confidence":0.8,"addressee":"other",'
+        '"interrupt_cost":0.0,"reason_codes":["not_directed_to_bot"],'
+        '"brief_reason":"消息未指向 bot"}'
+    )
+
+    result = await chatter._deliver_message(
+        None,
+        SimpleNamespace(message=f"<think>内部推理</think>{text}"),
+        state,
+    )
+
+    assert result == (False, False)
+    send_text.assert_not_awaited()
+    warning.assert_called_once()
+    log_line = str(warning.call_args.args[0])
+    assert "event=reply_decision_json_intercepted" in log_line
+    assert "action=silent" in log_line
+    assert f"chars={len(text)}" in log_line
+    assert text not in log_line
+    assert not state.spoke
+    assert not state.sent_texts
+    assert state.visible_text_emissions == 0
+
+
+async def test_deliver_message_allows_normal_decision_json_discussion(monkeypatch) -> None:
+    """普通讨论决策 JSON 的正文不得被过度拦截。"""
+    send_text = AsyncMock(return_value=True)
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    chatter = AgenticChatter(stream_id="decision-discussion", plugin=object())
+    text = "字段 action、confidence 和 brief_reason 分别表示什么？"
+
+    result = await chatter._deliver_message(
+        None,
+        SimpleNamespace(message=text),
+        TurnState(stream_id="decision-discussion"),
+    )
+
+    assert result == (True, False)
+    send_text.assert_awaited_once_with(
+        content=text,
+        stream_id="decision-discussion",
+    )
+
+
 async def test_deliver_message_intercepts_complete_framework_message_line(monkeypatch) -> None:
     """模型完整复述框架消息行时不得再次发送给用户。"""
     send_text = AsyncMock(return_value=True)

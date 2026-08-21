@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0] - 2026-08-21
+
+### Added
+
+- 新增主 Agent 子决策 JSON 硬拦截，避免 `sub_actor` 的 `action`、`confidence`、`reason_codes` 等内部判断结构被误作为聊天正文发送。
+- 新增安全拦截日志 `event=reply_decision_json_intercepted`，仅记录动作和长度，不记录内部 JSON 原文。
+
+### Changed
+
+- 收紧决策 JSON 检测：校验完整字段类型、数值范围、有限数值和原因码类型，降低正常结构化内容被误拦截的风险。
+- 保留工具、act 和决策日志的英文结构化字段，并补充中文说明，便于检索和人工排查。
+
 ## [0.4.0] - 2026-08-19
 
 ### Added

@@ -6,6 +6,7 @@ from ..humanize.segmenter import (
     clean_reply_text,
     clean_reply_text_with_metadata,
     detect_provider_error_text,
+    detect_reply_decision_json_text,
     is_framework_message_line,
     segment_reply,
 )
@@ -39,6 +40,42 @@ def test_detect_provider_error_text_requires_complete_provider_signal() -> None:
     assert detect_provider_error_text(
         "The prompt could not be submitted. The prompt contains sensitive words."
     ) is None
+
+
+def test_detect_reply_decision_json_text_matches_complete_schema() -> None:
+    text = (
+        '{"action":"silent","confidence":0.8,"addressee":"other",'
+        '"interrupt_cost":0.0,"reason_codes":["not_directed_to_bot"],'
+        '"brief_reason":"未指向 bot"}'
+    )
+    assert detect_reply_decision_json_text(text) == "silent"
+
+
+def test_detect_reply_decision_json_text_matches_markdown_json_fence() -> None:
+    text = '''```json
+{"action":"silent","confidence":0.8,"addressee":"other","interrupt_cost":0.0,"reason_codes":[],"brief_reason":"未指向 bot"}
+```'''
+    assert detect_reply_decision_json_text(text) == "silent"
+def test_detect_reply_decision_json_text_rejects_incomplete_or_normal_json() -> None:
+    assert detect_reply_decision_json_text('{"action":"silent"}') is None
+    assert detect_reply_decision_json_text(
+        '{"action":"silent","confidence":0.8,"addressee":"other",'
+        '"interrupt_cost":0.0,"reason_codes":[],"brief_reason":1}'
+    ) is None
+    assert detect_reply_decision_json_text('{"message":"我会保持沉默"}') is None
+
+
+def test_detect_reply_decision_json_text_rejects_invalid_numbers() -> None:
+    text = (
+        '{"action":"silent","confidence":true,"addressee":"other",'
+        '"interrupt_cost":0.0,"reason_codes":[],"brief_reason":"x"}'
+    )
+    assert detect_reply_decision_json_text(text) is None
+    text = (
+        '{"action":"silent","confidence":1.1,"addressee":"other",'
+        '"interrupt_cost":0.0,"reason_codes":[],"brief_reason":"x"}'
+    )
+    assert detect_reply_decision_json_text(text) is None
 
 
 def test_clean_metadata_contains_removed_thoughts() -> None:

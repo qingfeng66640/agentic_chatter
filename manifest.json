@@ -1,7 +1,7 @@
 {
     "name": "agentic_chatter",
     "display_name": "Agentic Chatter",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "description": "Agent 式回复流程聊天器：分层回复决策、纯文本即回复、分层工具暴露、跨流全局心智",
     "author": "qf",
     "categories": [
