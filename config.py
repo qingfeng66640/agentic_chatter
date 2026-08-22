@@ -57,8 +57,11 @@ class AgenticChatterConfig(BaseConfig):
     class PipelineSection(SectionBase):
         """回复管线编排。
 
-        管线由若干阶段组成，按 ``stage_order`` 声明的顺序依次执行。
-        每个阶段都可以单独开关，未启用的阶段会被直接跳过。
+        管线由若干阶段组成，按 ``stage_order`` 声明候选顺序执行。
+        阶段是否实际执行还会受到对应开关过滤：perceive、plan、reflect
+        分别由 ``enable_perceive``、``enable_plan``、``enable_reflect`` 控制，
+        decide 由 ``decision.enabled`` 控制。关闭的阶段会从实际顺序中移除；
+        act 是必需阶段，即使未写入 ``stage_order`` 也会自动补上。
         """
 
         max_iterations: int = Field(
@@ -92,10 +95,12 @@ class AgenticChatterConfig(BaseConfig):
         stage_order: list[str] = Field(
             default_factory=lambda: ["perceive", "decide", "act", "reflect"],
             description=(
-                "回复管线的阶段执行顺序。可用阶段："
+                "回复管线的候选阶段顺序，并不表示列表中的阶段一定执行。可用阶段："
                 "perceive（情境感知）、decide（是否自然介入）、plan（意图规划）、"
                 "act（行动与表达）、reflect（回合反思）。"
-                "decide 启用时会被约束在 plan/act 前，act 阶段必须存在。"
+                "perceive、plan、reflect 分别受对应 enable_* 开关控制；"
+                "decide 受 decision.enabled 控制。关闭的阶段会从实际顺序中移除，"
+                "act 阶段必须存在且会自动补上。"
             ),
             label="阶段顺序",
             tag="ai",
@@ -153,8 +158,11 @@ class AgenticChatterConfig(BaseConfig):
         enabled: bool = Field(
             default=True,
             description=(
-                "是否在 act 前执行回复决策。关闭后跳过本地判断和 sub_actor，"
-                "保持原有的全量回复流程；适合临时排查决策行为。"
+                "回复决策阶段的总开关。开启后，stage_order 中的 decide 会执行硬规则、"
+                "本地评分和置信区间初判，灰区才调用 sub_actor；若 stage_order 未包含 decide，"
+                "会在 act 前自动补入。关闭后，无论 stage_order 是否包含 decide，都会将其从实际"
+                "执行顺序中移除；local_gate_enabled、评分边界和 sub_actor 均不生效，"
+                "其余阶段仍按各自开关过滤后执行。"
             ),
             label="启用回复决策",
             tag="ai",

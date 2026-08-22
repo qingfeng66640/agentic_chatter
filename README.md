@@ -65,9 +65,11 @@ alias_names = ["别名一", "别名二"]
   └─ reflect（可选）：更新情绪与跨流摘要
 ```
 
-其中 `act` 是必需阶段；其余内置阶段可单独启用或关闭。其他插件也可以通过 `PipelineService` 注册自定义阶段，并把阶段名加入 `pipeline.stage_order`。
+`pipeline.stage_order` 声明的是候选阶段及其顺序，并不表示列表中的阶段一定执行：`perceive`、`plan`、`reflect` 分别受 `enable_perceive`、`enable_plan`、`enable_reflect` 控制，`decide` 受 `decision.enabled` 控制；关闭的阶段会从实际执行顺序中移除。`act` 是必需阶段，即使未写入 `stage_order` 也会自动补上。其他插件也可以通过 `PipelineService` 注册自定义阶段，并把阶段名加入 `pipeline.stage_order`。
 
-回复决策只在启用 `decision.enabled` 时生效，优先级如下：
+`decision.enabled` 是 `decide` 阶段的总开关。关闭后，即使 `stage_order` 包含 `decide`，实际管线也会移除该阶段，`local_gate_enabled`、本地评分边界和 `sub_actor` 均不生效；其余阶段仍按各自开关过滤后执行。开启后，若 `stage_order` 未包含 `decide`，插件会在 `act` 前自动补入，并确保它位于 `plan`、`act` 之前。
+
+回复决策启用后的优先级如下：
 
 1. **硬规则**：私聊、回复 Bot 发出的消息、平台明确确认当前 Bot 被 `@`。
 2. **本地决策**：提取本地信号并计算评分与置信区间；明确组合规则可直接回复或静默。
