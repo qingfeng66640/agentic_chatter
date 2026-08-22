@@ -38,7 +38,7 @@
 | `[plugin]`      | 插件开关、主回复模型任务、私聊接管及私聊专用模型。                           |
 | `[pipeline]`    | 阶段顺序、感知/规划/反思开关，以及单轮迭代和可见发言上限。                   |
 | `[decision]`    | 本地评分权重、置信区间边界、语义任务、节奏冷却、`sub_actor` 和故障回退策略。 |
-| `[tools]`       | 工具可见性、折叠/黑名单、渐进探索、重复调用去重及工具调用模式。              |
+| `[tools]`       | 工具可见性、折叠/黑名单、渐进探索、重复调用去重、工具调用模式及异常诊断记录。 |
 | `[humanize]`    | 分段发送、打字延迟、QQBot C2C 实时流式输出、情绪、主动性、复读抑制和打断重规划。             |
 | `[global_mind]` | 跨流情绪、摘要、近期要闻和注入长度限制。                                     |
 | `[persona]`     | 私聊、群聊及额外系统提示词引导。                                             |
@@ -98,6 +98,21 @@ private_model_name = "private-chat-model"
 - 留空时私聊继续使用 `model_task`；指定后私聊 `act` 主循环固定使用该单模型，不使用主 task 的多模型回退列表；
 - 该覆盖不影响 perceive、plan、`sub_actor`、embedding 和全局心智摘要等辅助任务。
 
+### 供应商异常请求体诊断
+
+当模型把 Google/Gemini 审核错误包装成普通正文时，插件会在发送前拦截该正文。默认仅记录不含原文的安全日志；如需复盘触发拦截的插件可见请求上下文，可显式开启以下诊断开关：
+
+```toml
+[tools]
+record_provider_error_request_body = true
+```
+
+- 默认关闭；仅在已命中供应商异常正文拦截时记录，不命中时不会序列化或创建文件。
+- 记录追加到 `data/agentic_chatter/provider_error_requests.jsonl`，每行一条 UTF-8 JSON 对象。该快照是插件可见的 `response.payloads`，不保证等同供应商最终的原生 HTTP 请求体。
+- system 提示词中的昵称、别名、人格、身份、背景和回复风格会替换为稳定变量；用户输入、历史上下文、工具定义、Tool Call 及 Tool Result 按受控长度保留。
+- 不记录 reasoning；图片、音频等文件只保留类型和必要元数据，不写入二进制或 base64；工具参数与结果中的 `token`、`secret`、`password`、`authorization`、`cookie`、`api_key` 等常见敏感字段会脱敏。
+- 记录仍可能包含用户输入和工具数据。开启前请确认本地数据目录的访问权限，并按部署环境的数据留存规则清理该文件。
+
 ### QQBot C2C 实时流式输出
 
 在 `[humanize]` 中启用 `streaming_enabled` 后，QQBot C2C 私聊会按 LLM 可见文本 token 实时更新同一条流式消息。还需在 `qqbot_adapter` 中启用 `features.streaming`。
@@ -125,6 +140,7 @@ private_model_name = "private-chat-model"
 ## 数据边界与限制
 
 - 插件会读取核心人格、当前聊天上下文、历史消息、工具信息和模型响应，用于生成回复和参与决策。
+- 开启 `[tools].record_provider_error_request_body` 后，命中供应商异常正文拦截时会额外持久化受控请求上下文；其内容范围、脱敏和路径见“供应商异常请求体诊断”。
 - 跨流全局心智会持久化插件配置允许范围内的情绪、摘要和近期要闻；具体保留数量与长度由 `[global_mind]` 配置节限制。
 - 插件可能调用已注册的其他插件工具或 Action；这些副作用由被调用组件自身的权限和实现决定。
 - 插件不负责平台连接、账号认证或密钥管理；平台凭据应由核心配置和对应 Adapter 管理。

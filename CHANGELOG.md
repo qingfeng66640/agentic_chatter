@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.1] - 2026-08-22
+
+### Added
+
+- 新增默认关闭的 `[tools].record_provider_error_request_body` 诊断开关；命中供应商异常正文拦截时，可将插件可见的受控请求上下文追加到插件专属 JSONL。
+- 记录会将 system 中已知的人设、身份、背景和回复风格替换为稳定变量，并保留受限长度的用户输入、工具定义、Tool Call 和 Tool Result，便于复盘。
+
+### Security
+
+- 供应商异常请求体记录不包含 reasoning 或媒体二进制/base64，并脱敏工具参数和结果中的常见凭据字段。
+
 ## [0.5.0] - 2026-08-21
 
 ### Added

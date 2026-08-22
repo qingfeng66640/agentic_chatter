@@ -534,6 +534,16 @@ class AgenticChatterConfig(BaseConfig):
             label="记录工具调用日志",
             tag="debug",
         )
+        record_provider_error_request_body: bool = Field(
+            default=False,
+            description=(
+                "供应商异常正文被拦截时，是否将受控 LLM 请求体记录到插件 JSONL。"
+                "人设、身份、背景和回复风格会替换为变量；用户输入和工具调用仍会保留。"
+            ),
+            label="记录供应商异常请求体",
+            tag="debug",
+            hint="默认关闭；开启前请确认本地数据目录访问权限",
+        )
         tool_call_mode: str = Field(
             default="planning",
             description=(

@@ -161,6 +161,97 @@ async def test_deliver_message_intercepts_provider_error_text(monkeypatch) -> No
     assert state.visible_text_emissions == 0
 
 
+async def test_deliver_message_provider_error_recording_is_disabled_by_default(
+    monkeypatch,
+) -> None:
+    """未开启诊断开关时不得序列化或写入请求体。"""
+    send_text = AsyncMock(return_value=True)
+    build_record = Mock()
+    append_record = AsyncMock()
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    monkeypatch.setattr(chatter_module, "build_provider_error_request_record", build_record)
+    monkeypatch.setattr(chatter_module, "append_provider_error_request_record", append_record)
+    chatter = AgenticChatter(stream_id="provider-error-off", plugin=object())
+    state = TurnState(stream_id="provider-error-off")
+    config = SimpleNamespace(tools=SimpleNamespace(record_provider_error_request_body=False))
+    visible_text = (
+        "The prompt could not be submitted. The prompt contains sensitive words "
+        "that violate Google's [Generative AI Prohibited Use Policy]."
+    )
+
+    result = await chatter._deliver_message(
+        config,
+        SimpleNamespace(message=visible_text, payloads=["payload"]),
+        state,
+    )
+
+    assert result == (False, False)
+    send_text.assert_not_awaited()
+    build_record.assert_not_called()
+    append_record.assert_not_awaited()
+
+
+async def test_deliver_message_records_provider_error_request_body(monkeypatch) -> None:
+    """开启诊断开关时记录响应中的 payload 快照。"""
+    build_record = Mock(return_value={"payload_count": 1, "truncated": False})
+    append_record = AsyncMock(return_value="data/provider-error.jsonl")
+    info = Mock()
+    monkeypatch.setattr(chatter_module, "build_provider_error_request_record", build_record)
+    monkeypatch.setattr(chatter_module, "append_provider_error_request_record", append_record)
+    monkeypatch.setattr(chatter_module.logger, "info", info)
+    chatter = AgenticChatter(stream_id="provider-error-on", plugin=object())
+    state = TurnState(stream_id="provider-error-on")
+    payloads = ["payload"]
+    config = SimpleNamespace(tools=SimpleNamespace(record_provider_error_request_body=True))
+    visible_text = (
+        "The prompt could not be submitted. The prompt contains sensitive words "
+        "that violate Google's [Generative AI Prohibited Use Policy]."
+    )
+    response = SimpleNamespace(message=visible_text, payloads=payloads)
+
+    result = await chatter._deliver_message(config, response, state)
+
+    assert result == (False, False)
+    build_record.assert_called_once()
+    assert build_record.call_args.args[0] is payloads
+    assert build_record.call_args.kwargs["rule"] == "google_prompt_policy_block"
+    assert build_record.call_args.kwargs["stream_id"] == "provider-error-on"
+    append_record.assert_awaited_once_with(build_record.return_value)
+    assert any("event=provider_error_request_recorded" in str(call.args[0]) for call in info.call_args_list)
+
+
+async def test_deliver_message_provider_error_recording_failure_still_intercepts(
+    monkeypatch,
+) -> None:
+    """请求体记录失败时仍不得发送供应商异常正文。"""
+    send_text = AsyncMock(return_value=True)
+    warning = Mock()
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    monkeypatch.setattr(
+        chatter_module,
+        "build_provider_error_request_record",
+        Mock(side_effect=OSError("write failed")),
+    )
+    monkeypatch.setattr(chatter_module.logger, "warning", warning)
+    chatter = AgenticChatter(stream_id="provider-error-fail", plugin=object())
+    state = TurnState(stream_id="provider-error-fail")
+    config = SimpleNamespace(tools=SimpleNamespace(record_provider_error_request_body=True))
+    visible_text = (
+        "The prompt could not be submitted. The prompt contains sensitive words "
+        "that violate Google's [Generative AI Prohibited Use Policy]."
+    )
+
+    result = await chatter._deliver_message(
+        config,
+        SimpleNamespace(message=visible_text, payloads=[]),
+        state,
+    )
+
+    assert result == (False, False)
+    send_text.assert_not_awaited()
+    assert any("event=provider_error_request_record_failed" in str(call.args[0]) for call in warning.call_args_list)
+
+
 async def test_deliver_message_allows_provider_error_discussion(monkeypatch) -> None:
     """正常讨论供应商错误的回复不应被误拦截。"""
     send_text = AsyncMock(return_value=True)

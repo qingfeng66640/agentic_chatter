@@ -106,6 +106,10 @@ from .tooling.registry import (
     is_blacklisted_component,
     signature_matches,
 )
+from .tooling.provider_error_record import (
+    append_provider_error_request_record,
+    build_provider_error_request_record,
+)
 
 if TYPE_CHECKING:
     from src.core.components.types import ChatterResult
@@ -380,6 +384,22 @@ class _AgenticChatterBase(BaseChatter):
             mode=mode,  # type: ignore[arg-type]
             soft_limit=max(1, int(config.tools.soft_dedupe_limit)),
         )
+
+    def _get_persona_values(self) -> dict[str, Any]:
+        """读取记录请求体时需要变量化的人设字段。"""
+        try:
+            personality = get_core_config().personality
+        except RuntimeError:
+            return {}
+        return {
+            "nickname": getattr(personality, "nickname", ""),
+            "alias_names": getattr(personality, "alias_names", []),
+            "personality_core": getattr(personality, "personality_core", ""),
+            "personality_side": getattr(personality, "personality_side", ""),
+            "identity": getattr(personality, "identity", ""),
+            "background_story": getattr(personality, "background_story", ""),
+            "reply_style": getattr(personality, "reply_style", ""),
+        }
 
     async def _run_pipeline(
         self,
@@ -1201,6 +1221,33 @@ class _AgenticChatterBase(BaseChatter):
                 f"[{self.stream_id[:8]}] event=provider_error_text_intercepted "
                 f"rule={provider_error_rule} chars={len(message)}"
             )
+            if bool(
+                getattr(
+                    getattr(config, "tools", None),
+                    "record_provider_error_request_body",
+                    False,
+                )
+            ):
+                try:
+                    record = build_provider_error_request_record(
+                        getattr(response, "payloads", None),
+                        rule=provider_error_rule,
+                        stream_id=self.stream_id,
+                        provider_error_chars=len(message),
+                        persona_values=self._get_persona_values(),
+                    )
+                    record_path = await append_provider_error_request_record(record)
+                    logger.info(
+                        f"[{self.stream_id[:8]}] 供应商异常请求体已记录 "
+                        "event=provider_error_request_recorded "
+                        f"rule={provider_error_rule} payloads={record['payload_count']} "
+                        f"truncated={record['truncated']} path={record_path}"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"[{self.stream_id[:8]}] 供应商异常请求体记录失败 "
+                        f"event=provider_error_request_record_failed error={type(exc).__name__}"
+                    )
             return False, False
         decision_json_action = detect_reply_decision_json_text(message)
         if decision_json_action is not None:
