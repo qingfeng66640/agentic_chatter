@@ -18,7 +18,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 from src.app.plugin_system.api import llm_api, send_api, stream_api
@@ -117,6 +119,19 @@ if TYPE_CHECKING:
     from src.core.models.stream import ChatStream
 
 logger = get_logger("agentic_chatter")
+
+
+@dataclass(frozen=True)
+class _ClaimUnreadMatch:
+    """本轮 claim 与当前 stream 未读快照的无副作用匹配结果。"""
+
+    context: Any
+    matched: tuple["Message", ...]
+    remained: tuple["Message", ...]
+    unread_before: tuple["Message", ...]
+    history_before: tuple["Message", ...]
+    history_attr: str
+
 
 _TERMINATION_LABELS = {
     "stop_requested": "请求停止",
@@ -270,7 +285,12 @@ class _AgenticChatterBase(BaseChatter):
                         f"pending={pending_count} wait_seconds={wait_seconds:.3f} "
                         f"window_seconds={merge_window:.3f}"
                     )
-                    await mailbox.release_owner(owner, generation)
+                    owner_released = await mailbox.release_owner(owner, generation)
+                    if not owner_released:
+                        logger.error(
+                            f"[{self.stream_id[:8]}] 合并窗口等待时 owner 释放失败 "
+                            f"event=owner_release_failed generation={generation}"
+                        )
                     yield Wait(time=wait_seconds)
                     continue
 
@@ -300,7 +320,12 @@ class _AgenticChatterBase(BaseChatter):
                     if state.failed:
                         interruption_streak = await mailbox.interruption_state()
                         pending_after_release = await mailbox.pending_count()
-                        await mailbox.release_claim(claim)
+                        released = await mailbox.release_claim(claim)
+                        if not released:
+                            logger.error(
+                                f"[{self.stream_id[:8]}] 回合 claim 释放失败 "
+                                f"event=claim_release_failed generation={generation}"
+                            )
                         claim = None
                         logger.warning(
                             f"[{self.stream_id[:8]}] 回合已释放 event=turn_released "
@@ -326,13 +351,24 @@ class _AgenticChatterBase(BaseChatter):
                                 ),
                             )
 
-                        flushed_count = await self._flush_claim_unreads(unread_msgs)
-                        if flushed_count != len(unread_msgs):
+                        match = await self._match_claim_unreads(unread_msgs)
+                        if match is None:
                             raise RuntimeError(
                                 "未读消息确认不完整："
-                                f"expected={len(unread_msgs)} actual={flushed_count}"
+                                f"expected={len(unread_msgs)} actual=0"
                             )
-                        await mailbox.commit_claim(claim)
+                        committed = await mailbox.commit_claim(
+                            claim,
+                            apply=lambda: self._apply_claim_unread_match(match),
+                        )
+                        if not committed:
+                            self._restore_claim_unread_match(match)
+                            logger.error(
+                                f"[{self.stream_id[:8]}] mailbox claim 提交失败 "
+                                f"event=claim_commit_failed generation={generation} "
+                                f"messages={len(unread_msgs)}"
+                            )
+                            raise RuntimeError("mailbox claim 提交失败")
                         claim = None
                         state.input_confirmed = True
                         logger.info(
@@ -348,19 +384,39 @@ class _AgenticChatterBase(BaseChatter):
                         )
             except asyncio.CancelledError:
                 if claim is not None:
-                    await mailbox.release_claim(claim)
+                    released = await mailbox.release_claim(claim)
+                    if not released:
+                        logger.error(
+                            f"[{self.stream_id[:8]}] 取消时 claim 释放失败 "
+                            f"event=claim_release_failed generation={generation}"
+                        )
                     claim = None
                 raise
             except Exception as exc:
                 if claim is not None:
-                    await mailbox.release_claim(claim)
+                    released = await mailbox.release_claim(claim)
+                    if not released:
+                        logger.error(
+                            f"[{self.stream_id[:8]}] 异常时 claim 释放失败 "
+                            f"event=claim_release_failed generation={generation}"
+                        )
                     claim = None
                 logger.error(f"[{self.stream_id[:8]}] 回合执行失败：{exc}")
                 turn_result = Wait(time=5.0)
             finally:
                 if claim is not None:
-                    await mailbox.release_claim(claim)
-                await mailbox.release_owner(owner, generation)
+                    released = await mailbox.release_claim(claim)
+                    if not released:
+                        logger.error(
+                            f"[{self.stream_id[:8]}] 收尾时 claim 释放失败 "
+                            f"event=claim_release_failed generation={generation}"
+                        )
+                owner_released = await mailbox.release_owner(owner, generation)
+                if not owner_released:
+                    logger.error(
+                        f"[{self.stream_id[:8]}] mailbox owner 释放失败 "
+                        f"event=owner_release_failed generation={generation}"
+                    )
 
             yield turn_result
 
@@ -1431,46 +1487,125 @@ class _AgenticChatterBase(BaseChatter):
                 )
         return success_count
 
-    async def _flush_claim_unreads(self, unread_messages: list["Message"]) -> int:
-        """确认本轮 claim 的未读消息，兼容缺少 message_id 的消息。"""
-        if not unread_messages:
-            return 0
-
-        identified = [
-            message
-            for message in unread_messages
-            if str(getattr(message, "message_id", "") or "").strip()
-        ]
-        unidentified = [
-            message
-            for message in unread_messages
-            if not str(getattr(message, "message_id", "") or "").strip()
-        ]
-        flushed = await self.flush_unreads(identified)
-        if not unidentified:
-            return flushed
-
+    async def _match_claim_unreads(
+        self,
+        unread_messages: list["Message"],
+    ) -> _ClaimUnreadMatch | None:
+        """无副作用地把 claim 全量匹配到当前 stream 未读快照。"""
         chat_stream = await stream_api.get_stream(stream_id=self.stream_id)
         if not chat_stream:
-            return flushed
+            logger.error(
+                f"[{self.stream_id[:8]}] 未读确认匹配失败 "
+                "event=claim_unread_match_failed reason=stream_missing "
+                f"expected={len(unread_messages)} actual=0"
+            )
+            return None
 
-        fallback_counts: dict[str, int] = {}
-        for message in unidentified:
+        context = chat_stream.context
+        current_unreads = list(context.unread_messages)
+        expected_counts: dict[str, int] = {}
+        for message in unread_messages:
             key = message_key(message)
-            fallback_counts[key] = fallback_counts.get(key, 0) + 1
+            expected_counts[key] = expected_counts.get(key, 0) + 1
 
-        remained = []
-        for message in chat_stream.context.unread_messages:
+        remaining_counts = dict(expected_counts)
+        matched: list["Message"] = []
+        remained: list["Message"] = []
+        for message in current_unreads:
             key = message_key(message)
-            count = fallback_counts.get(key, 0)
+            count = remaining_counts.get(key, 0)
             if count > 0:
-                chat_stream.context.add_history_message(message)
-                fallback_counts[key] = count - 1
-                flushed += 1
+                matched.append(message)
+                remaining_counts[key] = count - 1
             else:
                 remained.append(message)
-        chat_stream.context.unread_messages = remained
-        return flushed
+
+        missing_count = sum(remaining_counts.values())
+        if missing_count:
+            identified = sum(
+                bool(str(getattr(message, "message_id", "") or "").strip())
+                for message in unread_messages
+            )
+            missing_keys = sorted(
+                key for key, count in remaining_counts.items() if count > 0
+            )
+            missing_digest = hashlib.sha256(
+                "\n".join(missing_keys).encode("utf-8")
+            ).hexdigest()[:12]
+            logger.error(
+                f"[{self.stream_id[:8]}] 未读确认匹配失败 "
+                "event=claim_unread_match_failed reason=claim_messages_missing "
+                f"expected={len(unread_messages)} actual={len(matched)} "
+                f"missing={missing_count} current_unreads={len(current_unreads)} "
+                f"identified={identified} unidentified={len(unread_messages) - identified} "
+                f"missing_key_digest={missing_digest}"
+            )
+            return None
+
+        history_attr = (
+            "history_messages"
+            if hasattr(context, "history_messages")
+            else "history"
+        )
+        return _ClaimUnreadMatch(
+            context=context,
+            matched=tuple(matched),
+            remained=tuple(remained),
+            unread_before=tuple(current_unreads),
+            history_before=tuple(getattr(context, history_attr)),
+            history_attr=history_attr,
+        )
+
+    @staticmethod
+    def _apply_claim_unread_match(match: _ClaimUnreadMatch) -> None:
+        """一次性应用已完成全量预检的未读确认结果。"""
+        remaining_counts: dict[str, int] = {}
+        for message in match.matched:
+            key = message_key(message)
+            remaining_counts[key] = remaining_counts.get(key, 0) + 1
+        unread_before_apply = list(match.context.unread_messages)
+        history_before_apply = list(getattr(match.context, match.history_attr))
+        try:
+            current_counts: dict[str, int] = {}
+            for message in unread_before_apply:
+                key = message_key(message)
+                current_counts[key] = current_counts.get(key, 0) + 1
+            if any(
+                current_counts.get(key, 0) < count
+                for key, count in remaining_counts.items()
+            ):
+                raise RuntimeError("未读消息在提交前发生变化")
+
+            remained: list["Message"] = []
+            for message in unread_before_apply:
+                key = message_key(message)
+                count = remaining_counts.get(key, 0)
+                if count > 0:
+                    match.context.add_history_message(message)
+                    remaining_counts[key] = count - 1
+                else:
+                    remained.append(message)
+            match.context.unread_messages = remained
+        except Exception:
+            match.context.unread_messages = unread_before_apply
+            setattr(match.context, match.history_attr, history_before_apply)
+            raise
+
+    @staticmethod
+    def _restore_claim_unread_match(match: _ClaimUnreadMatch) -> None:
+        """恢复应用未读确认前的上下文快照。"""
+        match.context.unread_messages = list(match.unread_before)
+        setattr(match.context, match.history_attr, list(match.history_before))
+
+    async def _flush_claim_unreads(self, unread_messages: list["Message"]) -> int:
+        """兼容直接调用：全量匹配成功后一次性确认 claim。"""
+        if not unread_messages:
+            return 0
+        match = await self._match_claim_unreads(unread_messages)
+        if match is None:
+            return 0
+        self._apply_claim_unread_match(match)
+        return len(match.matched)
 
     async def _has_new_unreads(
         self,

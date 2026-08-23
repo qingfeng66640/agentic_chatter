@@ -11,7 +11,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 def message_key(message: Any) -> str:
@@ -161,11 +161,17 @@ class StreamMailbox:
             self._claim = None
             return True
 
-    async def commit_claim(self, claim: TurnClaim) -> bool:
-        """确认当前 claim，不影响运行期间新增的 pending 消息。"""
+    async def commit_claim(
+        self,
+        claim: TurnClaim,
+        apply: Callable[[], None] | None = None,
+    ) -> bool:
+        """确认当前 claim；可在同一锁内先应用外部上下文变更。"""
         async with self._lock:
             if not self._is_current_claim(claim):
                 return False
+            if apply is not None:
+                apply()
             self._claim = None
             self._consecutive_interruptions = 0
             return True

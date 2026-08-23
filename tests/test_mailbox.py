@@ -150,6 +150,33 @@ async def test_commit_only_removes_claim_messages() -> None:
     assert next_claim.messages == (new,)
 
 
+async def test_commit_apply_failure_keeps_claim_releasable() -> None:
+    """提交回调失败时不得清除 claim，仍可释放重试。"""
+    mailbox = StreamMailbox("stream")
+    message = _message("retry")
+    owner = object()
+    generation = await mailbox.try_acquire(owner)
+    assert generation is not None
+    await mailbox.merge_snapshot([message])
+    claim = await mailbox.claim_pending(owner, generation)
+    assert claim is not None
+
+    def fail_apply() -> None:
+        raise RuntimeError("apply failed")
+
+    try:
+        await mailbox.commit_claim(claim, apply=fail_apply)
+    except RuntimeError as exc:
+        assert str(exc) == "apply failed"
+    else:
+        raise AssertionError("提交回调应抛出异常")
+
+    assert await mailbox.release_claim(claim)
+    retry = await mailbox.claim_pending(owner, generation)
+    assert retry is not None
+    assert retry.messages == (message,)
+
+
 async def test_wrong_owner_or_generation_cannot_modify_claim() -> None:
     mailbox = StreamMailbox("stream")
     owner = object()

@@ -1276,6 +1276,125 @@ async def test_flush_claim_unreads_supports_rehydrated_idless_message(
     assert context.unread_messages == []
 
 
+async def test_flush_claim_unreads_missing_messages_has_no_side_effect(monkeypatch) -> None:
+    """claim 缺失时不得部分搬运当前上下文。"""
+    claimed = SimpleNamespace(message_id="missing")
+    current = SimpleNamespace(message_id="present")
+    context = SimpleNamespace(unread_messages=[current], history=[])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-missing", plugin=object())
+
+    flushed = await chatter._flush_claim_unreads([claimed])
+
+    assert flushed == 0
+    assert context.unread_messages == [current]
+    assert context.history == []
+
+
+async def test_flush_claim_unreads_preserves_new_message_added_after_match(
+    monkeypatch,
+) -> None:
+    """预检后新到的 unread 不得被旧 remained 快照覆盖。"""
+    claimed = SimpleNamespace(message_id="claimed")
+    matched = SimpleNamespace(message_id="claimed")
+    new = SimpleNamespace(message_id="new")
+    context = SimpleNamespace(unread_messages=[matched], history=[])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-new", plugin=object())
+
+    match = await chatter._match_claim_unreads([claimed])
+    assert match is not None
+    context.unread_messages.append(new)
+    chatter._apply_claim_unread_match(match)
+
+    assert context.history == [matched]
+    assert context.unread_messages == [new]
+
+
+async def test_flush_claim_unreads_removes_only_claimed_duplicate_reference(
+    monkeypatch,
+) -> None:
+    """同一对象重复出现时只确认与 claim 数量一致的那一条。"""
+    message = SimpleNamespace(message_id="duplicated")
+    context = SimpleNamespace(unread_messages=[message, message], history=[])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-duplicate-reference", plugin=object())
+
+    flushed = await chatter._flush_claim_unreads([message])
+
+    assert flushed == 1
+    assert context.history == [message]
+    assert context.unread_messages == [message]
+
+
+async def test_apply_claim_unread_match_restores_context_when_match_disappears(
+    monkeypatch,
+) -> None:
+    """提交前 claim 对应 unread 消失时恢复完整上下文。"""
+    claimed = SimpleNamespace(message_id="claimed")
+    current = SimpleNamespace(message_id="claimed")
+    context = SimpleNamespace(unread_messages=[current], history=[])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-disappeared", plugin=object())
+    match = await chatter._match_claim_unreads([claimed])
+
+    assert match is not None
+    context.unread_messages.clear()
+    try:
+        chatter._apply_claim_unread_match(match)
+    except RuntimeError as exc:
+        assert str(exc) == "未读消息在提交前发生变化"
+    else:
+        raise AssertionError("提交前缺失匹配消息应中止确认")
+
+    assert context.unread_messages == []
+    assert context.history == []
+
+
+async def test_mailbox_commit_failure_restores_context_match(monkeypatch) -> None:
+    """mailbox commit 失败时恢复已应用的上下文确认。"""
+    claimed = SimpleNamespace(message_id="claimed")
+    current = SimpleNamespace(message_id="claimed")
+    context = SimpleNamespace(unread_messages=[current], history=[])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="commit-failure", plugin=object())
+    match = await chatter._match_claim_unreads([claimed])
+
+    assert match is not None
+    chatter._apply_claim_unread_match(match)
+    assert context.unread_messages == []
+    assert context.history == [current]
+
+    chatter._restore_claim_unread_match(match)
+    assert context.unread_messages == [current]
+    assert context.history == []
+
+
 async def test_mailbox_interrupt_ignores_claim_and_keeps_new_input(monkeypatch) -> None:
     """claim 重现不算新输入，新 ID 应进入 pending 并触发中断。"""
     old = SimpleNamespace(message_id="old")
