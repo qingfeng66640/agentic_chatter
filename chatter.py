@@ -127,6 +127,7 @@ class _ClaimUnreadMatch:
 
     context: Any
     matched: tuple["Message", ...]
+    history_matched: tuple["Message", ...]
     remained: tuple["Message", ...]
     unread_before: tuple["Message", ...]
     history_before: tuple["Message", ...]
@@ -258,6 +259,7 @@ class _AgenticChatterBase(BaseChatter):
                 continue
 
             claim: TurnClaim | None = None
+            owner_active = True
             turn_result: ChatterResult = Wait()
             try:
                 _, unread_snapshot = await self.fetch_unreads()
@@ -285,12 +287,13 @@ class _AgenticChatterBase(BaseChatter):
                         f"pending={pending_count} wait_seconds={wait_seconds:.3f} "
                         f"window_seconds={merge_window:.3f}"
                     )
-                    owner_released = await mailbox.release_owner(owner, generation)
-                    if not owner_released:
+                    released = await mailbox.release_owner(owner, generation)
+                    if not released:
                         logger.error(
                             f"[{self.stream_id[:8]}] 合并窗口等待时 owner 释放失败 "
                             f"event=owner_release_failed generation={generation}"
                         )
+                    owner_active = False
                     yield Wait(time=wait_seconds)
                     continue
 
@@ -354,7 +357,7 @@ class _AgenticChatterBase(BaseChatter):
                         match = await self._match_claim_unreads(unread_msgs)
                         if match is None:
                             raise RuntimeError(
-                                "未读消息确认不完整："
+                                "消息确认不完整："
                                 f"expected={len(unread_msgs)} actual=0"
                             )
                         committed = await mailbox.commit_claim(
@@ -374,6 +377,8 @@ class _AgenticChatterBase(BaseChatter):
                         logger.info(
                             f"[{self.stream_id[:8]}] 回合已确认 event=turn_committed "
                             f"generation={generation} messages={len(unread_msgs)} "
+                            f"matched_unread={len(match.matched)} "
+                            f"already_in_history={len(match.history_matched)} "
                             f"visible={state.spoke} "
                             "consecutive_interruptions_reset=true"
                         )
@@ -411,12 +416,13 @@ class _AgenticChatterBase(BaseChatter):
                             f"[{self.stream_id[:8]}] 收尾时 claim 释放失败 "
                             f"event=claim_release_failed generation={generation}"
                         )
-                owner_released = await mailbox.release_owner(owner, generation)
-                if not owner_released:
-                    logger.error(
-                        f"[{self.stream_id[:8]}] mailbox owner 释放失败 "
-                        f"event=owner_release_failed generation={generation}"
-                    )
+                if owner_active:
+                    owner_released = await mailbox.release_owner(owner, generation)
+                    if not owner_released:
+                        logger.error(
+                            f"[{self.stream_id[:8]}] mailbox owner 释放失败 "
+                            f"event=owner_release_failed generation={generation}"
+                        )
 
             yield turn_result
 
@@ -1520,6 +1526,28 @@ class _AgenticChatterBase(BaseChatter):
             else:
                 remained.append(message)
 
+        history_attr = (
+            "history_messages"
+            if hasattr(context, "history_messages")
+            else "history"
+        )
+        current_history = list(getattr(context, history_attr))
+        history_counts: dict[str, int] = {}
+        for message in current_history:
+            key = message_key(message)
+            history_counts[key] = history_counts.get(key, 0) + 1
+
+        history_matched: list["Message"] = []
+        for message in unread_messages:
+            key = message_key(message)
+            if remaining_counts.get(key, 0) <= 0:
+                continue
+            count = history_counts.get(key, 0)
+            if count > 0:
+                history_matched.append(message)
+                remaining_counts[key] -= 1
+                history_counts[key] = count - 1
+
         missing_count = sum(remaining_counts.values())
         if missing_count:
             identified = sum(
@@ -1535,56 +1563,82 @@ class _AgenticChatterBase(BaseChatter):
             logger.error(
                 f"[{self.stream_id[:8]}] 未读确认匹配失败 "
                 "event=claim_unread_match_failed reason=claim_messages_missing "
-                f"expected={len(unread_messages)} actual={len(matched)} "
+                f"expected={len(unread_messages)} "
+                f"actual={len(matched) + len(history_matched)} "
+                f"matched_unread={len(matched)} "
+                f"already_in_history={len(history_matched)} "
                 f"missing={missing_count} current_unreads={len(current_unreads)} "
-                f"identified={identified} unidentified={len(unread_messages) - identified} "
+                f"current_history={len(current_history)} identified={identified} "
+                f"unidentified={len(unread_messages) - identified} "
                 f"missing_key_digest={missing_digest}"
             )
             return None
 
-        history_attr = (
-            "history_messages"
-            if hasattr(context, "history_messages")
-            else "history"
-        )
         return _ClaimUnreadMatch(
             context=context,
             matched=tuple(matched),
+            history_matched=tuple(history_matched),
             remained=tuple(remained),
             unread_before=tuple(current_unreads),
-            history_before=tuple(getattr(context, history_attr)),
+            history_before=tuple(current_history),
             history_attr=history_attr,
         )
 
     @staticmethod
     def _apply_claim_unread_match(match: _ClaimUnreadMatch) -> None:
-        """一次性应用已完成全量预检的未读确认结果。"""
-        remaining_counts: dict[str, int] = {}
+        """一次性应用已完成全量预检的消息确认结果。"""
+        unread_counts: dict[str, int] = {}
         for message in match.matched:
             key = message_key(message)
-            remaining_counts[key] = remaining_counts.get(key, 0) + 1
+            unread_counts[key] = unread_counts.get(key, 0) + 1
+        history_counts_required: dict[str, int] = {}
+        for message in match.history_matched:
+            key = message_key(message)
+            history_counts_required[key] = history_counts_required.get(key, 0) + 1
+
         unread_before_apply = list(match.context.unread_messages)
         history_before_apply = list(getattr(match.context, match.history_attr))
         try:
-            current_counts: dict[str, int] = {}
-            for message in unread_before_apply:
+            history_counts: dict[str, int] = {}
+            for message in history_before_apply:
                 key = message_key(message)
-                current_counts[key] = current_counts.get(key, 0) + 1
-            if any(
-                current_counts.get(key, 0) < count
-                for key, count in remaining_counts.items()
-            ):
-                raise RuntimeError("未读消息在提交前发生变化")
+                history_counts[key] = history_counts.get(key, 0) + 1
+            history_before_counts: dict[str, int] = {}
+            for message in match.history_before:
+                key = message_key(message)
+                history_before_counts[key] = history_before_counts.get(key, 0) + 1
 
+            moved_to_history: dict[str, int] = {}
+            for key, count in unread_counts.items():
+                moved = min(
+                    count,
+                    max(0, history_counts.get(key, 0) - history_before_counts.get(key, 0)),
+                )
+                if moved:
+                    moved_to_history[key] = moved
+                    unread_counts[key] = count - moved
+
+            unread_matched: list["Message"] = []
             remained: list["Message"] = []
             for message in unread_before_apply:
                 key = message_key(message)
-                count = remaining_counts.get(key, 0)
+                count = unread_counts.get(key, 0)
                 if count > 0:
-                    match.context.add_history_message(message)
-                    remaining_counts[key] = count - 1
+                    unread_matched.append(message)
+                    unread_counts[key] = count - 1
                 else:
                     remained.append(message)
+
+            if any(count > 0 for count in unread_counts.values()):
+                raise RuntimeError("未读消息在提交前发生变化")
+            if any(
+                history_counts.get(key, 0) < count
+                for key, count in history_counts_required.items()
+            ):
+                raise RuntimeError("未读消息在提交前发生变化")
+
+            for message in unread_matched:
+                match.context.add_history_message(message)
             match.context.unread_messages = remained
         except Exception:
             match.context.unread_messages = unread_before_apply
@@ -1605,7 +1659,7 @@ class _AgenticChatterBase(BaseChatter):
         if match is None:
             return 0
         self._apply_claim_unread_match(match)
-        return len(match.matched)
+        return len(match.matched) + len(match.history_matched)
 
     async def _has_new_unreads(
         self,

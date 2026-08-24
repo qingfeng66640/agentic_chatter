@@ -1296,6 +1296,69 @@ async def test_flush_claim_unreads_missing_messages_has_no_side_effect(monkeypat
     assert context.history == []
 
 
+async def test_flush_claim_unreads_accepts_messages_already_in_history(monkeypatch) -> None:
+    """已被其他组件移入历史的 claim 应直接确认。"""
+    claimed = SimpleNamespace(message_id="suppressed")
+    historical = SimpleNamespace(message_id="suppressed")
+    context = SimpleNamespace(unread_messages=[], history=[historical])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-history", plugin=object())
+
+    flushed = await chatter._flush_claim_unreads([claimed])
+
+    assert flushed == 1
+    assert context.unread_messages == []
+    assert context.history == [historical]
+
+
+async def test_flush_claim_unreads_accepts_mixed_unread_and_history(monkeypatch) -> None:
+    """未读与历史分别包含的 claim 应合并确认且不重复写历史。"""
+    unread_claim = SimpleNamespace(message_id="unread")
+    history_claim = SimpleNamespace(message_id="history")
+    context = SimpleNamespace(
+        unread_messages=[unread_claim],
+        history=[history_claim],
+    )
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-mixed", plugin=object())
+
+    flushed = await chatter._flush_claim_unreads([unread_claim, history_claim])
+
+    assert flushed == 2
+    assert context.unread_messages == []
+    assert context.history == [history_claim, unread_claim]
+
+
+async def test_flush_claim_unreads_history_count_must_cover_duplicates(monkeypatch) -> None:
+    """历史中同键数量不足时不得确认重复 claim。"""
+    claimed = SimpleNamespace(message_id="duplicate-history")
+    historical = SimpleNamespace(message_id="duplicate-history")
+    context = SimpleNamespace(unread_messages=[], history=[historical])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-history-duplicate", plugin=object())
+
+    flushed = await chatter._flush_claim_unreads([claimed, claimed])
+
+    assert flushed == 0
+    assert context.unread_messages == []
+    assert context.history == [historical]
+
+
 async def test_flush_claim_unreads_preserves_new_message_added_after_match(
     monkeypatch,
 ) -> None:
@@ -1369,6 +1432,31 @@ async def test_apply_claim_unread_match_restores_context_when_match_disappears(
 
     assert context.unread_messages == []
     assert context.history == []
+
+
+async def test_apply_claim_unread_match_accepts_message_moved_to_history(
+    monkeypatch,
+) -> None:
+    """预检后由其他组件移入历史的消息应在提交时完成对账。"""
+    claimed = SimpleNamespace(message_id="suppressed-during-turn")
+    current = SimpleNamespace(message_id="suppressed-during-turn")
+    context = SimpleNamespace(unread_messages=[current], history=[])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-moved-history", plugin=object())
+    match = await chatter._match_claim_unreads([claimed])
+
+    assert match is not None
+    context.unread_messages.clear()
+    context.history.append(current)
+    chatter._apply_claim_unread_match(match)
+
+    assert context.unread_messages == []
+    assert context.history == [current]
 
 
 async def test_mailbox_commit_failure_restores_context_match(monkeypatch) -> None:
