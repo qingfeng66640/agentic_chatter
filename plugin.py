@@ -22,6 +22,9 @@ from .chatter import (
 )
 from .config import AgenticChatterConfig
 from .prompts import (
+    DEFAULT_HOW_YOU_ACT,
+    DEFAULT_HOW_YOU_SPEAK,
+    DEFAULT_WHEN_TO_STOP,
     perceive_prompt,
     plan_prompt,
     reply_decision_prompt,
@@ -84,10 +87,14 @@ class AgenticChatterPlugin(BasePlugin):
                 "negative_behaviors": optional("\n".join(personality.negative_behaviors)),
                 "theme_guide": optional(""),
                 "tool_encouragement": optional(""),
+                "tool_call_mode_guidance": optional(""),
                 "collapsed_tools": optional(""),
                 "global_awareness": optional(""),
                 "mood_guidance": optional(""),
                 "system_prompt_extra": optional(""),
+                "how_you_speak": optional(DEFAULT_HOW_YOU_SPEAK),
+                "how_you_act": optional(DEFAULT_HOW_YOU_ACT),
+                "when_to_stop": optional(DEFAULT_WHEN_TO_STOP),
             },
         )
 

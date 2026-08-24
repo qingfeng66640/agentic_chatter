@@ -95,6 +95,11 @@ from .pipeline.stages import (
     resolve_stage_order,
 )
 from .pipeline.state import ToolExecutionRecord, TurnState
+from .prompts import (
+    DEFAULT_HOW_YOU_ACT,
+    DEFAULT_HOW_YOU_SPEAK,
+    DEFAULT_WHEN_TO_STOP,
+)
 from .tooling.dedupe import CallDeduper, build_log_args
 from .tooling.explore import (
     ExploreToolsTool,
@@ -1840,6 +1845,17 @@ class _AgenticChatterBase(BaseChatter):
             "互相独立的工具仍可以组合调用。"
         )
 
+    @staticmethod
+    def _prompt_section(
+        value: Any,
+        default: str,
+        tag: str,
+    ) -> str:
+        """返回用户自定义或内置默认的系统提示词区块。"""
+        if isinstance(value, str) and value.strip():
+            return f"<{tag}>\n{value}\n</{tag}>"
+        return default
+
     async def _build_system_prompt(
         self,
         config: AgenticChatterConfig | None,
@@ -1862,6 +1878,9 @@ class _AgenticChatterBase(BaseChatter):
 
         theme_guide = ""
         extra = ""
+        how_you_speak = DEFAULT_HOW_YOU_SPEAK
+        how_you_act = DEFAULT_HOW_YOU_ACT
+        when_to_stop = DEFAULT_WHEN_TO_STOP
         encouragement = ""
         awareness = ""
         mood_text = ""
@@ -1876,6 +1895,21 @@ class _AgenticChatterBase(BaseChatter):
                 theme_guide = config.persona.group_guide
 
             extra = config.persona.system_prompt_extra
+            how_you_speak = self._prompt_section(
+                getattr(config.persona, "how_you_speak", ""),
+                DEFAULT_HOW_YOU_SPEAK,
+                "how_you_speak",
+            )
+            how_you_act = self._prompt_section(
+                getattr(config.persona, "how_you_act", ""),
+                DEFAULT_HOW_YOU_ACT,
+                "how_you_act",
+            )
+            when_to_stop = self._prompt_section(
+                getattr(config.persona, "when_to_stop", ""),
+                DEFAULT_WHEN_TO_STOP,
+                "when_to_stop",
+            )
 
             if config.tools.encourage_prompt:
                 encouragement = build_encouragement_prompt()
@@ -1908,6 +1942,9 @@ class _AgenticChatterBase(BaseChatter):
         return await (
             template
             .set("nickname", str(getattr(chat_stream, "bot_nickname", "") or ""))
+            .set("how_you_speak", how_you_speak)
+            .set("how_you_act", how_you_act)
+            .set("when_to_stop", when_to_stop)
             .set("theme_guide", theme_guide)
             .set("tool_encouragement", encouragement)
             .set("tool_call_mode_guidance", tool_call_mode_guidance)

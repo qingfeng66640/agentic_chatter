@@ -834,6 +834,43 @@ class AgenticChatterConfig(BaseConfig):
             rows=3,
             tag="text",
         )
+        how_you_speak: str = Field(
+            default="",
+            description=(
+                "自定义 how_you_speak 区块正文；留空使用内置默认提示词。默认内容："
+                "你直接用文本说话。你输出的文本内容就是你要发送出去的话，会原样发给对方。"
+                "不要写回复旁白、引号、前缀或格式标记；不想说话时不要输出文本。"
+            ),
+            label="表达方式提示词",
+            input_type="textarea",
+            rows=6,
+            tag="text",
+        )
+        how_you_act: str = Field(
+            default="",
+            description=(
+                "自定义 how_you_act 区块正文；留空使用内置默认提示词。默认内容："
+                "除说话外可通过 Tool、Action、Agent 做事；需要查询、读取、计算、记忆、"
+                "发表情或执行外部动作时优先调用实际工具。工具调用按依赖关系排序、排队和调度；"
+                "依赖前置结果时等待 Tool Result 后再继续，独立工具可同轮组合。"
+            ),
+            label="行为方式提示词",
+            input_type="textarea",
+            rows=6,
+            tag="text",
+        )
+        when_to_stop: str = Field(
+            default="",
+            description=(
+                "自定义 when_to_stop 区块正文；留空使用内置默认提示词。默认内容："
+                "该说的说完、该做的做完后调用 end_turn；话题聊完且短期不需要再接话时调用 "
+                "stop_conversation；不要无限自言自语。"
+            ),
+            label="停止条件提示词",
+            input_type="textarea",
+            rows=6,
+            tag="text",
+        )
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     pipeline: PipelineSection = Field(default_factory=PipelineSection)
