@@ -128,7 +128,6 @@ class _ClaimUnreadMatch:
     context: Any
     matched: tuple["Message", ...]
     history_matched: tuple["Message", ...]
-    remained: tuple["Message", ...]
     unread_before: tuple["Message", ...]
     history_before: tuple["Message", ...]
     history_attr: str
@@ -1618,16 +1617,10 @@ class _AgenticChatterBase(BaseChatter):
             )
             return None
 
-        remained = tuple(
-            message
-            for index, message in enumerate(current_unreads)
-            if index not in unread_consumed
-        )
         return _ClaimUnreadMatch(
             context=context,
             matched=tuple(matched),
             history_matched=tuple(history_matched),
-            remained=remained,
             unread_before=tuple(current_unreads),
             history_before=tuple(current_history),
             history_attr=history_attr,
