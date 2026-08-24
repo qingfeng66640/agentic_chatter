@@ -1459,6 +1459,60 @@ async def test_apply_claim_unread_match_accepts_message_moved_to_history(
     assert context.history == [current]
 
 
+async def test_flush_claim_unreads_rejects_ambiguous_history_identity(
+    monkeypatch,
+) -> None:
+    """同复合身份存在多个历史候选时不得误认领。"""
+    claimed = SimpleNamespace(
+        message_id="same-id",
+        stream_id="stream",
+        platform="qq",
+        sender_id="sender",
+    )
+    first = SimpleNamespace(**vars(claimed))
+    second = SimpleNamespace(**vars(claimed))
+    context = SimpleNamespace(unread_messages=[], history=[first, second])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-ambiguous", plugin=object())
+
+    flushed = await chatter._flush_claim_unreads([claimed])
+
+    assert flushed == 0
+    assert context.unread_messages == []
+    assert context.history == [first, second]
+
+
+async def test_flush_claim_unreads_prefers_same_object_over_duplicate_identity(
+    monkeypatch,
+) -> None:
+    """存在重复复合身份时，同一对象仍可精确确认。"""
+    claimed = SimpleNamespace(
+        message_id="same-id",
+        stream_id="stream",
+        platform="qq",
+        sender_id="sender",
+    )
+    other = SimpleNamespace(**vars(claimed))
+    context = SimpleNamespace(unread_messages=[], history=[other, claimed])
+    context.add_history_message = context.history.append
+    monkeypatch.setattr(
+        chatter_module.stream_api,
+        "get_stream",
+        AsyncMock(return_value=SimpleNamespace(context=context)),
+    )
+    chatter = AgenticChatter(stream_id="flush-identity", plugin=object())
+
+    flushed = await chatter._flush_claim_unreads([claimed])
+
+    assert flushed == 1
+    assert context.history == [other, claimed]
+
+
 async def test_mailbox_commit_failure_restores_context_match(monkeypatch) -> None:
     """mailbox commit 失败时恢复已应用的上下文确认。"""
     claimed = SimpleNamespace(message_id="claimed")

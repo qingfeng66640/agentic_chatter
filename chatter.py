@@ -1493,80 +1493,124 @@ class _AgenticChatterBase(BaseChatter):
                 )
         return success_count
 
+    @staticmethod
+    def _message_match_key(message: "Message") -> tuple[str, ...]:
+        """返回可用于重建消息唯一匹配的复合键。"""
+        message_id = str(getattr(message, "message_id", "") or "").strip()
+        if message_id:
+            return (
+                "platform",
+                str(getattr(message, "stream_id", "") or ""),
+                str(getattr(message, "platform", "") or "").strip().lower(),
+                str(getattr(message, "sender_id", "") or ""),
+                message_id,
+            )
+        return ("fingerprint", message_key(message))
+
+    @classmethod
+    def _match_claim_message(
+        cls,
+        claim_message: "Message",
+        unread_messages: list["Message"],
+        history_messages: list["Message"],
+        unread_consumed: set[int],
+        history_consumed: set[int],
+    ) -> tuple[str, int | None, bool]:
+        """按对象、复合身份或指纹匹配一条 claim 消息。"""
+        for index, candidate in enumerate(unread_messages):
+            if index not in unread_consumed and candidate is claim_message:
+                return "unread", index, False
+        for index, candidate in enumerate(history_messages):
+            if index not in history_consumed and candidate is claim_message:
+                return "history", index, False
+
+        match_key = cls._message_match_key(claim_message)
+        unread_matches = [
+            index
+            for index, candidate in enumerate(unread_messages)
+            if index not in unread_consumed
+            and cls._message_match_key(candidate) == match_key
+        ]
+        history_matches = [
+            index
+            for index, candidate in enumerate(history_messages)
+            if index not in history_consumed
+            and cls._message_match_key(candidate) == match_key
+        ]
+        if len(unread_matches) + len(history_matches) != 1:
+            return "missing", None, bool(unread_matches or history_matches)
+        if unread_matches:
+            return "unread", unread_matches[0], False
+        return "history", history_matches[0], False
+
     async def _match_claim_unreads(
         self,
         unread_messages: list["Message"],
     ) -> _ClaimUnreadMatch | None:
-        """无副作用地把 claim 全量匹配到当前 stream 未读快照。"""
+        """无副作用地把 claim 匹配到当前未读和历史快照。"""
         chat_stream = await stream_api.get_stream(stream_id=self.stream_id)
         if not chat_stream:
             logger.error(
-                f"[{self.stream_id[:8]}] 未读确认匹配失败 "
-                "event=claim_unread_match_failed reason=stream_missing "
+                f"[{self.stream_id[:8]}] 消息确认匹配失败 "
+                "event=claim_match_failed reason=stream_missing "
                 f"expected={len(unread_messages)} actual=0"
             )
             return None
 
         context = chat_stream.context
         current_unreads = list(context.unread_messages)
-        expected_counts: dict[str, int] = {}
-        for message in unread_messages:
-            key = message_key(message)
-            expected_counts[key] = expected_counts.get(key, 0) + 1
-
-        remaining_counts = dict(expected_counts)
-        matched: list["Message"] = []
-        remained: list["Message"] = []
-        for message in current_unreads:
-            key = message_key(message)
-            count = remaining_counts.get(key, 0)
-            if count > 0:
-                matched.append(message)
-                remaining_counts[key] = count - 1
-            else:
-                remained.append(message)
-
         history_attr = (
             "history_messages"
             if hasattr(context, "history_messages")
             else "history"
         )
         current_history = list(getattr(context, history_attr))
-        history_counts: dict[str, int] = {}
-        for message in current_history:
-            key = message_key(message)
-            history_counts[key] = history_counts.get(key, 0) + 1
-
+        unread_consumed: set[int] = set()
+        history_consumed: set[int] = set()
+        matched: list["Message"] = []
         history_matched: list["Message"] = []
-        for message in unread_messages:
-            key = message_key(message)
-            if remaining_counts.get(key, 0) <= 0:
-                continue
-            count = history_counts.get(key, 0)
-            if count > 0:
-                history_matched.append(message)
-                remaining_counts[key] -= 1
-                history_counts[key] = count - 1
+        ambiguous = False
 
-        missing_count = sum(remaining_counts.values())
+        for claim_message in unread_messages:
+            location, index, is_ambiguous = self._match_claim_message(
+                claim_message,
+                current_unreads,
+                current_history,
+                unread_consumed,
+                history_consumed,
+            )
+            ambiguous = ambiguous or is_ambiguous
+            if location == "unread" and index is not None:
+                unread_consumed.add(index)
+                matched.append(current_unreads[index])
+            elif location == "history" and index is not None:
+                history_consumed.add(index)
+                history_matched.append(current_history[index])
+
+        missing_count = len(unread_messages) - len(matched) - len(history_matched)
         if missing_count:
             identified = sum(
                 bool(str(getattr(message, "message_id", "") or "").strip())
                 for message in unread_messages
             )
             missing_keys = sorted(
-                key for key, count in remaining_counts.items() if count > 0
+                message_key(message)
+                for message in unread_messages
+                if not any(
+                    message is matched_message
+                    for matched_message in (*matched, *history_matched)
+                )
             )
             missing_digest = hashlib.sha256(
                 "\n".join(missing_keys).encode("utf-8")
             ).hexdigest()[:12]
+            reason = "ambiguous_match" if ambiguous else "claim_messages_missing"
             logger.error(
-                f"[{self.stream_id[:8]}] 未读确认匹配失败 "
-                "event=claim_unread_match_failed reason=claim_messages_missing "
+                f"[{self.stream_id[:8]}] 消息确认匹配失败 "
+                f"event=claim_match_failed reason={reason} "
                 f"expected={len(unread_messages)} "
                 f"actual={len(matched) + len(history_matched)} "
-                f"matched_unread={len(matched)} "
-                f"already_in_history={len(history_matched)} "
+                f"matched_unread={len(matched)} already_in_history={len(history_matched)} "
                 f"missing={missing_count} current_unreads={len(current_unreads)} "
                 f"current_history={len(current_history)} identified={identified} "
                 f"unidentified={len(unread_messages) - identified} "
@@ -1574,71 +1618,80 @@ class _AgenticChatterBase(BaseChatter):
             )
             return None
 
+        remained = tuple(
+            message
+            for index, message in enumerate(current_unreads)
+            if index not in unread_consumed
+        )
         return _ClaimUnreadMatch(
             context=context,
             matched=tuple(matched),
             history_matched=tuple(history_matched),
-            remained=tuple(remained),
+            remained=remained,
             unread_before=tuple(current_unreads),
             history_before=tuple(current_history),
             history_attr=history_attr,
         )
 
-    @staticmethod
-    def _apply_claim_unread_match(match: _ClaimUnreadMatch) -> None:
-        """一次性应用已完成全量预检的消息确认结果。"""
-        unread_counts: dict[str, int] = {}
-        for message in match.matched:
-            key = message_key(message)
-            unread_counts[key] = unread_counts.get(key, 0) + 1
-        history_counts_required: dict[str, int] = {}
-        for message in match.history_matched:
-            key = message_key(message)
-            history_counts_required[key] = history_counts_required.get(key, 0) + 1
+    @classmethod
+    def _resolve_claim_at_apply(
+        cls,
+        claim_messages: tuple["Message", ...],
+        unread_messages: list["Message"],
+        history_messages: list["Message"],
+    ) -> tuple[list["Message"], list["Message"]]:
+        """在提交时重新按唯一证据定位 claim 消息。"""
+        unread_consumed: set[int] = set()
+        history_consumed: set[int] = set()
+        unread_matched: list["Message"] = []
+        history_matched: list["Message"] = []
+        for claim_message in claim_messages:
+            location, index, ambiguous = cls._match_claim_message(
+                claim_message,
+                unread_messages,
+                history_messages,
+                unread_consumed,
+                history_consumed,
+            )
+            if ambiguous:
+                raise RuntimeError("消息在提交前无法唯一确认")
+            if index is None:
+                raise RuntimeError("未读消息在提交前发生变化")
+            if location == "unread":
+                unread_consumed.add(index)
+                unread_matched.append(unread_messages[index])
+            else:
+                history_consumed.add(index)
+                history_matched.append(history_messages[index])
+        return unread_matched, history_matched
 
+
+    @classmethod
+    def _apply_claim_unread_match(cls, match: _ClaimUnreadMatch) -> None:
+        """一次性应用已完成全量预检的消息确认结果。"""
+        claim_messages = (*match.matched, *match.history_matched)
         unread_before_apply = list(match.context.unread_messages)
         history_before_apply = list(getattr(match.context, match.history_attr))
         try:
-            history_counts: dict[str, int] = {}
-            for message in history_before_apply:
-                key = message_key(message)
-                history_counts[key] = history_counts.get(key, 0) + 1
-            history_before_counts: dict[str, int] = {}
-            for message in match.history_before:
-                key = message_key(message)
-                history_before_counts[key] = history_before_counts.get(key, 0) + 1
-
-            moved_to_history: dict[str, int] = {}
-            for key, count in unread_counts.items():
-                moved = min(
-                    count,
-                    max(0, history_counts.get(key, 0) - history_before_counts.get(key, 0)),
-                )
-                if moved:
-                    moved_to_history[key] = moved
-                    unread_counts[key] = count - moved
-
-            unread_matched: list["Message"] = []
+            unread_matched, _ = cls._resolve_claim_at_apply(
+                claim_messages,
+                unread_before_apply,
+                history_before_apply,
+            )
+            consumed_ids = {id(message) for message in unread_matched}
             remained: list["Message"] = []
+            consumed_counts: dict[int, int] = {}
+            for message in unread_matched:
+                identity = id(message)
+                consumed_counts[identity] = consumed_counts.get(identity, 0) + 1
             for message in unread_before_apply:
-                key = message_key(message)
-                count = unread_counts.get(key, 0)
-                if count > 0:
-                    unread_matched.append(message)
-                    unread_counts[key] = count - 1
+                identity = id(message)
+                count = consumed_counts.get(identity, 0)
+                if identity in consumed_ids and count > 0:
+                    consumed_counts[identity] = count - 1
+                    match.context.add_history_message(message)
                 else:
                     remained.append(message)
-
-            if any(count > 0 for count in unread_counts.values()):
-                raise RuntimeError("未读消息在提交前发生变化")
-            if any(
-                history_counts.get(key, 0) < count
-                for key, count in history_counts_required.items()
-            ):
-                raise RuntimeError("未读消息在提交前发生变化")
-
-            for message in unread_matched:
-                match.context.add_history_message(message)
             match.context.unread_messages = remained
         except Exception:
             match.context.unread_messages = unread_before_apply
