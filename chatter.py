@@ -282,6 +282,11 @@ def _label(mapping: dict[str, str], value: object, default: str = "未知") -> s
 MAX_DIGEST_CHARS = 40
 # INFO 思考日志的单条最大长度
 MAX_THOUGHT_LOG_CHARS = 300
+# 无明确等待策略时的默认回合间隔（秒）：任务提交、中断释放与异常兜底共用
+DEFAULT_TURN_RETRY_SECONDS = 5.0
+# 复读判定兜底阈值；配置缺省时启用（相似度按比率、包含按比率）
+DEFAULT_REPLY_SIMILARITY_THRESHOLD = 0.88
+DEFAULT_REPLY_CONTAINMENT_THRESHOLD = 0.90
 
 
 def _thought_log_line(stream_id: str, source: str, content: str) -> str:
@@ -367,18 +372,18 @@ class _AgenticChatterBase(BaseChatter):
         """
         while True:
             mailbox = get_stream_mailbox(self.stream_id)
-            owner = object()
-            generation = await mailbox.try_acquire(owner)
+            turn_token = object()
+            generation = await mailbox.try_acquire(turn_token)
             if generation is None:
                 yield Wait()
                 continue
 
             claim: TurnClaim | None = None
-            owner_active = True
+            is_turn_owner = True
             turn_result: ChatterResult = Wait()
             try:
                 _, unread_snapshot = await self.fetch_unreads()
-                added = await mailbox.merge_snapshot(unread_snapshot)
+                merged_count = await mailbox.merge_snapshot(unread_snapshot)
                 merge_window = max(
                     0.0,
                     float(
@@ -390,10 +395,10 @@ class _AgenticChatterBase(BaseChatter):
                     ),
                 )
                 pending_count, wait_seconds = await mailbox.pending_state(merge_window)
-                if added:
+                if merged_count:
                     logger.info(
                         f"[{self.stream_id[:8]}] 输入已合并 event=input_merged "
-                        f"代次={generation} 新增={added} 未读数={pending_count} "
+                        f"代次={generation} 新增={merged_count} 未读数={pending_count} "
                         f"窗口秒数={merge_window:.3f}"
                     )
                 if pending_count and wait_seconds > 0:
@@ -403,13 +408,13 @@ class _AgenticChatterBase(BaseChatter):
                         f"窗口秒数={merge_window:.3f}"
                     )
                     await self._release_owner_safely(
-                        mailbox, owner, generation, "合并窗口等待时"
+                        mailbox, turn_token, generation, "合并窗口等待时"
                     )
-                    owner_active = False
+                    is_turn_owner = False
                     yield Wait(time=wait_seconds)
                     continue
 
-                claim = await mailbox.claim_pending(owner, generation)
+                claim = await mailbox.claim_pending(turn_token, generation)
                 if claim is not None:
                     from src.core.managers import get_stream_manager
 
@@ -472,12 +477,12 @@ class _AgenticChatterBase(BaseChatter):
                 raise
             except Exception as exc:
                 logger.error(f"[{self.stream_id[:8]}] 回合执行失败：{exc}")
-                turn_result = Wait(time=5.0)
+                turn_result = Wait(time=DEFAULT_TURN_RETRY_SECONDS)
             finally:
                 if claim is not None:
                     await self._release_claim_safely(mailbox, claim, generation, "收尾时")
-                if owner_active:
-                    await self._release_owner_safely(mailbox, owner, generation, "mailbox")
+                if is_turn_owner:
+                    await self._release_owner_safely(mailbox, turn_token, generation, "mailbox")
 
             yield turn_result
 
@@ -518,13 +523,13 @@ class _AgenticChatterBase(BaseChatter):
         unread_text: str,
     ) -> bool:
         """把本轮消息依次交给活动任务；任一条被接受即视为已路由。"""
-        routed = False
+        any_routed = False
         for message in unread_msgs:
-            routed = await route_message(
+            any_routed = await route_message(
                 runtime.state.task_id,
                 str(getattr(message, "content", "") or unread_text),
-            ) or routed
-        return routed
+            ) or any_routed
+        return any_routed
 
     def _create_task_runtime(
         self,
@@ -599,8 +604,8 @@ class _AgenticChatterBase(BaseChatter):
             task_request, task_store = self._build_task_request(
                 config, task_type, unread_text, unread_msgs
             )
-        committed = await mailbox.commit_claim(claim)
-        if not committed:
+        is_committed = await mailbox.commit_claim(claim)
+        if not is_committed:
             logger.error(
                 f"[{self.stream_id[:8]}] 任务 claim 提交失败 "
                 f"event=task_claim_commit_failed 代次={generation}"
@@ -617,7 +622,7 @@ class _AgenticChatterBase(BaseChatter):
             f"代次={generation} 消息数={len(unread_msgs)} "
             f"任务ID={task_runtime.state.task_id}"
         )
-        return Wait(time=5.0)
+        return Wait(time=DEFAULT_TURN_RETRY_SECONDS)
 
     async def _run_normal_turn(
         self,
@@ -654,7 +659,7 @@ class _AgenticChatterBase(BaseChatter):
                 f"说明={state.error} 剩余未读={pending_after_release} "
                 f"连续中断次数={interruption_streak}"
             )
-            return Wait(time=5.0), None
+            return Wait(time=DEFAULT_TURN_RETRY_SECONDS), None
 
         if config is not None and config.decision.enabled:
             get_participation_store().record(
@@ -677,11 +682,11 @@ class _AgenticChatterBase(BaseChatter):
                 "消息确认不完整："
                 f"expected={len(unread_msgs)} actual=0"
             )
-        committed = await mailbox.commit_claim(
+        is_committed = await mailbox.commit_claim(
             claim,
             apply=lambda: self._apply_claim_unread_match(match),
         )
-        if not committed:
+        if not is_committed:
             self._restore_claim_unread_match(match)
             logger.error(
                 f"[{self.stream_id[:8]}] mailbox claim 提交失败 "
@@ -1431,17 +1436,7 @@ class _AgenticChatterBase(BaseChatter):
         state: TurnState,
     ) -> bool:
         """确认本轮仍允许启动一条新的可见流式消息。"""
-        max_emissions = max(
-            1,
-            int(
-                getattr(
-                    getattr(config, "pipeline", None),
-                    "max_visible_text_emissions",
-                    3,
-                )
-            ),
-        )
-        return state.visible_text_emissions == 0 and max_emissions > 0
+        return state.visible_text_emissions == 0
 
     def _create_qqbot_streaming_session(
         self,
@@ -1515,10 +1510,10 @@ class _AgenticChatterBase(BaseChatter):
             message,
             state.sent_texts,
             similarity_threshold=float(
-                getattr(humanize, "reply_similarity_threshold", 0.88)
+                getattr(humanize, "reply_similarity_threshold", DEFAULT_REPLY_SIMILARITY_THRESHOLD)
             ),
             containment_threshold=float(
-                getattr(humanize, "reply_containment_threshold", 0.90)
+                getattr(humanize, "reply_containment_threshold", DEFAULT_REPLY_CONTAINMENT_THRESHOLD)
             ),
         )
 
@@ -1702,9 +1697,6 @@ class _AgenticChatterBase(BaseChatter):
         """
         trigger = unread_msgs[-1] if unread_msgs else None
         runnable: list[Any] = []
-        tool_call_mode = tool_call_mode.strip().lower()
-        if tool_call_mode not in ("planning", "batch"):
-            tool_call_mode = "planning"
 
         for call in calls:
             name = str(getattr(call, "name", "") or "")
@@ -2007,7 +1999,7 @@ class _AgenticChatterBase(BaseChatter):
         _, current_unreads = await self.fetch_unreads()
         if claim is not None:
             mailbox = get_stream_mailbox(self.stream_id)
-            added = await mailbox.merge_snapshot(current_unreads)
+            merged_count = await mailbox.merge_snapshot(current_unreads)
             pending_count, merge_wait = await mailbox.pending_state(
                 max(
                     0.0,
@@ -2020,7 +2012,7 @@ class _AgenticChatterBase(BaseChatter):
                     ),
                 )
             )
-            if not added:
+            if not merged_count:
                 return False
             if merge_wait > 0:
                 logger.info(
