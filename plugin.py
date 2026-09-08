@@ -14,7 +14,7 @@ from src.core.components.loader import register_plugin
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager, min_len, optional, wrap
 
-from .actions import EndTurnAction, SayAction, StopConversationAction
+from .actions import DispatchTaskAction, EndTurnAction, SayAction, StopConversationAction
 from .chatter import (
     AgenticChatter,
     AgenticDiscussChatter,
@@ -31,7 +31,7 @@ from .prompts import (
     system_prompt,
     user_prompt,
 )
-from .service import PipelineService
+from .service import PipelineService, TaskRuntimeService
 from .tooling import ExploreToolsTool
 
 logger = get_logger("agentic_chatter")
@@ -156,8 +156,10 @@ class AgenticChatterPlugin(BasePlugin):
             AgenticChatter,
             AgenticDiscussChatter,
             PipelineService,
+            TaskRuntimeService,
             ExploreToolsTool,
             SayAction,
+            DispatchTaskAction,
             EndTurnAction,
             StopConversationAction,
         ]

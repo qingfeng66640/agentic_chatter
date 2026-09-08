@@ -94,7 +94,12 @@ from .pipeline.stages import (
     STAGE_REFLECT,
     resolve_stage_order,
 )
-from .pipeline.state import ToolExecutionRecord, TurnState
+from .pipeline.state import (
+    ToolExecutionRecord,
+    TurnOutcome,
+    TurnState,
+)
+
 from .prompts import (
     DEFAULT_HOW_YOU_ACT,
     DEFAULT_HOW_YOU_SPEAK,
@@ -113,10 +118,72 @@ from .tooling.registry import (
     is_blacklisted_component,
     signature_matches,
 )
+from .task_runtime import (
+    TaskBudget,
+    TaskRequest,
+    TaskStateStore,
+    TaskStatus,
+    TaskType,
+    get_task_runtime_manager,
+    get_task_templates,
+)
+from .task_runtime.coordinator import register_task, route_message, start_task
 from .tooling.provider_error_record import (
     append_provider_error_request_record,
     build_provider_error_request_record,
 )
+
+
+
+
+_TASK_KEYWORDS = {
+    TaskType.RESEARCH: ("查询资料", "搜索资料", "查资料", "调研"),
+    TaskType.CODE_ANALYSIS: ("分析代码", "检查代码", "排查代码"),
+    TaskType.CODE_CHANGE: ("修改代码", "改代码", "修复代码", "更改代码"),
+    TaskType.CONTENT_EDIT: ("修改内容", "编辑内容", "润色内容"),
+}
+
+
+def _task_request_for_runtime(runtime: Any) -> TaskRequest:
+    """根据持久化任务状态重建原任务请求。"""
+    template = get_task_templates().get(runtime.state.task_type)
+    return TaskRequest(
+        objective=runtime.state.user_goal,
+        result_schema=runtime.state.metadata.get("result_schema", template.result_schema),
+        validation_steps=tuple(
+            runtime.state.metadata.get("validation_steps", template.validation_steps)
+        ),
+    )
+
+
+def _detect_task_type(text: str) -> TaskType | None:
+    """识别需要独立任务预算的复杂请求。"""
+    stripped = text.strip()
+    if stripped.startswith("任务:") or stripped.startswith("任务："):
+        return TaskType.GENERAL
+    for task_type, keywords in _TASK_KEYWORDS.items():
+        if any(keyword in text for keyword in keywords):
+            return task_type
+    return None
+
+
+def _build_task_budget(config: AgenticChatterConfig) -> TaskBudget:
+    """从插件配置构造任务预算。"""
+    section = config.tasks
+    return TaskBudget(
+        max_iterations=max(1, int(section.max_iterations)),
+        max_tool_calls=max(1, int(section.max_tool_calls)),
+        max_same_signature_calls=max(1, int(section.max_same_signature_calls)),
+        max_no_progress_steps=max(1, int(section.max_no_progress_steps)),
+        max_failures=max(1, int(section.max_failures)),
+        timeout_seconds=max(1.0, float(section.timeout_seconds)),
+        max_result_size=max(100, int(section.max_result_size)),
+    )
+
+
+def _is_task_enabled(config: AgenticChatterConfig | None) -> bool:
+    """判断复杂任务运行时是否开启。"""
+    return config is not None and bool(getattr(getattr(config, "tasks", None), "enabled", False))
 
 if TYPE_CHECKING:
     from src.core.components.types import ChatterResult
@@ -252,8 +319,6 @@ class _AgenticChatterBase(BaseChatter):
         Yields:
             ChatterResult: 每轮结束时的结果。
         """
-        from src.core.managers import get_stream_manager
-
         while True:
             mailbox = get_stream_mailbox(self.stream_id)
             owner = object()
@@ -307,39 +372,103 @@ class _AgenticChatterBase(BaseChatter):
                     unread_text = "\n".join(
                         self.format_message_line(message) for message in unread_msgs
                     )
-                    chat_stream = await get_stream_manager().get_or_create_stream(
-                        stream_id=self.stream_id
-                    )
                     state = TurnState(
                         stream_id=self.stream_id,
                         unread_texts=unread_text,
                         deduper=self._build_deduper(config),
                     )
+                    checkpoint_dir = str(
+                        getattr(getattr(config, "tasks", None), "checkpoint_directory", "") or ""
+                    ).strip()
+                    task_store = TaskStateStore(checkpoint_dir) if checkpoint_dir else None
+                    manager = get_task_runtime_manager()
+                    manager.configure_store(task_store)
+                    if task_store is not None:
+                        for restored in task_store.load_active():
+                            if manager.get(restored.state.task_id) is None:
+                                manager.register(restored)
+                            if restored.state.stream_id == self.stream_id:
+                                request = _task_request_for_runtime(restored)
+                                if restored.state.status in (
+                                    TaskStatus.CREATED,
+                                    TaskStatus.PLANNING,
+                                    TaskStatus.RUNNING,
+                                ):
+                                    start_task(self, restored, request, task_store)
+                                elif restored.state.status in (
+                                    TaskStatus.PAUSED,
+                                    TaskStatus.WAITING_USER,
+                                    TaskStatus.FAILED,
+                                ):
+                                    register_task(self, restored, request, task_store)
 
-                    outcome_result = await self._run_pipeline(
-                        config=config,
-                        chat_stream=chat_stream,
-                        state=state,
-                        unread_msgs=unread_msgs,
-                        claim=claim,
-                    )
+                    active_runtime = manager.get_active(self.stream_id)
+                    if active_runtime is not None:
+                        routed = False
+                        for message in unread_msgs:
+                            routed = await route_message(
+                                active_runtime.state.task_id,
+                                str(getattr(message, "content", "") or unread_text),
+                            ) or routed
+                        if routed:
+                            state.input_confirmed = True
+                            state.spoke = False
+                            outcome_result = TurnOutcome(spoke=False)
+                            task_runtime = active_runtime
+                        else:
+                            task_runtime = None
+                    else:
+                        task_runtime = None
+                    task_type = _detect_task_type(unread_text) if task_runtime is None else None
+                    if task_type is not None and _is_task_enabled(config):
+                        task_runtime = get_task_runtime_manager().create(
+                            self.stream_id,
+                            unread_text,
+                            task_type=task_type,
+                            parent_turn_id=f"{self.stream_id}:{generation}",
+                            allowed_tools=tuple(getattr(config.tasks, "default_allowed_tools", ()) or ()) or None,
+                            budget=_build_task_budget(config),
+                            denied_tools=tuple(getattr(config.tasks, "denied_tools", ()) or ()),
+                        )
+                        task_runtime.start()
+                        logger.info(
+                            f"[{self.stream_id[:8]}] 已创建复杂任务 event=task_created "
+                            f"task_id={task_runtime.state.task_id} task_type={task_type.value}"
+                        )
 
-                    if state.failed:
-                        interruption_streak = await mailbox.interruption_state()
-                        pending_after_release = await mailbox.pending_count()
-                        released = await mailbox.release_claim(claim)
-                        if not released:
-                            logger.error(
-                                f"[{self.stream_id[:8]}] 回合 claim 释放失败 "
-                                f"event=claim_release_failed generation={generation}"
+                    if task_runtime is not None:
+                        if task_type is not None:
+                            checkpoint_dir = str(
+                                getattr(config.tasks, "checkpoint_directory", "") or ""
+                            ).strip()
+                            task_store = TaskStateStore(checkpoint_dir) if checkpoint_dir else None
+                            template = get_task_templates().get(task_type)
+                            task_request = TaskRequest(
+                                objective=unread_text,
+                                trigger_message=unread_msgs[-1] if unread_msgs else None,
+                                result_schema=template.result_schema,
+                                validation_steps=template.validation_steps,
                             )
+                        else:
+                            task_request = None
+                        committed = await mailbox.commit_claim(claim)
+                        if not committed:
+                            logger.error(
+                                f"[{self.stream_id[:8]}] 任务 claim 提交失败 "
+                                f"event=task_claim_commit_failed generation={generation}"
+                            )
+                            raise RuntimeError("任务 claim 提交失败")
                         claim = None
-                        logger.warning(
-                            f"[{self.stream_id[:8]}] 回合已释放 event=turn_released "
+                        if task_request is not None:
+                            start_task(self, task_runtime, task_request, task_store)
+                            logger.info(
+                                f"[{self.stream_id[:8]}] 任务已转入后台 event=task_background_started "
+                                f"task_id={task_runtime.state.task_id}"
+                            )
+                        logger.info(
+                            f"[{self.stream_id[:8]}] 任务消息已确认 event=task_turn_committed "
                             f"generation={generation} messages={len(unread_msgs)} "
-                            f"visible={state.spoke} reason_code=input_interrupt "
-                            f"reason={state.error} pending={pending_after_release} "
-                            f"consecutive_interruptions={interruption_streak}"
+                            f"task_id={task_runtime.state.task_id}"
                         )
                         turn_result = Wait(time=5.0)
                     else:
@@ -863,7 +992,6 @@ class _AgenticChatterBase(BaseChatter):
 
         max_iterations = 6 if config is None else max(1, int(config.pipeline.max_iterations))
         response: Any = request
-
         while should_continue_loop(state, max_iterations):
             state.iterations += 1
 

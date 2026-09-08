@@ -798,6 +798,90 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
 
+    @config_section("tasks", title="复杂任务", tag="ai")
+    class TaskSection(SectionBase):
+        """复杂任务运行时的默认边界。"""
+
+        enabled: bool = Field(
+            default=True,
+            description="是否允许复杂请求进入独立任务运行时；关闭后继续使用普通聊天回合",
+            label="启用复杂任务",
+            tag="ai",
+        )
+        action_enabled: bool = Field(
+            default=True,
+            description="是否允许主对话通过 action-dispatch_task 工具把复杂任务交给 sub-agent 同步执行",
+            label="允许呼出任务子代理",
+            tag="ai",
+        )
+        max_iterations: int = Field(
+            default=12,
+            description="单个复杂任务的最大执行迭代次数，不影响普通聊天回合",
+            label="任务最大迭代",
+            ge=1,
+            tag="performance",
+        )
+        max_tool_calls: int = Field(
+            default=24,
+            description="单个复杂任务的最大工具调用次数",
+            label="任务最大工具调用",
+            ge=1,
+            tag="performance",
+        )
+        max_same_signature_calls: int = Field(
+            default=2,
+            description="同一任务步骤中相同工具调用签名的最大次数",
+            label="相同调用上限",
+            ge=1,
+            tag="performance",
+        )
+        max_no_progress_steps: int = Field(
+            default=3,
+            description="连续没有新信息或有效状态变化时暂停任务",
+            label="无进展步骤上限",
+            ge=1,
+            tag="performance",
+        )
+        max_failures: int = Field(
+            default=3,
+            description="单个复杂任务允许的失败次数",
+            label="任务失败上限",
+            ge=1,
+            tag="performance",
+        )
+        timeout_seconds: float = Field(
+            default=300.0,
+            description="单个复杂任务的最大执行时间（秒）",
+            label="任务超时（秒）",
+            ge=1.0,
+            tag="performance",
+        )
+        max_result_size: int = Field(
+            default=6000,
+            description="任务结构化结果中摘要和错误文本的最大字符数",
+            label="任务结果字数上限",
+            ge=100,
+            tag="performance",
+        )
+        default_allowed_tools: list[str] = Field(
+            default_factory=list,
+            description="任务工具白名单；为空时使用任务类型模板的默认白名单",
+            label="默认任务工具白名单",
+            tag="ai",
+        )
+        denied_tools: list[str] = Field(
+            default_factory=lambda: ["delete*", "commit*", "push*", "publish*"],
+            description="所有任务都禁止的工具签名；优先级高于任务白名单",
+            label="任务全局禁用工具",
+            tag="security",
+        )
+        checkpoint_directory: str = Field(
+            default="data/agentic_chatter/tasks",
+            description="任务检查点目录；留空表示不启用磁盘检查点",
+            label="任务检查点目录",
+            tag="storage",
+        )
+
     @config_section("persona", title="人设补充", tag="text")
     class PersonaSection(SectionBase):
         """人设与场景引导。"""
@@ -877,5 +961,6 @@ class AgenticChatterConfig(BaseConfig):
     decision: DecisionSection = Field(default_factory=DecisionSection)
     tools: ToolsSection = Field(default_factory=ToolsSection)
     humanize: HumanizeSection = Field(default_factory=HumanizeSection)
+    tasks: TaskSection = Field(default_factory=TaskSection)
     global_mind: GlobalMindSection = Field(default_factory=GlobalMindSection)
     persona: PersonaSection = Field(default_factory=PersonaSection)
