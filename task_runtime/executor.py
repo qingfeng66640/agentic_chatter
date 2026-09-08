@@ -18,6 +18,13 @@ from .persistence import TaskStateStore
 from .policy import ToolPermission
 from .runtime import TaskRuntime
 
+# 可恢复执行的任务状态；与 coordinator.RESUMABLE_TASK_STATUSES 保持同一语义
+RESUMABLE_TASK_STATUSES = (
+    TaskStatus.PAUSED,
+    TaskStatus.WAITING_USER,
+    TaskStatus.FAILED,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class TaskRequest:
@@ -72,9 +79,7 @@ class TaskExecutor:
                 self.runtime.pause()
                 should_continue = False
             elif command.kind == "resume" and self.runtime.state.status in (
-                TaskStatus.PAUSED,
-                TaskStatus.WAITING_USER,
-                TaskStatus.FAILED,
+                RESUMABLE_TASK_STATUSES
             ):
                 self.runtime.resume()
             elif command.kind == "cancel":
@@ -261,6 +266,60 @@ class TaskExecutor:
             self.runtime.start()
         if request.subtasks:
             return await self._run_collaboration(request)
+        response: Any = self._build_initial_request(request)
+        registry = await self._inject_visible_tools(response)
+        executed_tools: list[str] = []
+
+        try:
+            while self.runtime.is_active():
+                if not await self._consume_commands():
+                    return self.runtime.state.result or TaskResult(
+                        self.runtime.state.status,
+                        "任务已停止",
+                    )
+                self._append_pending_input(response)
+                budget_result = self.runtime.check_budget()
+                if budget_result is not None:
+                    return budget_result
+                response = await response.send(stream=True)
+                await response
+                calls = list(getattr(response, "call_list", None) or [])
+                normal_calls, denied_calls, confirmation_calls = self._classify_calls(calls)
+                if confirmation_calls:
+                    names = "、".join(confirmation_calls)
+                    return self.runtime.set_waiting_user(f"工具 {names} 需要用户确认")
+                if denied_calls:
+                    names = "、".join(denied_calls)
+                    return self.runtime.fail(
+                        f"任务请求了未授权工具：{names}",
+                        "工具权限策略拒绝执行",
+                    )
+                if normal_calls:
+                    budget_result = await self._run_tool_round(
+                        request, normal_calls, response, registry, executed_tools
+                    )
+                else:
+                    return await self._finalize_result(request, executed_tools, response)
+                if budget_result is not None:
+                    return budget_result
+            return self.runtime.state.result or TaskResult(
+                self.runtime.state.status,
+                "任务已停止",
+            )
+        except asyncio.CancelledError:
+            if self.runtime.state.status not in (
+                *RESUMABLE_TASK_STATUSES,
+                TaskStatus.CANCELLED,
+            ):
+                self.runtime.cancel()
+            raise
+        except ValueError as exc:
+            return self.runtime.fail("任务验证失败", str(exc))
+        except Exception as exc:
+            return self.runtime.fail("任务执行失败", str(exc))
+
+    def _build_initial_request(self, request: TaskRequest) -> Any:
+        """构建首轮 LLM 请求：系统提示、初始上下文与任务目标。"""
         system = (
             "你是一个受限任务执行器，只处理任务目标，不进行闲聊。"
             "每次工具调用必须推进任务，完成后用简洁文本总结。\n"
@@ -274,119 +333,104 @@ class TaskExecutor:
         for payload in request.initial_context:
             llm_request.add_payload(payload)
         llm_request.add_payload(LLMPayload(ROLE.USER, Text(request.objective)))
-        registry = await self._inject_visible_tools(llm_request)
-        response: Any = llm_request
-        executed_tools: list[str] = []
+        return llm_request
 
-        try:
-            while self.runtime.is_active():
-                if not await self._consume_commands():
-                    return self.runtime.state.result or TaskResult(
-                        self.runtime.state.status,
-                        "任务已停止",
-                    )
-                pending_input = str(
-                    self.runtime.state.metadata.pop("pending_input", "") or ""
-                ).strip()
-                if pending_input:
-                    response.add_payload(LLMPayload(ROLE.USER, Text(pending_input)))
-                budget_result = self.runtime.check_budget()
-                if budget_result is not None:
-                    return budget_result
-                response = await response.send(stream=True)
-                await response
-                calls = list(getattr(response, "call_list", None) or [])
-                normal_calls = []
-                denied_calls: list[str] = []
-                confirmation_calls: list[str] = []
-                for call in calls:
-                    name = str(getattr(call, "name", "") or "")
-                    if name in (END_TURN_CALL, STOP_CALL):
-                        continue
-                    signature = build_call_key(name, getattr(call, "args", {}))
-                    permission = self.runtime.classify_tool(name, signature)
-                    if permission == ToolPermission.ALLOW:
-                        normal_calls.append(call)
-                    elif permission == ToolPermission.CONFIRM:
-                        confirmation_calls.append(name)
-                    else:
-                        denied_calls.append(name)
-                if confirmation_calls:
-                    names = "、".join(confirmation_calls)
-                    return self.runtime.set_waiting_user(f"工具 {names} 需要用户确认")
-                if denied_calls:
-                    names = "、".join(denied_calls)
-                    return self.runtime.fail(
-                        f"任务请求了未授权工具：{names}",
-                        "工具权限策略拒绝执行",
-                    )
-                if normal_calls:
-                    outcomes = await self.chatter.run_tool_call(
-                        normal_calls,
-                        response,
-                        registry,
-                        request.trigger_message,
-                    )
-                    successful_tools = [
-                        str(getattr(call, "name", "") or "")
-                        for call, outcome in zip(normal_calls, outcomes, strict=False)
-                        if outcome and bool(outcome[1])
-                    ]
-                    executed_tools.extend(successful_tools)
-                    failures = len(normal_calls) - len(successful_tools)
-                    for _ in range(failures):
-                        budget_result = self.runtime.add_failure()
-                        if budget_result is not None:
-                            return budget_result
-                    self._save_checkpoint(f"已执行 {len(normal_calls)} 个工具调用")
-                    budget_result = self.runtime.record_iteration(
-                        failures < len(normal_calls)
-                    )
-                else:
-                    raw_message = str(getattr(response, "message", "") or "")
-                    if not self._validate_result(raw_message, request.result_schema):
-                        return self.runtime.fail(
-                            "任务结果校验失败",
-                            "模型返回结果不符合要求",
-                        )
-                    validation = await self._run_validations(
-                        request.validation_steps,
-                        tuple(executed_tools),
-                    )
-                    if request.deliver_final_text:
-                        final_text = await self._send_final_text(raw_message)
-                        if not final_text:
-                            return self.runtime.fail(
-                                "任务结果发送失败",
-                                "最终结果为空或发送失败",
-                            )
-                    else:
-                        final_text = raw_message.strip()
-                        if not final_text:
-                            return self.runtime.fail(
-                                "任务结果为空",
-                                "模型没有返回可用的结果文本",
-                            )
-                    self.runtime.record_iteration(True)
-                    return self.runtime.complete(final_text, validation=validation)
-                if budget_result is not None:
-                    return budget_result
-            return self.runtime.state.result or TaskResult(
-                self.runtime.state.status,
-                "任务已停止",
+    def _append_pending_input(self, response: Any) -> None:
+        """把用户补充输入注入下一轮请求。"""
+        pending_input = str(
+            self.runtime.state.metadata.pop("pending_input", "") or ""
+        ).strip()
+        if pending_input:
+            response.add_payload(LLMPayload(ROLE.USER, Text(pending_input)))
+
+    def _classify_calls(
+        self,
+        calls: list[Any],
+    ) -> tuple[list[Any], list[str], list[str]]:
+        """按工具权限策略把调用分为放行/拒绝/待确认三组。"""
+        normal_calls: list[Any] = []
+        denied_calls: list[str] = []
+        confirmation_calls: list[str] = []
+        for call in calls:
+            name = str(getattr(call, "name", "") or "")
+            if name in (END_TURN_CALL, STOP_CALL):
+                continue
+            signature = build_call_key(name, getattr(call, "args", {}))
+            permission = self.runtime.classify_tool(name, signature)
+            if permission == ToolPermission.ALLOW:
+                normal_calls.append(call)
+            elif permission == ToolPermission.CONFIRM:
+                confirmation_calls.append(name)
+            else:
+                denied_calls.append(name)
+        return normal_calls, denied_calls, confirmation_calls
+
+    async def _run_tool_round(
+        self,
+        request: TaskRequest,
+        normal_calls: list[Any],
+        response: Any,
+        registry: Any,
+        executed_tools: list[str],
+    ) -> TaskResult | None:
+        """执行一轮放行的工具调用并记录预算消耗。
+
+        Returns:
+            TaskResult | None: 预算耗尽时返回终态结果，否则 None 继续循环。
+        """
+        outcomes = await self.chatter.run_tool_call(
+            normal_calls,
+            response,
+            registry,
+            request.trigger_message,
+        )
+        successful_tools = [
+            str(getattr(call, "name", "") or "")
+            for call, outcome in zip(normal_calls, outcomes, strict=False)
+            if outcome and bool(outcome[1])
+        ]
+        executed_tools.extend(successful_tools)
+        failures = len(normal_calls) - len(successful_tools)
+        for _ in range(failures):
+            budget_result = self.runtime.add_failure()
+            if budget_result is not None:
+                return budget_result
+        self._save_checkpoint(f"已执行 {len(normal_calls)} 个工具调用")
+        return self.runtime.record_iteration(failures < len(normal_calls))
+
+    async def _finalize_result(
+        self,
+        request: TaskRequest,
+        executed_tools: list[str],
+        response: Any,
+    ) -> TaskResult:
+        """校验并交付模型给出的最终文本。"""
+        raw_message = str(getattr(response, "message", "") or "")
+        if not self._validate_result(raw_message, request.result_schema):
+            return self.runtime.fail(
+                "任务结果校验失败",
+                "模型返回结果不符合要求",
             )
-        except asyncio.CancelledError:
-            if self.runtime.state.status not in (
-                TaskStatus.PAUSED,
-                TaskStatus.WAITING_USER,
-                TaskStatus.CANCELLED,
-            ):
-                self.runtime.cancel()
-            raise
-        except ValueError as exc:
-            return self.runtime.fail("任务验证失败", str(exc))
-        except Exception as exc:
-            return self.runtime.fail("任务执行失败", str(exc))
+        validation = await self._run_validations(
+            request.validation_steps,
+            tuple(executed_tools),
+        )
+        if request.deliver_final_text:
+            final_text = await self._send_final_text(raw_message)
+            if not final_text:
+                return self.runtime.fail(
+                    "任务结果发送失败",
+                    "最终结果为空或发送失败",
+                )
+        else:
+            final_text = raw_message.strip()
+            if not final_text:
+                return self.runtime.fail(
+                    "任务结果为空",
+                    "模型没有返回可用的结果文本",
+                )
+        self.runtime.record_iteration(True)
+        return self.runtime.complete(final_text, validation=validation)
 
     @classmethod
     def restore(

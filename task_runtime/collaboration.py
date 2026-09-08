@@ -75,6 +75,27 @@ class TaskExecutorFactory:
             )
         )
 
+    @staticmethod
+    def _reserve_key(kind: str) -> str:
+        """按预算维度生成预留量元数据键。"""
+        return f"subtasks_{kind}_reserved"
+
+    def _release_reserve(self, child: TaskRuntime) -> None:
+        """归还子任务预留的预算份额，并把实际消耗计入父任务。"""
+        parent = self.parent.state
+        for kind, consumed in (
+            ("iterations", child.state.iterations),
+            ("tool_calls", child.state.tool_calls),
+            ("failures", child.state.failures),
+        ):
+            reserved_key = self._reserve_key(kind)
+            parent.metadata[reserved_key] = max(
+                0,
+                int(parent.metadata.get(reserved_key, 0)) - consumed,
+            )
+            setattr(parent, kind, getattr(parent, kind) + consumed)
+        parent.touch()
+
     async def execute(
         self,
         spec: SubtaskSpec,
@@ -96,7 +117,6 @@ class TaskExecutorFactory:
                 "达到父任务子任务预算",
                 error="子任务预算耗尽",
             )
-        parent = self.parent.state
         try:
             result = await TaskExecutor(self.chatter, child).run(
                 TaskRequest(
@@ -106,25 +126,7 @@ class TaskExecutorFactory:
                 )
             )
         finally:
-            parent.metadata["subtasks_iterations_reserved"] = max(
-                0,
-                int(parent.metadata.get("subtasks_iterations_reserved", 0))
-                - child.state.budget.max_iterations,
-            )
-            parent.metadata["subtasks_tool_calls_reserved"] = max(
-                0,
-                int(parent.metadata.get("subtasks_tool_calls_reserved", 0))
-                - child.state.budget.max_tool_calls,
-            )
-            parent.metadata["subtasks_failures_reserved"] = max(
-                0,
-                int(parent.metadata.get("subtasks_failures_reserved", 0))
-                - child.state.budget.max_failures,
-            )
-            parent.iterations += child.state.iterations
-            parent.tool_calls += child.state.tool_calls
-            parent.failures += child.state.failures
-            parent.touch()
+            self._release_reserve(child)
         return result
 
 
@@ -172,6 +174,7 @@ class TaskCollaboration:
                             dependency_context=dependency_context,
                         )
                     except TypeError as error:
+                        # 兼容不接受 dependency_context 的外部注入回调
                         if "dependency_context" not in str(error):
                             raise
                         result = await execute(spec)

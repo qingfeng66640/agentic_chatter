@@ -14,6 +14,13 @@ from .models import TaskStatus
 from .persistence import TaskStateStore
 from .runtime import TaskRuntime
 
+# 可恢复执行的任务状态：这些状态的任务可由 resume/start_task 继续推进
+RESUMABLE_TASK_STATUSES = (
+    TaskStatus.PAUSED,
+    TaskStatus.WAITING_USER,
+    TaskStatus.FAILED,
+)
+
 
 @dataclass(slots=True)
 class ActiveTask:
@@ -75,7 +82,12 @@ def start_task(
     if existing is not None and not existing.task.done():
         return existing.task
 
-    executor = TaskExecutor(chatter, runtime, store)
+    # 已登记（register_task）的任务复用其 executor，避免双实例分叉
+    executor = (
+        existing.executor
+        if existing is not None
+        else TaskExecutor(chatter, runtime, store)
+    )
 
     async def runner() -> None:
         runtime.state.metadata["validation_steps"] = tuple(request.validation_steps)
@@ -88,11 +100,7 @@ def start_task(
                 store.save(runtime)
             current = _ACTIVE.get(runtime.state.task_id)
             if current is not None and current.executor is executor:
-                if runtime.state.status not in (
-                    TaskStatus.PAUSED,
-                    TaskStatus.WAITING_USER,
-                    TaskStatus.FAILED,
-                ):
+                if runtime.state.status not in RESUMABLE_TASK_STATUSES:
                     _ACTIVE.pop(runtime.state.task_id, None)
 
     task_info = get_task_manager().create_task(
@@ -110,6 +118,17 @@ def start_task(
         store,
     )
     return task_info.task
+
+
+def _resume_and_restart(active: ActiveTask) -> None:
+    """恢复可恢复任务并重新拉起后台执行。"""
+    active.executor.runtime.resume()
+    start_task(
+        active.chatter,
+        active.executor.runtime,
+        active.request,
+        active.store,
+    )
 
 
 async def route_message(task_id: str, text: str) -> bool:
@@ -138,32 +157,14 @@ async def route_message(task_id: str, text: str) -> bool:
             get_task_manager().cancel_task(active.task_info_id)
         return True
     if active.task.done() and message.kind == TaskMessageKind.INPUT:
-        if active.executor.runtime.state.status in (
-            TaskStatus.PAUSED,
-            TaskStatus.WAITING_USER,
-            TaskStatus.FAILED,
-        ):
-            active.executor.runtime.resume()
-            start_task(
-                active.chatter,
-                active.executor.runtime,
-                active.request,
-                active.store,
-            )
+        if active.executor.runtime.state.status in RESUMABLE_TASK_STATUSES:
+            _resume_and_restart(active)
             active = _ACTIVE[task_id]
     elif active.task.done() and message.kind == TaskMessageKind.CONTROL:
         if message.text == "resume" and active.executor.runtime.state.status in (
-            TaskStatus.PAUSED,
-            TaskStatus.WAITING_USER,
-            TaskStatus.FAILED,
+            RESUMABLE_TASK_STATUSES
         ):
-            active.executor.runtime.resume()
-            start_task(
-                active.chatter,
-                active.executor.runtime,
-                active.request,
-                active.store,
-            )
+            _resume_and_restart(active)
             active = _ACTIVE[task_id]
         elif message.text != "resume":
             return True

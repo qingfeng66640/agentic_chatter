@@ -19,7 +19,6 @@ from src.core.components.base.action import BaseAction
 from ..chatter import AgenticChatter, _build_task_budget
 from ..task_runtime import (
     TaskBudget,
-    TaskExecutor,
     TaskRequest,
     TaskResult,
     TaskStateStore,
@@ -28,7 +27,7 @@ from ..task_runtime import (
     get_task_runtime_manager,
     get_task_templates,
 )
-from ..task_runtime.coordinator import register_task
+from ..task_runtime.coordinator import get_active_task, register_task
 
 # 任务类型名到枚举的映射，供 LLM 参数解析使用
 _TASK_TYPE_NAMES: dict[str, TaskType] = {
@@ -174,8 +173,11 @@ class DispatchTaskAction(BaseAction):
             return False, f"任务启动失败: {exc}"
 
         try:
+            active = get_active_task(runtime.state.task_id)
+            if active is None:
+                return False, "任务登记丢失，无法执行"
             result = await asyncio.wait_for(
-                TaskExecutor(chatter, runtime, store).run(request),
+                active.executor.run(request),
                 timeout=max(1.0, float(budget.timeout_seconds) + _TIMEOUT_GRACE_SECONDS),
             )
         except asyncio.TimeoutError:

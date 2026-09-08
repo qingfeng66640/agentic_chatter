@@ -9,6 +9,7 @@ import pytest
 
 from ..actions import dispatch as dispatch_module
 from ..actions.dispatch import DispatchTaskAction, _resolve_task_type
+from ..task_runtime import coordinator as coordinator_module
 from ..task_runtime import (
     TaskResult,
     TaskRuntime,
@@ -82,11 +83,7 @@ async def test_execute_returns_success_with_summary(monkeypatch) -> None:
             captured["request"] = request
             return TaskResult(TaskStatus.SUCCEEDED, "调研完成：共 3 条结论")
 
-    def _fake_register(*args: object) -> None:
-        return None
-
-    monkeypatch.setattr(dispatch_module, "TaskExecutor", _FakeExecutor)
-    monkeypatch.setattr(dispatch_module, "register_task", _fake_register)
+    monkeypatch.setattr(coordinator_module, "TaskExecutor", _FakeExecutor)
     monkeypatch.setattr(
         dispatch_module,
         "AgenticChatter",
@@ -119,7 +116,7 @@ async def test_execute_reports_timeout(monkeypatch) -> None:
         async def run(self, request: object) -> TaskResult:
             await asyncio.sleep(999)
 
-    monkeypatch.setattr(dispatch_module, "TaskExecutor", _HangingExecutor)
+    monkeypatch.setattr(coordinator_module, "TaskExecutor", _HangingExecutor)
     monkeypatch.setattr(
         dispatch_module,
         "AgenticChatter",
@@ -150,7 +147,7 @@ async def test_execute_returns_paused_result_with_active_runtime(monkeypatch) ->
         async def run(self, request: object) -> TaskResult:
             return self.runtime.pause()
 
-    monkeypatch.setattr(dispatch_module, "TaskExecutor", _PausedExecutor)
+    monkeypatch.setattr(coordinator_module, "TaskExecutor", _PausedExecutor)
     monkeypatch.setattr(
         dispatch_module,
         "AgenticChatter",
