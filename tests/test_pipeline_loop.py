@@ -98,9 +98,9 @@ async def test_deliver_message_logs_structured_and_removed_thoughts(monkeypatch)
     assert sent == ["最终回复"]
     logs = [str(call.args[0]) for call in info.call_args_list]
     assert len(logs) == 2
-    assert any("source=reasoning_content" in line and "结构化 推理" in line for line in logs)
+    assert any("来源=reasoning_content" in line and "结构化 推理" in line for line in logs)
     assert any(
-        "source=removed_message_block" in line and "正文里的思考" in line
+        "来源=removed_message_block" in line and "正文里的思考" in line
         for line in logs
     )
     assert all("\n" not in line and len(line) <= 300 for line in logs)
@@ -153,8 +153,8 @@ async def test_deliver_message_intercepts_provider_error_text(monkeypatch) -> No
     warning.assert_called_once()
     log_line = str(warning.call_args.args[0])
     assert "event=provider_error_text_intercepted" in log_line
-    assert "rule=google_prompt_policy_block" in log_line
-    assert f"chars={len(visible_text)}" in log_line
+    assert "规则=google_prompt_policy_block" in log_line
+    assert f"字符数={len(visible_text)}" in log_line
     assert visible_text not in log_line
     assert not state.spoke
     assert not state.sent_texts
@@ -297,8 +297,8 @@ async def test_deliver_message_intercepts_reply_decision_json(monkeypatch) -> No
     warning.assert_called_once()
     log_line = str(warning.call_args.args[0])
     assert "event=reply_decision_json_intercepted" in log_line
-    assert "action=silent" in log_line
-    assert f"chars={len(text)}" in log_line
+    assert "动作=silent" in log_line
+    assert f"字符数={len(text)}" in log_line
     assert text not in log_line
     assert not state.spoke
     assert not state.sent_texts
@@ -346,7 +346,7 @@ async def test_deliver_message_intercepts_complete_framework_message_line(monkey
     warning.assert_called_once()
     log_line = str(warning.call_args.args[0])
     assert "framework_message_line_intercepted" in log_line
-    assert f"chars={len(text)}" in log_line
+    assert f"字符数={len(text)}" in log_line
     assert text not in log_line
     assert not state.spoke
     assert state.visible_text_emissions == 0
@@ -996,7 +996,7 @@ async def test_execute_calls_logs_tool_name_and_safe_args(monkeypatch) -> None:
     tool_logs = [line for line in logs if "event=tool_call" in line]
     assert len(tool_logs) == 1
     assert "调用工具" in tool_logs[0]
-    assert "name=tool-search" in tool_logs[0]
+    assert "工具=tool-search" in tool_logs[0]
     assert '"query":"天气"' in tool_logs[0]
     assert "secret-value" not in tool_logs[0]
     assert "[REDACTED]" in tool_logs[0]
