@@ -71,7 +71,7 @@ from .humanize.segmenter import (
     detect_reply_decision_json_text,
     is_framework_message_line,
 )
-from .pipeline.mailbox import TurnClaim, get_stream_mailbox, message_key
+from .pipeline.mailbox import StreamMailbox, TurnClaim, get_stream_mailbox, message_key
 from .pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -96,7 +96,6 @@ from .pipeline.stages import (
 )
 from .pipeline.state import (
     ToolExecutionRecord,
-    TurnOutcome,
     TurnState,
 )
 
@@ -121,6 +120,8 @@ from .tooling.registry import (
 from .task_runtime import (
     TaskBudget,
     TaskRequest,
+    TaskRuntime,
+    TaskRuntimeManager,
     TaskStateStore,
     TaskStatus,
     TaskType,
@@ -143,6 +144,9 @@ _TASK_KEYWORDS = {
     TaskType.CONTENT_EDIT: ("修改内容", "编辑内容", "润色内容"),
 }
 
+# 消息以这些前缀开头时直接视为通用任务指令
+TASK_PREFIX_MARKERS = ("任务:", "任务：")
+
 
 def _task_request_for_runtime(runtime: Any) -> TaskRequest:
     """根据持久化任务状态重建原任务请求。"""
@@ -159,12 +163,20 @@ def _task_request_for_runtime(runtime: Any) -> TaskRequest:
 def _detect_task_type(text: str) -> TaskType | None:
     """识别需要独立任务预算的复杂请求。"""
     stripped = text.strip()
-    if stripped.startswith("任务:") or stripped.startswith("任务："):
+    if any(stripped.startswith(prefix) for prefix in TASK_PREFIX_MARKERS):
         return TaskType.GENERAL
     for task_type, keywords in _TASK_KEYWORDS.items():
         if any(keyword in text for keyword in keywords):
             return task_type
     return None
+
+
+def _build_task_store(config: AgenticChatterConfig | None) -> TaskStateStore | None:
+    """按配置构建任务持久化 store；未配置目录时返回 None。"""
+    checkpoint_dir = str(
+        getattr(getattr(config, "tasks", None), "checkpoint_directory", "") or ""
+    ).strip()
+    return TaskStateStore(checkpoint_dir) if checkpoint_dir else None
 
 
 def _build_task_budget(config: AgenticChatterConfig) -> TaskBudget:
@@ -184,6 +196,39 @@ def _build_task_budget(config: AgenticChatterConfig) -> TaskBudget:
 def _is_task_enabled(config: AgenticChatterConfig | None) -> bool:
     """判断复杂任务运行时是否开启。"""
     return config is not None and bool(getattr(getattr(config, "tasks", None), "enabled", False))
+
+
+def _restore_persisted_tasks(
+    *,
+    stream_id: str,
+    chatter: "AgenticChatter",
+    config: AgenticChatterConfig | None,
+) -> TaskRuntimeManager:
+    """从持久化恢复本流的活动任务，并返回任务管理器。"""
+    manager = get_task_runtime_manager()
+    task_store = _build_task_store(config)
+    manager.configure_store(task_store)
+    if task_store is None:
+        return manager
+    for restored in task_store.load_active():
+        if manager.get(restored.state.task_id) is None:
+            manager.register(restored)
+        if restored.state.stream_id != stream_id:
+            continue
+        request = _task_request_for_runtime(restored)
+        if restored.state.status in (
+            TaskStatus.CREATED,
+            TaskStatus.PLANNING,
+            TaskStatus.RUNNING,
+        ):
+            start_task(chatter, restored, request, task_store)
+        elif restored.state.status in (
+            TaskStatus.PAUSED,
+            TaskStatus.WAITING_USER,
+            TaskStatus.FAILED,
+        ):
+            register_task(chatter, restored, request, task_store)
+    return manager
 
 if TYPE_CHECKING:
     from src.core.components.types import ChatterResult
@@ -357,12 +402,9 @@ class _AgenticChatterBase(BaseChatter):
                         f"未读数={pending_count} 等待秒数={wait_seconds:.3f} "
                         f"窗口秒数={merge_window:.3f}"
                     )
-                    released = await mailbox.release_owner(owner, generation)
-                    if not released:
-                        logger.error(
-                            f"[{self.stream_id[:8]}] 合并窗口等待时 owner 释放失败 "
-                            f"event=owner_release_failed 代次={generation}"
-                        )
+                    await self._release_owner_safely(
+                        mailbox, owner, generation, "合并窗口等待时"
+                    )
                     owner_active = False
                     yield Wait(time=wait_seconds)
                     continue
@@ -383,214 +425,285 @@ class _AgenticChatterBase(BaseChatter):
                         unread_texts=unread_text,
                         deduper=self._build_deduper(config),
                     )
-                    checkpoint_dir = str(
-                        getattr(getattr(config, "tasks", None), "checkpoint_directory", "") or ""
-                    ).strip()
-                    task_store = TaskStateStore(checkpoint_dir) if checkpoint_dir else None
-                    manager = get_task_runtime_manager()
-                    manager.configure_store(task_store)
-                    if task_store is not None:
-                        for restored in task_store.load_active():
-                            if manager.get(restored.state.task_id) is None:
-                                manager.register(restored)
-                            if restored.state.stream_id == self.stream_id:
-                                request = _task_request_for_runtime(restored)
-                                if restored.state.status in (
-                                    TaskStatus.CREATED,
-                                    TaskStatus.PLANNING,
-                                    TaskStatus.RUNNING,
-                                ):
-                                    start_task(self, restored, request, task_store)
-                                elif restored.state.status in (
-                                    TaskStatus.PAUSED,
-                                    TaskStatus.WAITING_USER,
-                                    TaskStatus.FAILED,
-                                ):
-                                    register_task(self, restored, request, task_store)
+                    manager = _restore_persisted_tasks(
+                        stream_id=self.stream_id,
+                        chatter=self,
+                        config=config,
+                    )
 
                     active_runtime = manager.get_active(self.stream_id)
-                    if active_runtime is not None:
-                        routed = False
-                        for message in unread_msgs:
-                            routed = await route_message(
-                                active_runtime.state.task_id,
-                                str(getattr(message, "content", "") or unread_text),
-                            ) or routed
-                        if routed:
-                            state.input_confirmed = True
-                            state.spoke = False
-                            outcome_result = TurnOutcome(spoke=False)
-                            task_runtime = active_runtime
-                        else:
-                            task_runtime = None
-                    else:
-                        task_runtime = None
-                    task_type = _detect_task_type(unread_text) if task_runtime is None else None
-                    if task_type is not None and _is_task_enabled(config):
-                        task_runtime = get_task_runtime_manager().create(
-                            self.stream_id,
-                            unread_text,
-                            task_type=task_type,
-                            parent_turn_id=f"{self.stream_id}:{generation}",
-                            allowed_tools=tuple(getattr(config.tasks, "default_allowed_tools", ()) or ()) or None,
-                            budget=_build_task_budget(config),
-                            denied_tools=tuple(getattr(config.tasks, "denied_tools", ()) or ()),
-                        )
-                        task_runtime.start()
-                        logger.info(
-                            f"[{self.stream_id[:8]}] 已创建复杂任务 event=task_created "
-                            f"任务ID={task_runtime.state.task_id} 任务类型={task_type.value}"
-                        )
+                    task_runtime: TaskRuntime | None = None
+                    task_type: TaskType | None = None
+                    if active_runtime is not None and await self._route_task_message(
+                        active_runtime, unread_msgs, unread_text
+                    ):
+                        state.input_confirmed = True
+                        task_runtime = active_runtime
+                    if task_runtime is None:
+                        task_type = _detect_task_type(unread_text)
+                        if task_type is not None and _is_task_enabled(config):
+                            task_runtime = self._create_task_runtime(
+                                config, unread_text, task_type, generation
+                            )
 
                     if task_runtime is not None:
-                        if task_type is not None:
-                            checkpoint_dir = str(
-                                getattr(config.tasks, "checkpoint_directory", "") or ""
-                            ).strip()
-                            task_store = TaskStateStore(checkpoint_dir) if checkpoint_dir else None
-                            template = get_task_templates().get(task_type)
-                            task_request = TaskRequest(
-                                objective=unread_text,
-                                trigger_message=unread_msgs[-1] if unread_msgs else None,
-                                result_schema=template.result_schema,
-                                validation_steps=template.validation_steps,
-                            )
-                        else:
-                            task_request = None
-                        committed = await mailbox.commit_claim(claim)
-                        if not committed:
-                            logger.error(
-                                f"[{self.stream_id[:8]}] 任务 claim 提交失败 "
-                                f"event=task_claim_commit_failed 代次={generation}"
-                            )
-                            raise RuntimeError("任务 claim 提交失败")
+                        turn_result = await self._commit_task_turn(
+                            config,
+                            mailbox,
+                            claim,
+                            task_runtime,
+                            unread_msgs,
+                            unread_text,
+                            task_type,
+                            generation,
+                        )
                         claim = None
-                        if task_request is not None:
-                            start_task(self, task_runtime, task_request, task_store)
-                            logger.info(
-                                f"[{self.stream_id[:8]}] 任务已转入后台 event=task_background_started "
-                                f"任务ID={task_runtime.state.task_id}"
-                            )
-                        logger.info(
-                            f"[{self.stream_id[:8]}] 任务消息已确认 event=task_turn_committed "
-                            f"代次={generation} 消息数={len(unread_msgs)} "
-                            f"任务ID={task_runtime.state.task_id}"
-                        )
-                        turn_result = Wait(time=5.0)
                     else:
-                        outcome_result = await self._run_pipeline(
-                            config=config,
-                            chat_stream=chat_stream,
-                            state=state,
-                            unread_msgs=unread_msgs,
-                            claim=claim,
+                        turn_result, claim = await self._run_normal_turn(
+                            config,
+                            mailbox,
+                            claim,
+                            chat_stream,
+                            state,
+                            unread_msgs,
+                            generation,
                         )
-
-                        if state.failed:
-                            interruption_streak = await mailbox.interruption_state()
-                            pending_after_release = await mailbox.pending_count()
-                            released = await mailbox.release_claim(claim)
-                            if not released:
-                                logger.error(
-                                    f"[{self.stream_id[:8]}] 回合 claim 释放失败 "
-                                    f"event=claim_release_failed 代次={generation}"
-                                )
-                            claim = None
-                            logger.warning(
-                                f"[{self.stream_id[:8]}] 回合已释放 event=turn_released "
-                                f"代次={generation} 消息数={len(unread_msgs)} "
-                                f"已发言={state.spoke} 原因=输入中断 "
-                                f"说明={state.error} 剩余未读={pending_after_release} "
-                                f"连续中断次数={interruption_streak}"
-                            )
-                            turn_result = Wait(time=5.0)
-                        else:
-                            if config is not None and config.decision.enabled:
-                                get_participation_store().record(
-                                    self.stream_id,
-                                    responded=state.spoke,
-                                    topic=state.perceived_topic,
-                                    ttl_seconds=max(
-                                        60.0,
-                                        float(config.decision.state_ttl_minutes) * 60.0,
-                                    ),
-                                    max_streams=max(
-                                        1,
-                                        int(config.decision.max_state_streams),
-                                    ),
-                                )
-
-                            match = await self._match_claim_unreads(unread_msgs)
-                            if match is None:
-                                raise RuntimeError(
-                                    "消息确认不完整："
-                                    f"expected={len(unread_msgs)} actual=0"
-                                )
-                            committed = await mailbox.commit_claim(
-                                claim,
-                                apply=lambda: self._apply_claim_unread_match(match),
-                            )
-                            if not committed:
-                                self._restore_claim_unread_match(match)
-                                logger.error(
-                                    f"[{self.stream_id[:8]}] mailbox claim 提交失败 "
-                                    f"event=claim_commit_failed generation={generation} "
-                                    f"messages={len(unread_msgs)}"
-                                )
-                                raise RuntimeError("mailbox claim 提交失败")
-                            claim = None
-                            state.input_confirmed = True
-                            logger.info(
-                                f"[{self.stream_id[:8]}] 回合已确认 event=turn_committed "
-                                f"代次={generation} 消息数={len(unread_msgs)} "
-                                f"未读匹配={len(match.matched)} "
-                                f"已在历史={len(match.history_matched)} "
-                                f"已发言={state.spoke} "
-                                "连续中断已重置=true"
-                            )
-                            turn_result = (
-                                Stop(outcome_result.stop_seconds)
-                                if outcome_result.should_stop
-                                else Wait(time=outcome_result.wait_seconds)
-                            )
             except asyncio.CancelledError:
-                if claim is not None:
-                    released = await mailbox.release_claim(claim)
-                    if not released:
-                        logger.error(
-                            f"[{self.stream_id[:8]}] 取消时 claim 释放失败 "
-                            f"event=claim_release_failed 代次={generation}"
-                        )
-                    claim = None
                 raise
             except Exception as exc:
-                if claim is not None:
-                    released = await mailbox.release_claim(claim)
-                    if not released:
-                        logger.error(
-                            f"[{self.stream_id[:8]}] 异常时 claim 释放失败 "
-                            f"event=claim_release_failed 代次={generation}"
-                        )
-                    claim = None
                 logger.error(f"[{self.stream_id[:8]}] 回合执行失败：{exc}")
                 turn_result = Wait(time=5.0)
             finally:
                 if claim is not None:
-                    released = await mailbox.release_claim(claim)
-                    if not released:
-                        logger.error(
-                            f"[{self.stream_id[:8]}] 收尾时 claim 释放失败 "
-                            f"event=claim_release_failed 代次={generation}"
-                        )
+                    await self._release_claim_safely(mailbox, claim, generation, "收尾时")
                 if owner_active:
-                    owner_released = await mailbox.release_owner(owner, generation)
-                    if not owner_released:
-                        logger.error(
-                            f"[{self.stream_id[:8]}] mailbox owner 释放失败 "
-                            f"event=owner_release_failed 代次={generation}"
-                        )
+                    await self._release_owner_safely(mailbox, owner, generation, "mailbox")
 
             yield turn_result
+
+    async def _release_claim_safely(
+        self,
+        mailbox: StreamMailbox,
+        claim: TurnClaim,
+        generation: int,
+        context: str,
+    ) -> None:
+        """释放回合 claim，失败时记录错误日志。"""
+        released = await mailbox.release_claim(claim)
+        if not released:
+            logger.error(
+                f"[{self.stream_id[:8]}] {context} claim 释放失败 "
+                f"event=claim_release_failed 代次={generation}"
+            )
+
+    async def _release_owner_safely(
+        self,
+        mailbox: StreamMailbox,
+        owner: object,
+        generation: int,
+        context: str,
+    ) -> None:
+        """释放 mailbox 所有权，失败时记录错误日志。"""
+        released = await mailbox.release_owner(owner, generation)
+        if not released:
+            logger.error(
+                f"[{self.stream_id[:8]}] {context} owner 释放失败 "
+                f"event=owner_release_failed 代次={generation}"
+            )
+
+    async def _route_task_message(
+        self,
+        runtime: TaskRuntime,
+        unread_msgs: list["Message"],
+        unread_text: str,
+    ) -> bool:
+        """把本轮消息依次交给活动任务；任一条被接受即视为已路由。"""
+        routed = False
+        for message in unread_msgs:
+            routed = await route_message(
+                runtime.state.task_id,
+                str(getattr(message, "content", "") or unread_text),
+            ) or routed
+        return routed
+
+    def _create_task_runtime(
+        self,
+        config: AgenticChatterConfig,
+        unread_text: str,
+        task_type: TaskType,
+        generation: int,
+    ) -> TaskRuntime:
+        """按检测到的任务类型创建并启动后台任务。"""
+        task_runtime = get_task_runtime_manager().create(
+            self.stream_id,
+            unread_text,
+            task_type=task_type,
+            parent_turn_id=f"{self.stream_id}:{generation}",
+            allowed_tools=tuple(getattr(config.tasks, "default_allowed_tools", ()) or ()) or None,
+            budget=_build_task_budget(config),
+            denied_tools=tuple(getattr(config.tasks, "denied_tools", ()) or ()),
+        )
+        task_runtime.start()
+        logger.info(
+            f"[{self.stream_id[:8]}] 已创建复杂任务 event=task_created "
+            f"任务ID={task_runtime.state.task_id} 任务类型={task_type.value}"
+        )
+        return task_runtime
+
+    def _build_task_request(
+        self,
+        config: AgenticChatterConfig,
+        task_type: TaskType,
+        unread_text: str,
+        unread_msgs: list["Message"],
+    ) -> tuple[TaskRequest, TaskStateStore | None]:
+        """为新任务构建请求与持久化 store。"""
+        template = get_task_templates().get(task_type)
+        task_request = TaskRequest(
+            objective=unread_text,
+            trigger_message=unread_msgs[-1] if unread_msgs else None,
+            result_schema=template.result_schema,
+            validation_steps=template.validation_steps,
+        )
+        return task_request, _build_task_store(config)
+
+    async def _commit_task_turn(
+        self,
+        config: AgenticChatterConfig | None,
+        mailbox: StreamMailbox,
+        claim: TurnClaim,
+        task_runtime: TaskRuntime,
+        unread_msgs: list["Message"],
+        unread_text: str,
+        task_type: TaskType | None,
+        generation: int,
+    ) -> ChatterResult:
+        """确认任务消息的 claim，并把新建任务转入后台执行。
+
+        Args:
+            config: 插件配置。
+            mailbox: 当前流的 mailbox。
+            claim: 本轮持有的 claim。
+            task_runtime: 活动或新建的任务运行时。
+            unread_msgs: 本轮未读消息。
+            unread_text: 已合并的消息文本。
+            task_type: 新建任务的类型；路由给已有任务时为 None。
+            generation: 当前回合代次。
+
+        Returns:
+            ChatterResult: 任务回合的等待结果。
+        """
+        task_request: TaskRequest | None = None
+        task_store: TaskStateStore | None = None
+        if task_type is not None:
+            task_request, task_store = self._build_task_request(
+                config, task_type, unread_text, unread_msgs
+            )
+        committed = await mailbox.commit_claim(claim)
+        if not committed:
+            logger.error(
+                f"[{self.stream_id[:8]}] 任务 claim 提交失败 "
+                f"event=task_claim_commit_failed 代次={generation}"
+            )
+            raise RuntimeError("任务 claim 提交失败")
+        if task_request is not None:
+            start_task(self, task_runtime, task_request, task_store)
+            logger.info(
+                f"[{self.stream_id[:8]}] 任务已转入后台 event=task_background_started "
+                f"任务ID={task_runtime.state.task_id}"
+            )
+        logger.info(
+            f"[{self.stream_id[:8]}] 任务消息已确认 event=task_turn_committed "
+            f"代次={generation} 消息数={len(unread_msgs)} "
+            f"任务ID={task_runtime.state.task_id}"
+        )
+        return Wait(time=5.0)
+
+    async def _run_normal_turn(
+        self,
+        config: AgenticChatterConfig | None,
+        mailbox: StreamMailbox,
+        claim: TurnClaim,
+        chat_stream: "ChatStream",
+        state: TurnState,
+        unread_msgs: list["Message"],
+        generation: int,
+    ) -> tuple[ChatterResult, TurnClaim | None]:
+        """执行普通对话回合并确认消息。
+
+        Returns:
+            tuple[ChatterResult, TurnClaim | None]:
+                (回合结果, 剩余待释放的 claim；已提交或已释放时为 None)。
+        """
+        outcome_result = await self._run_pipeline(
+            config=config,
+            chat_stream=chat_stream,
+            state=state,
+            unread_msgs=unread_msgs,
+            claim=claim,
+        )
+
+        if state.failed:
+            interruption_streak = await mailbox.interruption_state()
+            pending_after_release = await mailbox.pending_count()
+            await self._release_claim_safely(mailbox, claim, generation, "回合")
+            logger.warning(
+                f"[{self.stream_id[:8]}] 回合已释放 event=turn_released "
+                f"代次={generation} 消息数={len(unread_msgs)} "
+                f"已发言={state.spoke} 原因=输入中断 "
+                f"说明={state.error} 剩余未读={pending_after_release} "
+                f"连续中断次数={interruption_streak}"
+            )
+            return Wait(time=5.0), None
+
+        if config is not None and config.decision.enabled:
+            get_participation_store().record(
+                self.stream_id,
+                responded=state.spoke,
+                topic=state.perceived_topic,
+                ttl_seconds=max(
+                    60.0,
+                    float(config.decision.state_ttl_minutes) * 60.0,
+                ),
+                max_streams=max(
+                    1,
+                    int(config.decision.max_state_streams),
+                ),
+            )
+
+        match = await self._match_claim_unreads(unread_msgs)
+        if match is None:
+            raise RuntimeError(
+                "消息确认不完整："
+                f"expected={len(unread_msgs)} actual=0"
+            )
+        committed = await mailbox.commit_claim(
+            claim,
+            apply=lambda: self._apply_claim_unread_match(match),
+        )
+        if not committed:
+            self._restore_claim_unread_match(match)
+            logger.error(
+                f"[{self.stream_id[:8]}] mailbox claim 提交失败 "
+                f"event=claim_commit_failed generation={generation} "
+                f"messages={len(unread_msgs)}"
+            )
+            raise RuntimeError("mailbox claim 提交失败")
+        state.input_confirmed = True
+        logger.info(
+            f"[{self.stream_id[:8]}] 回合已确认 event=turn_committed "
+            f"代次={generation} 消息数={len(unread_msgs)} "
+            f"未读匹配={len(match.matched)} "
+            f"已在历史={len(match.history_matched)} "
+            f"已发言={state.spoke} "
+            "连续中断已重置=true"
+        )
+        turn_result = (
+            Stop(outcome_result.stop_seconds)
+            if outcome_result.should_stop
+            else Wait(time=outcome_result.wait_seconds)
+        )
+        return turn_result, None
 
     def _build_deduper(self, config: AgenticChatterConfig | None) -> CallDeduper:
         """按配置构建本轮的去重器。
@@ -1008,12 +1121,7 @@ class _AgenticChatterBase(BaseChatter):
         else:
             clear_stream_catalog(self.stream_id)
 
-        registry = ToolRegistry()
-        for usable_cls in layout.exposed:
-            try:
-                registry.register(usable_cls)  # type: ignore[arg-type]
-            except Exception as exc:
-                logger.debug(f"注册组件失败，已跳过：{exc}")
+        registry = self._register_usables_into_registry(layout.exposed)
 
         system_text = await self._build_system_prompt(config, chat_stream, layout)
         user_text = await self._build_user_prompt(config, chat_stream, state, unread_msgs)
@@ -1099,11 +1207,9 @@ class _AgenticChatterBase(BaseChatter):
                     if not is_blacklisted_component(usable_cls, blacklist)
                 ]
                 if allowed_expanded:
-                    for usable_cls in allowed_expanded:
-                        try:
-                            registry.register(usable_cls)  # type: ignore[arg-type]
-                        except Exception as exc:
-                            logger.debug(f"展开工具注册失败，已跳过：{exc}")
+                    self._register_usables_into_registry(
+                        allowed_expanded, reason="展开工具注册失败"
+                    )
                     response.add_payload(
                         LLMPayload(ROLE.TOOL, allowed_expanded)  # type: ignore[arg-type]
                     )
@@ -1380,6 +1486,42 @@ class _AgenticChatterBase(BaseChatter):
                 )
             )
 
+    def _register_usables_into_registry(
+        self,
+        usable_classes: list[Any],
+        *,
+        reason: str = "注册组件失败",
+    ) -> ToolRegistry:
+        """把可用组件注册进 ToolRegistry，单个失败仅记录并跳过。"""
+        registry = ToolRegistry()
+        for usable_cls in usable_classes:
+            try:
+                registry.register(usable_cls)  # type: ignore[arg-type]
+            except Exception as exc:
+                logger.debug(f"{reason}，已跳过：{exc}")
+        return registry
+
+    @staticmethod
+    def _is_reply_duplicate(
+        config: AgenticChatterConfig | None,
+        message: str,
+        state: TurnState,
+    ) -> bool:
+        """按 humanize 配置判断文本是否与已发送内容重复。"""
+        humanize = getattr(config, "humanize", None)
+        if not bool(getattr(humanize, "enable_reply_dedup", True)):
+            return False
+        return is_repeated_reply(
+            message,
+            state.sent_texts,
+            similarity_threshold=float(
+                getattr(humanize, "reply_similarity_threshold", 0.88)
+            ),
+            containment_threshold=float(
+                getattr(humanize, "reply_containment_threshold", 0.90)
+            ),
+        )
+
     def _record_streamed_message(
         self,
         config: AgenticChatterConfig | None,
@@ -1392,18 +1534,7 @@ class _AgenticChatterBase(BaseChatter):
         if not message:
             return False, False
 
-        humanize = getattr(config, "humanize", None)
-        dedup_enabled = bool(getattr(humanize, "enable_reply_dedup", True))
-        if dedup_enabled and is_repeated_reply(
-            message,
-            state.sent_texts,
-            similarity_threshold=float(
-                getattr(humanize, "reply_similarity_threshold", 0.88)
-            ),
-            containment_threshold=float(
-                getattr(humanize, "reply_containment_threshold", 0.90)
-            ),
-        ):
+        if self._is_reply_duplicate(config, message, state):
             state.duplicate_text_streak += 1
             logger.warning(
                 f"[{self.stream_id[:8]}] event=stream_duplicate_already_emitted "
@@ -1494,19 +1625,7 @@ class _AgenticChatterBase(BaseChatter):
             )
             return False, False
 
-        humanize = config.humanize if config is not None else None
-        dedup_enabled = bool(getattr(humanize, "enable_reply_dedup", True))
-        duplicate = dedup_enabled and is_repeated_reply(
-            message,
-            state.sent_texts,
-            similarity_threshold=float(
-                getattr(humanize, "reply_similarity_threshold", 0.88)
-            ),
-            containment_threshold=float(
-                getattr(humanize, "reply_containment_threshold", 0.90)
-            ),
-        )
-        if duplicate:
+        if self._is_reply_duplicate(config, message, state):
             state.duplicate_text_streak += 1
             logger.info(f"[{self.stream_id[:8]}] 检测到本轮复读，已抑制文本发送")
             return False, True
@@ -1526,7 +1645,9 @@ class _AgenticChatterBase(BaseChatter):
             logger.info(f"[{self.stream_id[:8]}] 已达到单轮可见发言次数上限")
             return False, True
 
-        segments = build_speak_segments(message, humanize)
+        segments = build_speak_segments(
+            message, getattr(config, "humanize", None) if config is not None else None
+        )
         if not segments:
             return False, False
 
@@ -1864,16 +1985,6 @@ class _AgenticChatterBase(BaseChatter):
         match.context.unread_messages = list(match.unread_before)
         setattr(match.context, match.history_attr, list(match.history_before))
 
-    async def _flush_claim_unreads(self, unread_messages: list["Message"]) -> int:
-        """兼容直接调用：全量匹配成功后一次性确认 claim。"""
-        if not unread_messages:
-            return 0
-        match = await self._match_claim_unreads(unread_messages)
-        if match is None:
-            return 0
-        self._apply_claim_unread_match(match)
-        return len(match.matched) + len(match.history_matched)
-
     async def _has_new_unreads(
         self,
         config: AgenticChatterConfig | None,
@@ -1943,11 +2054,11 @@ class _AgenticChatterBase(BaseChatter):
                 f"未读数={pending_count} 连续中断次数={new_streak} "
                 f"连续中断上限={max_interruptions}"
             )
-        else:
-            original_ids = {id(message) for message in original_unreads}
-            new_count = sum(id(message) not in original_ids for message in current_unreads)
-            return should_interrupt(enabled=True, new_unread_count=new_count)
-        return True
+            return True
+        # 无 claim 时退回对比原快照：新消息按对象身份计数
+        original_ids = {id(message) for message in original_unreads}
+        new_count = sum(id(message) not in original_ids for message in current_unreads)
+        return should_interrupt(enabled=True, new_unread_count=new_count)
 
     async def _summarize(
         self,
