@@ -270,6 +270,7 @@ class _AgenticChatterBase(BaseChatter):
         self._deduper = CallDeduper()
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # 配置
     # ------------------------------------------------------------------
 
@@ -368,9 +369,14 @@ class _AgenticChatterBase(BaseChatter):
 
                 claim = await mailbox.claim_pending(owner, generation)
                 if claim is not None:
+                    from src.core.managers import get_stream_manager
+
                     unread_msgs = list(claim.messages)
                     unread_text = "\n".join(
                         self.format_message_line(message) for message in unread_msgs
+                    )
+                    chat_stream = await get_stream_manager().get_or_create_stream(
+                        stream_id=self.stream_id
                     )
                     state = TurnState(
                         stream_id=self.stream_id,
@@ -472,54 +478,81 @@ class _AgenticChatterBase(BaseChatter):
                         )
                         turn_result = Wait(time=5.0)
                     else:
-                        if config is not None and config.decision.enabled:
-                            get_participation_store().record(
-                                self.stream_id,
-                                responded=state.spoke,
-                                topic=state.perceived_topic,
-                                ttl_seconds=max(
-                                    60.0,
-                                    float(config.decision.state_ttl_minutes) * 60.0,
-                                ),
-                                max_streams=max(
-                                    1,
-                                    int(config.decision.max_state_streams),
-                                ),
-                            )
+                        outcome_result = await self._run_pipeline(
+                            config=config,
+                            chat_stream=chat_stream,
+                            state=state,
+                            unread_msgs=unread_msgs,
+                            claim=claim,
+                        )
 
-                        match = await self._match_claim_unreads(unread_msgs)
-                        if match is None:
-                            raise RuntimeError(
-                                "消息确认不完整："
-                                f"expected={len(unread_msgs)} actual=0"
+                        if state.failed:
+                            interruption_streak = await mailbox.interruption_state()
+                            pending_after_release = await mailbox.pending_count()
+                            released = await mailbox.release_claim(claim)
+                            if not released:
+                                logger.error(
+                                    f"[{self.stream_id[:8]}] 回合 claim 释放失败 "
+                                    f"event=claim_release_failed generation={generation}"
+                                )
+                            claim = None
+                            logger.warning(
+                                f"[{self.stream_id[:8]}] 回合已释放 event=turn_released "
+                                f"generation={generation} messages={len(unread_msgs)} "
+                                f"visible={state.spoke} reason_code=input_interrupt "
+                                f"reason={state.error} pending={pending_after_release} "
+                                f"consecutive_interruptions={interruption_streak}"
                             )
-                        committed = await mailbox.commit_claim(
-                            claim,
-                            apply=lambda: self._apply_claim_unread_match(match),
-                        )
-                        if not committed:
-                            self._restore_claim_unread_match(match)
-                            logger.error(
-                                f"[{self.stream_id[:8]}] mailbox claim 提交失败 "
-                                f"event=claim_commit_failed generation={generation} "
-                                f"messages={len(unread_msgs)}"
+                            turn_result = Wait(time=5.0)
+                        else:
+                            if config is not None and config.decision.enabled:
+                                get_participation_store().record(
+                                    self.stream_id,
+                                    responded=state.spoke,
+                                    topic=state.perceived_topic,
+                                    ttl_seconds=max(
+                                        60.0,
+                                        float(config.decision.state_ttl_minutes) * 60.0,
+                                    ),
+                                    max_streams=max(
+                                        1,
+                                        int(config.decision.max_state_streams),
+                                    ),
+                                )
+
+                            match = await self._match_claim_unreads(unread_msgs)
+                            if match is None:
+                                raise RuntimeError(
+                                    "消息确认不完整："
+                                    f"expected={len(unread_msgs)} actual=0"
+                                )
+                            committed = await mailbox.commit_claim(
+                                claim,
+                                apply=lambda: self._apply_claim_unread_match(match),
                             )
-                            raise RuntimeError("mailbox claim 提交失败")
-                        claim = None
-                        state.input_confirmed = True
-                        logger.info(
-                            f"[{self.stream_id[:8]}] 回合已确认 event=turn_committed "
-                            f"generation={generation} messages={len(unread_msgs)} "
-                            f"matched_unread={len(match.matched)} "
-                            f"already_in_history={len(match.history_matched)} "
-                            f"visible={state.spoke} "
-                            "consecutive_interruptions_reset=true"
-                        )
-                        turn_result = (
-                            Stop(outcome_result.stop_seconds)
-                            if outcome_result.should_stop
-                            else Wait(time=outcome_result.wait_seconds)
-                        )
+                            if not committed:
+                                self._restore_claim_unread_match(match)
+                                logger.error(
+                                    f"[{self.stream_id[:8]}] mailbox claim 提交失败 "
+                                    f"event=claim_commit_failed generation={generation} "
+                                    f"messages={len(unread_msgs)}"
+                                )
+                                raise RuntimeError("mailbox claim 提交失败")
+                            claim = None
+                            state.input_confirmed = True
+                            logger.info(
+                                f"[{self.stream_id[:8]}] 回合已确认 event=turn_committed "
+                                f"generation={generation} messages={len(unread_msgs)} "
+                                f"matched_unread={len(match.matched)} "
+                                f"already_in_history={len(match.history_matched)} "
+                                f"visible={state.spoke} "
+                                "consecutive_interruptions_reset=true"
+                            )
+                            turn_result = (
+                                Stop(outcome_result.stop_seconds)
+                                if outcome_result.should_stop
+                                else Wait(time=outcome_result.wait_seconds)
+                            )
             except asyncio.CancelledError:
                 if claim is not None:
                     released = await mailbox.release_claim(claim)
