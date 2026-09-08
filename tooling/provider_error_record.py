@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -12,6 +11,8 @@ from typing import Any, Sequence
 from src.kernel.llm.payload.content import File, ReasoningText, Text
 from src.kernel.llm.payload.tooling import ToolCall, ToolResult
 from src.kernel.llm.roles import ROLE
+
+from .dedupe import redact_sensitive_value
 
 _RECORD_PATH = Path("data/agentic_chatter/provider_error_requests.jsonl")
 _MAX_PAYLOADS = 32
@@ -28,9 +29,6 @@ _PERSONA_FIELDS = {
     "background_story": "{{AGENTIC_BACKGROUND_STORY}}",
     "reply_style": "{{AGENTIC_REPLY_STYLE}}",
 }
-_SENSITIVE_KEY_PATTERN = re.compile(
-    r"(token|secret|password|authorization|cookie|api[_-]?key)", re.IGNORECASE
-)
 
 
 def _truncate(text: str, limit: int, field: str, truncated_fields: list[str]) -> str:
@@ -40,24 +38,9 @@ def _truncate(text: str, limit: int, field: str, truncated_fields: list[str]) ->
     return f"{text[: max(0, limit - 32)]}...[truncated:{limit}]"
 
 
-def _redact_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): "[REDACTED]"
-            if _SENSITIVE_KEY_PATTERN.search(str(key))
-            else _redact_value(child)
-            for key, child in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_redact_value(child) for child in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return "[UNSERIALIZABLE]"
-
-
 def _json_text(value: Any) -> str:
     try:
-        return json.dumps(_redact_value(value), ensure_ascii=False, default=str)
+        return json.dumps(redact_sensitive_value(value), ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return "[UNSERIALIZABLE]"
 
@@ -130,12 +113,12 @@ def _serialize_content(
     if isinstance(content, File):
         return _serialize_file(content)
     if isinstance(content, dict):
-        return _redact_value(content)
+        return redact_sensitive_value(content)
     if isinstance(content, (str, int, float, bool)) or content is None:
         return content
     if role == ROLE.TOOL and hasattr(content, "to_schema"):
         try:
-            return _redact_value(content.to_schema())
+            return redact_sensitive_value(content.to_schema())
         except Exception:
             return {"type": "tool", "class": type(content).__name__, "omitted": True}
     return {"type": "unknown", "class": type(content).__name__, "omitted": True}

@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 from src.kernel.llm import LLMPayload, ROLE, Text, ToolResult
 
-from ..actions.control import DEFAULT_STOP_MINUTES, MAX_STOP_MINUTES
+from ..actions.control import clamp_stop_minutes
 from ..humanize.segmenter import Segment, segment_reply
 from ..tooling.dedupe import build_result_preview
 from .state import (
@@ -102,16 +102,7 @@ def classify_calls(calls: list[Any]) -> tuple[list[Any], float | None, float | N
             continue
 
         if name == STOP_CALL:
-            try:
-                stop_minutes = max(
-                    0.0,
-                    min(
-                        MAX_STOP_MINUTES,
-                        float(args.get("minutes", DEFAULT_STOP_MINUTES) or DEFAULT_STOP_MINUTES),
-                    ),
-                )
-            except (TypeError, ValueError):
-                stop_minutes = DEFAULT_STOP_MINUTES
+            stop_minutes = clamp_stop_minutes(args.get("minutes"))
             continue
 
         normal.append(call)

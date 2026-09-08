@@ -25,23 +25,25 @@ _SENSITIVE_KEY_PATTERN = re.compile(
 )
 
 
+def redact_sensitive_value(value: Any) -> Any:
+    """递归脱敏：把敏感键对应的值替换为 ``[REDACTED]``。"""
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if _SENSITIVE_KEY_PATTERN.search(str(key)) else redact_sensitive_value(child)
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [redact_sensitive_value(child) for child in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return "[UNSERIALIZABLE]"
+
+
 def build_log_args(value: Any) -> str:
     """将工具参数转换为安全、有界的单行日志文本。"""
-    def redact(item: Any) -> Any:
-        if isinstance(item, dict):
-            return {
-                key: "[REDACTED]" if _SENSITIVE_KEY_PATTERN.search(str(key)) else redact(child)
-                for key, child in item.items()
-            }
-        if isinstance(item, (list, tuple)):
-            return [redact(child) for child in item]
-        if isinstance(item, (str, int, float, bool)) or item is None:
-            return item
-        return "[UNSERIALIZABLE]"
-
     try:
         text = json.dumps(
-            redact(value),
+            redact_sensitive_value(value),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

@@ -58,12 +58,97 @@ def list_custom_stages() -> list[str]:
     return sorted(_CUSTOM_STAGES)
 
 
+async def _submit_task(
+    self: Any,
+    stream_id: str,
+    objective: str,
+    *,
+    task_type: TaskType = TaskType.GENERAL,
+    budget: dict[str, Any] | None = None,
+    allowed_tools: tuple[str, ...] | None = None,
+    result_schema: dict[str, Any] | None = None,
+    validation_steps: tuple[str, ...] = (),
+    metadata: dict[str, Any] | None = None,
+) -> TaskResult | None:
+    """提交一个受预算和工具策略约束的复杂任务。
+
+    供其他插件或组件把长耗时请求转入独立任务运行时。任务使用
+    插件配置的默认预算与工具白名单，结果通过任务运行时返回。
+
+    Args:
+        stream_id: 目标聊天流 ID。
+        objective: 任务目标描述。
+        task_type: 任务类型，决定默认模板。
+        budget: 覆盖默认预算的字段。
+        allowed_tools: 任务工具白名单。
+        result_schema: 最终结果 JSON schema。
+        validation_steps: 需要工具证据支持的验证步骤。
+        metadata: 额外任务元数据。
+
+    Returns:
+        TaskResult | None: 提交失败返回 None；否则返回初始结果占位。
+    """
+    from .chatter import AgenticChatter
+
+    manager = get_task_runtime_manager()
+    if manager.get_active(stream_id) is not None:
+        logger.warning("提交任务失败：该聊天流已有活动任务")
+        return None
+    budget_kwargs = dict(budget or {})
+    try:
+        runtime: TaskRuntime = manager.create(
+            stream_id,
+            objective,
+            task_type=task_type,
+            allowed_tools=allowed_tools or None,
+            budget=TaskBudget(**budget_kwargs) if budget_kwargs else None,
+        )
+    except ValueError as exc:
+        logger.warning(f"提交任务失败：{exc}")
+        return None
+    runtime.start()
+    chatter = AgenticChatter(stream_id, self.plugin)
+    start_task(
+        chatter,
+        runtime,
+        TaskRequest(
+            objective=objective,
+            result_schema=result_schema,
+            validation_steps=validation_steps,
+            metadata=metadata or {},
+        ),
+        _task_store(self),
+    )
+    return runtime.state.to_result() or TaskResult(TaskStatus.RUNNING, "任务已提交")
+
+
+def _task_store(service: Any) -> TaskStateStore | None:
+    """按服务所属插件配置构建任务状态存储。"""
+    config = getattr(service, "plugin", None)
+    directory = str(getattr(getattr(config, "tasks", None), "checkpoint_directory", "") or "").strip()
+    return TaskStateStore(directory) if directory else None
+
+
+def _get_task_status(self: Any, task_id: str) -> TaskResult | None:
+    """按 task_id 查询任务当前结构化状态。"""
+    runtime = get_task_runtime_manager().get(task_id)
+    if runtime is None:
+        return None
+    return runtime.state.to_result() or TaskResult(
+        runtime.state.status,
+        f"任务状态：{runtime.state.status.value}",
+    )
+
+
 class PipelineService(BaseService):
     """AgenticChatter 管线扩展服务。"""
 
     service_name = "pipeline"
     service_description = "注册自定义回复管线阶段，并读写跨流全局心智"
     version = "0.1.0"
+
+    submit_task = _submit_task
+    get_task_status = _get_task_status
 
     def register_stage(self, stage: PipelineStage) -> bool:
         """注册一个自定义管线阶段。
@@ -151,85 +236,6 @@ class PipelineService(BaseService):
             "custom_stages": list_custom_stages(),
         }
 
-    def submit_task(
-        self,
-        stream_id: str,
-        objective: str,
-        *,
-        task_type: TaskType = TaskType.GENERAL,
-        budget: dict[str, Any] | None = None,
-        allowed_tools: tuple[str, ...] | None = None,
-        result_schema: dict[str, Any] | None = None,
-        validation_steps: tuple[str, ...] = (),
-        metadata: dict[str, Any] | None = None,
-    ) -> TaskResult | None:
-        """提交一个受预算和工具策略约束的复杂任务。
-
-        供其他插件或组件把长耗时请求转入独立任务运行时。任务使用
-        插件配置的默认预算与工具白名单，结果通过任务运行时返回。
-
-        Args:
-            stream_id: 目标聊天流 ID。
-            objective: 任务目标描述。
-            task_type: 任务类型，决定默认模板。
-            budget: 覆盖默认预算的字段。
-            allowed_tools: 任务工具白名单。
-            result_schema: 最终结果 JSON schema。
-            validation_steps: 需要工具证据支持的验证步骤。
-            metadata: 额外任务元数据。
-
-        Returns:
-            TaskResult | None: 提交失败返回 None；否则返回初始结果占位。
-        """
-        from .chatter import AgenticChatter
-
-        manager = get_task_runtime_manager()
-        if manager.get_active(stream_id) is not None:
-            logger.warning("提交任务失败：该聊天流已有活动任务")
-            return None
-        budget_kwargs = dict(budget or {})
-        try:
-            runtime: TaskRuntime = manager.create(
-                stream_id,
-                objective,
-                task_type=task_type,
-                allowed_tools=allowed_tools or None,
-                budget=TaskBudget(**budget_kwargs) if budget_kwargs else None,
-            )
-        except ValueError as exc:
-            logger.warning(f"提交任务失败：{exc}")
-            return None
-        runtime.start()
-        chatter = AgenticChatter(stream_id, self.plugin)
-        start_task(
-            chatter,
-            runtime,
-            TaskRequest(
-                objective=objective,
-                result_schema=result_schema,
-                validation_steps=validation_steps,
-                metadata=metadata or {},
-            ),
-            self._task_store(),
-        )
-        return runtime.state.to_result() or TaskResult(TaskStatus.RUNNING, "任务已提交")
-
-    def _task_store(self) -> TaskStateStore | None:
-        """按插件配置构建任务状态存储。"""
-        config = getattr(self.plugin, "config", None)
-        directory = str(getattr(getattr(config, "tasks", None), "checkpoint_directory", "") or "").strip()
-        return TaskStateStore(directory) if directory else None
-
-    def get_task_status(self, task_id: str) -> TaskResult | None:
-        """按 task_id 查询任务当前结构化状态。"""
-        runtime = get_task_runtime_manager().get(task_id)
-        if runtime is None:
-            return None
-        return runtime.state.to_result() or TaskResult(
-            runtime.state.status,
-            f"任务状态：{runtime.state.status.value}",
-        )
-
 
 class TaskRuntimeService(BaseService):
     """复杂任务提交服务，供其他插件转入独立任务运行时。"""
@@ -238,44 +244,5 @@ class TaskRuntimeService(BaseService):
     service_description = "提交受预算与工具策略约束的复杂任务并查询任务状态"
     version = "0.1.0"
 
-    def submit_task(
-        self,
-        stream_id: str,
-        objective: str,
-        *,
-        task_type: TaskType = TaskType.GENERAL,
-        budget: dict[str, Any] | None = None,
-        allowed_tools: tuple[str, ...] | None = None,
-        result_schema: dict[str, Any] | None = None,
-        validation_steps: tuple[str, ...] = (),
-        metadata: dict[str, Any] | None = None,
-    ) -> TaskResult | None:
-        """提交一个受预算和工具策略约束的复杂任务。
-
-        Args:
-            stream_id: 目标聊天流 ID。
-            objective: 任务目标描述。
-            task_type: 任务类型，决定默认模板。
-            budget: 覆盖默认预算的字段。
-            allowed_tools: 任务工具白名单。
-            result_schema: 最终结果 JSON schema。
-            validation_steps: 需要工具证据支持的验证步骤。
-            metadata: 额外任务元数据。
-
-        Returns:
-            TaskResult | None: 提交失败返回 None；否则返回初始结果占位。
-        """
-        return PipelineService(self.plugin).submit_task(
-            stream_id,
-            objective,
-            task_type=task_type,
-            budget=budget,
-            allowed_tools=allowed_tools,
-            result_schema=result_schema,
-            validation_steps=validation_steps,
-            metadata=metadata,
-        )
-
-    def get_task_status(self, task_id: str) -> TaskResult | None:
-        """按 task_id 查询任务当前结构化状态。"""
-        return PipelineService(self.plugin).get_task_status(task_id)
+    submit_task = _submit_task
+    get_task_status = _get_task_status

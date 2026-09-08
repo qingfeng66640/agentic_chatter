@@ -18,6 +18,26 @@ DEFAULT_STOP_MINUTES = 5.0
 MAX_STOP_MINUTES = 120.0
 
 
+def clamp_stop_minutes(raw: object) -> float:
+    """把模型传入的冷却分钟数解析并钳制到合法区间。
+
+    非法输入（None/非数值）回退到默认值。
+
+    Args:
+        raw: 模型传入的原始分钟数。
+
+    Returns:
+        float: 介于 0 与 MAX_STOP_MINUTES 之间的冷却分钟数。
+    """
+    try:
+        minutes = float(raw if raw is not None else DEFAULT_STOP_MINUTES)
+    except (TypeError, ValueError):
+        return DEFAULT_STOP_MINUTES
+    if minutes <= 0:
+        minutes = DEFAULT_STOP_MINUTES
+    return min(MAX_STOP_MINUTES, minutes)
+
+
 class EndTurnAction(BaseAction):
     """结束当前回合，等待对方回应。"""
 
@@ -81,5 +101,5 @@ class StopConversationAction(BaseAction):
         Returns:
             tuple[bool, str]: (是否成功, 结果说明)。
         """
-        cooldown = max(0.0, min(MAX_STOP_MINUTES, float(minutes or DEFAULT_STOP_MINUTES)))
+        cooldown = clamp_stop_minutes(minutes)
         return True, f"对话已结束；{cooldown:.0f} 分钟后，收到新消息时才会重新开启"

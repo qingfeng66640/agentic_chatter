@@ -60,7 +60,7 @@ class TaskBudget:
                 self.max_result_size,
             )
         ):
-            raise ValueError("任务预算不能为负数")
+            raise ValueError("任务预算各项必须为正数")
 
 
 @dataclass(frozen=True, slots=True)

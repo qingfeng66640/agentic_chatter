@@ -127,7 +127,7 @@ class TaskRuntime:
             TaskStatus.CANCELLED,
         )
         if status not in terminal:
-            raise ValueError(f"不是终态：{status}")
+            raise ValueError(f"收尾状态必须是任务终态：{status}")
         if self.state.result is not None:
             if self.state.status != status:
                 raise ValueError(f"任务已处于终态：{self.state.status}")
