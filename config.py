@@ -881,6 +881,12 @@ class AgenticChatterConfig(BaseConfig):
             label="任务检查点目录",
             tag="storage",
         )
+        report_task_events: bool = Field(
+            default=True,
+            description="非直出任务完成或任务等待用户输入时，唤醒主 Agent 进行汇报回复",
+            label="任务完成回灌主 Agent",
+            tag="ai",
+        )
 
     @config_section("persona", title="人设补充", tag="text")
     class PersonaSection(SectionBase):

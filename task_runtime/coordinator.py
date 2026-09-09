@@ -6,13 +6,16 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
+from src.app.plugin_system.api.log_api import get_logger
 from src.kernel.concurrency import get_task_manager
 
 from .control import TaskMessageKind, classify_task_message
 from .executor import TaskCommand, TaskExecutor, TaskRequest
-from .models import TaskStatus
+from .models import TaskResult, TaskStatus
 from .persistence import TaskStateStore
 from .runtime import TaskRuntime
+
+logger = get_logger("agentic_chatter")
 
 # 可恢复执行的任务状态：这些状态的任务可由 resume/start_task 继续推进
 RESUMABLE_TASK_STATUSES = (
@@ -20,6 +23,42 @@ RESUMABLE_TASK_STATUSES = (
     TaskStatus.WAITING_USER,
     TaskStatus.FAILED,
 )
+
+# 后台任务结束时需要回灌主 Agent 的状态集合：
+# SUCCEEDED 仅在非直出任务（deliver_final_text=False）时推送，
+# 直发任务用户已收到结果文本，再推送会造成双重回复。
+NOTIFY_WORTHY_STATUSES = (
+    TaskStatus.SUCCEEDED,
+    TaskStatus.WAITING_USER,
+)
+
+# 已完成任务事件的暂存注册表：按流分桶，主 Agent 被唤醒后一次性 drain。
+# 单槽 resume 事件存在覆盖窗口，数据本体必须持久暂存直到被消费。
+_COMPLETED_EVENTS: dict[str, list[dict[str, Any]]] = {}
+
+
+def push_completed_event(stream_id: str, payload: dict[str, Any]) -> None:
+    """暂存一条任务完成事件，同一 task_id 幂等去重。
+
+    Args:
+        stream_id: 目标聊天流 ID。
+        payload: 事件数据，至少包含 task_id。
+    """
+    task_id = str(payload.get("task_id", "") or "")
+    events = _COMPLETED_EVENTS.setdefault(stream_id, [])
+    if task_id and any(event.get("task_id") == task_id for event in events):
+        return
+    events.append(payload)
+
+
+def drain_completed_events(stream_id: str) -> list[dict[str, Any]]:
+    """取出并清空指定流的全部完成事件（一次性消费）。"""
+    return _COMPLETED_EVENTS.pop(stream_id, [])
+
+
+def has_completed_events(stream_id: str) -> bool:
+    """判断指定流是否还有未消费的完成事件。"""
+    return bool(_COMPLETED_EVENTS.get(stream_id))
 
 
 @dataclass(slots=True)
@@ -71,6 +110,57 @@ class _IdlePlaceholder:
         return False
 
 
+def _should_report_completion(
+    runtime: TaskRuntime,
+    request: TaskRequest,
+) -> bool:
+    """按状态与请求开关判定是否需要回灌主 Agent。"""
+    status = runtime.state.status
+    if status in (TaskStatus.PAUSED, TaskStatus.CANCELLED):
+        return False
+    if status not in NOTIFY_WORTHY_STATUSES:
+        return False
+    if status == TaskStatus.WAITING_USER:
+        return True
+    # SUCCEEDED：直发任务用户已看到结果，默认不回灌
+    return bool(request.report_events) and not request.deliver_final_text
+
+
+def _build_completion_payload(
+    runtime: TaskRuntime,
+    result: TaskResult,
+) -> dict[str, Any]:
+    """构建回灌事件的数据载荷。"""
+    summary = str(result.summary or "")[: max(0, runtime.state.budget.max_result_size)]
+    return {
+        "task_id": runtime.state.task_id,
+        "task_type": runtime.state.task_type.value,
+        "status": status.value if (status := runtime.state.status) else "",
+        "summary": summary,
+        "error": str(result.error or "")[: runtime.state.budget.max_result_size],
+    }
+
+
+async def _notify_completion(
+    chatter: Any,
+    runtime: TaskRuntime,
+    request: TaskRequest,
+    result: TaskResult,
+) -> None:
+    """任务结束后按需推送完成事件并唤醒主 Agent。"""
+    if not _should_report_completion(runtime, request):
+        return
+    stream_id = runtime.state.stream_id
+    push_completed_event(stream_id, _build_completion_payload(runtime, result))
+    from src.core.managers.chatter_manager import get_chatter_manager
+
+    await get_chatter_manager().resume_chatter(stream_id, source="sub_agent")
+    logger.info(
+        f"[{stream_id[:8]}] 任务完成已回灌主 Agent event=task_completion_reported "
+        f"任务ID={runtime.state.task_id} 状态={runtime.state.status.value}"
+    )
+
+
 def start_task(
     chatter: Any,
     runtime: TaskRuntime,
@@ -94,7 +184,8 @@ def start_task(
         if request.result_schema is not None:
             runtime.state.metadata["result_schema"] = request.result_schema
         try:
-            await executor.run(request)
+            result = await executor.run(request)
+            await _notify_completion(chatter, runtime, request, result)
         finally:
             if store is not None:
                 store.save(runtime)
@@ -146,7 +237,7 @@ async def route_message(task_id: str, text: str) -> bool:
         summary = result.summary if result is not None else (
             f"任务状态：{active.executor.runtime.state.status.value}"
         )
-        await active.executor._send_final_text(summary)
+        await active.executor.send_notice(summary)
         return True
     if message.kind == TaskMessageKind.CONTROL and message.text in ("pause", "cancel"):
         if active.executor.runtime.state.status == TaskStatus.RUNNING and not active.task.done():

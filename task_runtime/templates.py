@@ -58,3 +58,34 @@ def get_task_templates() -> TaskTemplateRegistry:
             TaskTemplate(TaskType.CONTENT_EDIT, "内容修改", TaskBudget(max_iterations=16, max_tool_calls=32), ToolPolicy(("read*", "search*", "edit*", "test*", "preview*"), require_confirmation_tools=("publish*",)), ("检查变更范围",)),
         )
     )
+
+
+def build_task_report_prompt(events: tuple[dict[str, object], ...]) -> str:
+    """把任务完成事件渲染为主 Agent 汇报提示词。
+
+    Args:
+        events: 完成事件列表，每条含 task_type/status/summary/error。
+
+    Returns:
+        str: 拼接后的汇报提示词。
+    """
+    lines: list[str] = []
+    for index, event in enumerate(events, start=1):
+        status = str(event.get("status", "") or "")
+        summary = str(event.get("summary", "") or "").strip()
+        error = str(event.get("error", "") or "").strip()
+        task_type = str(event.get("task_type", "") or "")
+        lines.append(f"[任务{index}] 类型={task_type} 状态={status}")
+        if summary:
+            lines.append(f"结果摘要：{summary}")
+        if error:
+            lines.append(f"失败原因：{error}")
+    joined = "\n".join(lines)
+    return (
+        "你的一个后台 sub-agent 任务刚刚结束，以下是执行结果：\n"
+        f"{joined}\n"
+        "请结合上下文自然地向用户汇报这个结果；"
+        "如果任务在等待用户确认或补充输入，请说明需要用户做什么，"
+        "并提示用户可以用「补充任务：」前缀继续该任务。"
+        "如果结果与当前话题无关或用户并不关心，可以简短带过。"
+    )

@@ -125,10 +125,17 @@ from .task_runtime import (
     TaskStateStore,
     TaskStatus,
     TaskType,
+    build_task_report_prompt,
     get_task_runtime_manager,
     get_task_templates,
 )
-from .task_runtime.coordinator import register_task, route_message, start_task
+from .task_runtime.coordinator import (
+    drain_completed_events,
+    has_completed_events,
+    register_task,
+    route_message,
+    start_task,
+)
 from .tooling.provider_error_record import (
     append_provider_error_request_record,
     build_provider_error_request_record,
@@ -250,6 +257,11 @@ class _ClaimUnreadMatch:
     history_attr: str
 
 
+def _is_task_resume_event(event: Any) -> bool:
+    """判断唤醒事件是否来自后台任务完成回灌。"""
+    return str(getattr(event, "source", "") or "") == "sub_agent"
+
+
 _TERMINATION_LABELS = {
     "stop_requested": "请求停止",
     "end_turn_requested": "请求结束本轮",
@@ -341,6 +353,10 @@ class _AgenticChatterBase(BaseChatter):
     async def execute(self) -> AsyncGenerator[ChatterResult, WaitResumeEvent | None]:
         """执行 agent 回复流程。
 
+        手动转发循环：``async for`` 委托会吞掉调用方 ``asend`` 传入的
+        WaitResumeEvent，这里改为逐次 ``asend`` 透传给 ``_run_turns``，
+        使外部唤醒（如任务完成回灌）能够到达回合循环。
+
         Yields:
             ChatterResult: Wait/Success/Failure/Stop 结果。
         """
@@ -349,14 +365,21 @@ class _AgenticChatterBase(BaseChatter):
             yield Success("AgenticChatter 已禁用")
             return
 
+        gen = self._run_turns(config)
         try:
-            async for result in self._run_turns(config):
-                yield result
+            result = await gen.asend(None)  # 首次拉起，值必须为 None
+            while True:
+                sent = yield result  # 结果交给框架，接收框架唤醒事件
+                result = await gen.asend(sent)  # 唤醒事件透传给回合循环
+        except StopAsyncIteration:
+            return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error(f"[{self.stream_id[:8]}] 智能体循环异常：{exc}")
             yield Failure(f"agent 循环异常: {exc}", exception=exc)
+        finally:
+            await gen.aclose()
 
     async def _run_turns(
         self,
@@ -369,7 +392,12 @@ class _AgenticChatterBase(BaseChatter):
 
         Yields:
             ChatterResult: 每轮结束时的结果。
+
+        Receives:
+            WaitResumeEvent | None: 调用方在每次 yield 后 ``asend`` 进来的
+                唤醒事件；``source == "sub_agent"`` 的事件触发任务汇报轮。
         """
+        resume_event: WaitResumeEvent | None = None
         while True:
             mailbox = get_stream_mailbox(self.stream_id)
             turn_token = object()
@@ -415,6 +443,25 @@ class _AgenticChatterBase(BaseChatter):
                     continue
 
                 claim = await mailbox.claim_pending(turn_token, generation)
+
+                # 兜底 drain：resume 单槽可能被新事件覆盖导致本轮未消费到
+                # source=="sub_agent"，但完成事件仍在注册表中，顺带拼入汇报。
+                if claim is None and _is_task_resume_event(resume_event):
+                    report_events = tuple(drain_completed_events(self.stream_id))
+                    if report_events:
+                        turn_result = await self._run_report_turn(
+                            config, chat_stream=None, events=report_events
+                        )
+                        resume_event = None
+                        continue
+                elif claim is None and has_completed_events(self.stream_id):
+                    report_events = tuple(drain_completed_events(self.stream_id))
+                    if report_events:
+                        turn_result = await self._run_report_turn(
+                            config, chat_stream=None, events=report_events
+                        )
+                        continue
+
                 if claim is not None:
                     from src.core.managers import get_stream_manager
 
@@ -442,7 +489,6 @@ class _AgenticChatterBase(BaseChatter):
                     if active_runtime is not None and await self._route_task_message(
                         active_runtime, unread_msgs, unread_text
                     ):
-                        state.input_confirmed = True
                         task_runtime = active_runtime
                     if task_runtime is None:
                         task_type = _detect_task_type(unread_text)
@@ -464,6 +510,15 @@ class _AgenticChatterBase(BaseChatter):
                         )
                         claim = None
                     else:
+                        # 本轮带真实消息的同时有任务结果回灌：拼入 task_report，
+                        # 由普通回合随回复一并汇报（不拼入 unread_texts，
+                        # 避免污染决策打分输入）。
+                        if _is_task_resume_event(resume_event) or has_completed_events(
+                            self.stream_id
+                        ):
+                            state.task_report = build_task_report_prompt(
+                                tuple(drain_completed_events(self.stream_id))
+                            )
                         turn_result, claim = await self._run_normal_turn(
                             config,
                             mailbox,
@@ -484,7 +539,50 @@ class _AgenticChatterBase(BaseChatter):
                 if is_turn_owner:
                     await self._release_owner_safely(mailbox, turn_token, generation, "mailbox")
 
-            yield turn_result
+            resume_event = yield turn_result
+
+    async def _run_report_turn(
+        self,
+        config: AgenticChatterConfig | None,
+        chat_stream: "ChatStream | None",
+        *,
+        events: tuple[dict[str, Any], ...],
+    ) -> ChatterResult:
+        """执行无 claim 的任务汇报轮。
+
+        本轮没有真实用户消息，不取 claim 也不 commit；直接以 ACT 阶段
+        跑一次管线，把任务结果汇报给用户。
+
+        Args:
+            config: 插件配置。
+            chat_stream: 聊天流；为 None 时按需获取。
+            events: 已 drain 的任务完成事件。
+
+        Returns:
+            ChatterResult: 汇报轮结束后的等待结果。
+        """
+        if chat_stream is None:
+            from src.core.managers import get_stream_manager
+
+            chat_stream = await get_stream_manager().get_or_create_stream(
+                stream_id=self.stream_id
+            )
+        state = TurnState(
+            stream_id=self.stream_id,
+            unread_texts="",
+            deduper=self._build_deduper(config),
+            task_report=build_task_report_prompt(events),
+        )
+        state.input_confirmed = True
+        # 汇报轮没有真实消息，DECIDE 阶段的硬规则会判 SILENT；
+        # 因此不走完整管线，直接执行 ACT 阶段完成汇报。
+        try:
+            await self._stage_act(config, chat_stream, state, [], claim=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"[{self.stream_id[:8]}] 任务汇报轮失败：{exc}")
+        return Wait(time=DEFAULT_TURN_RETRY_SECONDS)
 
     async def _release_claim_safely(
         self,
@@ -569,6 +667,10 @@ class _AgenticChatterBase(BaseChatter):
             trigger_message=unread_msgs[-1] if unread_msgs else None,
             result_schema=template.result_schema,
             validation_steps=template.validation_steps,
+            deliver_final_text=False,
+            report_events=bool(
+                getattr(getattr(config, "tasks", None), "report_task_events", True)
+            ),
         )
         return task_request, _build_task_store(config)
 
@@ -2248,6 +2350,8 @@ class _AgenticChatterBase(BaseChatter):
             extra_parts.append(f"当前话题：{state.perceived_topic}")
         if state.plan_note:
             extra_parts.append(f"你刚才的打算：{state.plan_note}")
+        if state.task_report:
+            extra_parts.append(state.task_report)
 
         return await (
             template

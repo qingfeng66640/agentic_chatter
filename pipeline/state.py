@@ -85,6 +85,7 @@ class TurnState:
     termination: LoopDecision | None = None
     perceived_topic: str = ""
     plan_note: str = ""
+    task_report: str = ""
     decision: ReplyDecision | None = None
     failed: bool = False
     error: str = ""

@@ -41,6 +41,7 @@ class TaskRequest:
     collaboration_concurrency: int = 2
     collaboration_limit: int | None = None
     deliver_final_text: bool = True
+    report_events: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +178,10 @@ class TaskExecutor:
             return True
 
         return matches(document, schema)
+
+    async def send_notice(self, text: str) -> str:
+        """向聊天流发送任务通知文本（公有入口，供 coordinator 使用）。"""
+        return await self._send_final_text(text)
 
     async def _send_final_text(self, text: str) -> str:
         """发送清理后的最终文本。"""

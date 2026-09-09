@@ -38,7 +38,7 @@ class _StatusExecutor:
         self.runtime.start()
         self.sent: list[str] = []
 
-    async def _send_final_text(self, text: str) -> str:
+    async def send_notice(self, text: str) -> str:
         self.sent.append(text)
         return text
 
