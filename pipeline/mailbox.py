@@ -90,16 +90,6 @@ class StreamMailbox:
             self._consecutive_interruptions += 1
             return self._consecutive_interruptions
 
-    async def reset_interruptions(self) -> None:
-        """重置当前 stream 的连续输入中断次数。"""
-        async with self._lock:
-            self._consecutive_interruptions = 0
-
-    async def has_pending_key(self, key: str) -> bool:
-        """判断指定消息键是否仍在 pending。"""
-        async with self._lock:
-            return key in self._pending
-
     async def pending_count(self) -> int:
         """返回当前 pending 消息数量。"""
         async with self._lock:

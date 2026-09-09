@@ -1273,12 +1273,6 @@ class _AgenticChatterBase(BaseChatter):
             )
             if not iteration_decision.should_continue:
                 state.termination = iteration_decision
-                if stop_minutes is not None:
-                    state.stop_requested = True
-                    state.stop_minutes = stop_minutes
-                elif end_seconds is not None:
-                    state.end_turn_requested = True
-                    state.end_turn_seconds = end_seconds
                 logger.info(
                     f"[{self.stream_id[:8]}] 行动自动结束 event=act_auto_end "
                     f"终止原因={iteration_decision.reason} "

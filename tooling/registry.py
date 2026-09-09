@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass, field
-from typing import Any
 
 # 折叠工具按签名的 plugin_name 分类时，单个分类展示的最大工具数
 MAX_TOOLS_PER_CATEGORY = 60
@@ -225,22 +224,3 @@ def build_encouragement_prompt() -> str:
         "工具调用会由 Agent 按照依赖关系排序、排队和调度。若后一个工具需要前一个工具的真实结果、生成的 ID、查询内容或执行状态，先调用前置工具，等待 Tool Result 后再继续，不要在同一轮预先发出后一个调用。\n"
         "互相独立且没有顺序要求的工具可以在同一轮组合调用；只有工具结果带来新信息时才补充正文。"
     )
-
-
-def to_schema_safe(component_cls: type) -> dict[str, Any] | None:
-    """安全地生成组件 schema。
-
-    Args:
-        component_cls: 组件类。
-
-    Returns:
-        dict[str, Any] | None: schema 字典；生成失败时返回 None。
-    """
-    getter = getattr(component_cls, "to_schema", None)
-    if not callable(getter):
-        return None
-    try:
-        schema = getter()
-    except Exception:
-        return None
-    return schema if isinstance(schema, dict) else None

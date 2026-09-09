@@ -325,22 +325,6 @@ class TaskRuntimeManager:
             None,
         )
 
-    def list_active(self) -> tuple[TaskRuntime, ...]:
-        """列出活动或暂停任务。"""
-        return tuple(
-            runtime
-            for runtime in self._tasks.values()
-            if runtime.is_active() or runtime.state.status == TaskStatus.PAUSED
-        )
-
-    def persist(self, task_id: str) -> bool:
-        """持久化指定任务。"""
-        runtime = self.get(task_id)
-        if runtime is None or self._store is None:
-            return False
-        self._store.save(runtime)
-        return True
-
     def remove(self, task_id: str) -> bool:
         """移除任务。"""
         return self._tasks.pop(task_id, None) is not None

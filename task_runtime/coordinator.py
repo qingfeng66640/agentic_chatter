@@ -172,12 +172,9 @@ async def route_message(task_id: str, text: str) -> bool:
     if message.kind == TaskMessageKind.CONTROL and message.text == "resume" and not active.task.done():
         await active.executor.send_command(TaskCommand("resume"))
         return True
-    await active.executor.send_command(
-        TaskCommand(
-            message.text if message.kind == TaskMessageKind.CONTROL else "input",
-            "" if message.kind == TaskMessageKind.CONTROL else message.text,
-        )
-    )
+    # 运行至此只可能是 INPUT：status/pause/cancel 已在前置分支拦截，
+    # resume 的两种状态（done/not done）也已被上面两段覆盖。
+    await active.executor.send_command(TaskCommand("input", message.text))
     return True
 
 

@@ -82,10 +82,6 @@ class TurnState:
     post_speech_iterations: int = 0
     tool_calls: list[str] = field(default_factory=list)
     tool_ledger: list[ToolExecutionRecord] = field(default_factory=list)
-    end_turn_requested: bool = False
-    end_turn_seconds: float = 0.0
-    stop_requested: bool = False
-    stop_minutes: float = 0.0
     termination: LoopDecision | None = None
     perceived_topic: str = ""
     plan_note: str = ""
@@ -95,20 +91,18 @@ class TurnState:
     extras: dict[str, Any] = field(default_factory=dict)
 
     def to_outcome(self) -> TurnOutcome:
-        """将当前状态收敛为一轮的最终结果。"""
+        """将当前状态收敛为一轮的最终结果。
+
+        终止裁决（含等待/停止时长）只来自 termination；
+        should_stop 语义为「本轮以停止收尾而非等待下一轮输入」。
+        """
         decision = self.termination
-        should_stop = self.stop_requested
-        stop_seconds = max(0.0, self.stop_minutes * 60.0)
-        wait_seconds = self.end_turn_seconds if self.end_turn_seconds > 0 else None
-        if decision is not None:
-            should_stop = decision.stop_seconds > 0
-            stop_seconds = decision.stop_seconds
-            wait_seconds = decision.wait_seconds
+        should_stop = decision is not None and decision.stop_seconds > 0
         return TurnOutcome(
             should_wait=not should_stop,
-            wait_seconds=wait_seconds,
+            wait_seconds=decision.wait_seconds if decision is not None else None,
             should_stop=should_stop,
-            stop_seconds=stop_seconds,
+            stop_seconds=decision.stop_seconds if decision is not None else 0.0,
             spoke=self.spoke,
             iterations=self.iterations,
             tool_calls=list(self.tool_calls),

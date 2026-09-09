@@ -39,7 +39,7 @@ from ..pipeline.stages import (
     STAGE_REFLECT,
     resolve_stage_order,
 )
-from ..pipeline.state import TerminationReason, TurnState
+from ..pipeline.state import LoopDecision, TerminationReason, TurnState
 
 
 @dataclass
@@ -421,12 +421,22 @@ def test_base_loop_does_not_stop_only_because_state_spoke() -> None:
 
 
 def test_loop_stops_on_end_turn() -> None:
-    state = TurnState(stream_id="s", end_turn_requested=True)
+    state = TurnState(
+        stream_id="s",
+        termination=LoopDecision(
+            should_continue=False, reason=TerminationReason.END_TURN_REQUESTED
+        ),
+    )
     assert not should_continue_loop(state, max_iterations=6)
 
 
 def test_loop_stops_on_stop_request() -> None:
-    state = TurnState(stream_id="s", stop_requested=True)
+    state = TurnState(
+        stream_id="s",
+        termination=LoopDecision(
+            should_continue=False, reason=TerminationReason.STOP_REQUESTED
+        ),
+    )
     assert not should_continue_loop(state, max_iterations=6)
 
 
@@ -619,7 +629,14 @@ def test_outcome_defaults_to_wait() -> None:
 
 
 def test_outcome_reflects_stop_request() -> None:
-    state = TurnState(stream_id="s", stop_requested=True, stop_minutes=10)
+    state = TurnState(
+        stream_id="s",
+        termination=LoopDecision(
+            should_continue=False,
+            reason=TerminationReason.STOP_REQUESTED,
+            stop_seconds=600.0,
+        ),
+    )
     outcome = state.to_outcome()
 
     assert outcome.should_stop
@@ -627,7 +644,14 @@ def test_outcome_reflects_stop_request() -> None:
 
 
 def test_outcome_carries_wait_seconds() -> None:
-    state = TurnState(stream_id="s", end_turn_requested=True, end_turn_seconds=45)
+    state = TurnState(
+        stream_id="s",
+        termination=LoopDecision(
+            should_continue=False,
+            reason=TerminationReason.END_TURN_REQUESTED,
+            wait_seconds=45.0,
+        ),
+    )
     assert state.to_outcome().wait_seconds == 45.0
 
 
@@ -1238,8 +1262,8 @@ async def test_stage_act_consumes_stream_before_reading_calls() -> None:
 
     assert response.consumed
     assert response.message == "流式文本"
-    assert state.end_turn_requested
-    assert state.end_turn_seconds == 30.0
+    assert state.termination is not None
+    assert state.termination.wait_seconds == 30.0
     chatter._execute_calls.assert_not_awaited()
     validate_payload_sequence(response.payloads, allow_incomplete_tail=False)
 
@@ -1389,5 +1413,4 @@ async def test_stage_act_closes_calls_before_interrupting() -> None:
     chatter._execute_calls.assert_not_awaited()
     assert state.failed
     assert state.error == "生成期间收到新消息，重新规划"
-    assert not state.end_turn_requested
-    assert not state.stop_requested
+    assert state.termination is None

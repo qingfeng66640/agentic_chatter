@@ -36,10 +36,8 @@ def should_get_distracted(
     if not enabled or is_direct:
         return False
 
+    # probability 钳制到 [0,1] 后无需再判 0：random() < 0 恒为 False
     chance = max(0.0, min(1.0, float(probability)))
-    if chance <= 0:
-        return False
-
     generator = rng or random
     return generator.random() < chance
 

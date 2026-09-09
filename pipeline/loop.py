@@ -112,7 +112,7 @@ def classify_calls(calls: list[Any]) -> tuple[list[Any], float | None, float | N
 
 def should_continue_loop(state: TurnState, max_iterations: int) -> bool:
     """判断 agent 循环是否应当继续下一次迭代。"""
-    if state.termination is not None or state.end_turn_requested or state.stop_requested:
+    if state.termination is not None:
         return False
     if max_iterations > 0 and state.iterations >= max_iterations:
         state.termination = LoopDecision(

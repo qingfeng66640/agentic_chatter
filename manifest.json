@@ -63,6 +63,16 @@
             "component_type": "action",
             "component_name": "stop_conversation",
             "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "dispatch_task",
+            "dependencies": []
+        },
+        {
+            "component_type": "service",
+            "component_name": "tasks",
+            "dependencies": []
         }
     ],
     "entry_point": "plugin.py",
