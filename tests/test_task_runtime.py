@@ -704,3 +704,68 @@ def test_validation_requires_matching_tool_evidence() -> None:
         executor._run_validations(("运行相关测试",), ("pytest",))
     )
     assert evidence == ("已验证：运行相关测试",)
+
+
+def test_schema_prefixed_call_name_passes_policy() -> None:
+    """schema 名（tool-xxx）经前缀还原后应通过白名单，与注入侧判定一致。"""
+    from ..task_runtime.executor import TaskExecutor, _strip_schema_prefix
+    from ..task_runtime.policy import ToolPermission
+
+    assert _strip_schema_prefix("tool-explore_tools") == "explore_tools"
+    assert _strip_schema_prefix("action-send_emoji") == "send_emoji"
+    assert _strip_schema_prefix("plain_name") == "plain_name"
+
+    executor = TaskExecutor.__new__(TaskExecutor)
+    executor.runtime = TaskRuntime(
+        TaskState(
+            stream_id="s",
+            user_goal="权限",
+            allowed_tools=("read*", "search*", "list*", "query*", "test*", "explore*"),
+        )
+    )
+    call = ToolCall(id="1", name="tool-explore_tools", args={})
+    normal, denied, confirmation = executor._classify_calls([call])
+    assert len(normal) == 1
+    assert denied == []
+    assert confirmation == []
+
+    # 白名单外仍拒绝；黑名单优先级最高
+    outside = ToolCall(id="2", name="tool-send_email", args={})
+    _, denied, _ = executor._classify_calls([outside])
+    assert denied == ["tool-send_email"]
+    assert executor.runtime.policy.permission("delete_file") == ToolPermission.DENY
+
+
+def test_visible_tools_injects_schema_allowed_tools() -> None:
+    """注入侧应放行白名单内组件（explore_tools 命中 explore*）。"""
+    from ..task_runtime.executor import TaskExecutor
+
+    class _FakeExplore:
+        name = "explore_tools"
+
+        @classmethod
+        def get_signature(cls) -> str | None:
+            return None
+
+        @classmethod
+        def to_schema(cls) -> dict[str, object]:
+            return {"type": "function", "function": {"name": "tool-explore_tools"}}
+
+    class _Registry:
+        _tools = {"tool-explore_tools": _FakeExplore}
+
+    runtime = TaskRuntime(
+        TaskState(
+            stream_id="s",
+            user_goal="注入",
+            allowed_tools=("read*", "explore*"),
+        )
+    )
+    executor = TaskExecutor.__new__(TaskExecutor)
+    executor.runtime = runtime
+
+    from src.kernel.llm import ToolRegistry
+
+    filtered = executor._visible_tools(_Registry())
+    assert isinstance(filtered, ToolRegistry)
+    assert filtered.get("tool-explore_tools") is _FakeExplore

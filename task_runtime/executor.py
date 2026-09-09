@@ -25,6 +25,18 @@ RESUMABLE_TASK_STATUSES = (
     TaskStatus.FAILED,
 )
 
+# LLM schema 名的组件类型前缀（parse_function_signature 生成 "tool-xxx" 等）；
+# 权限判定前先剥掉前缀还原为组件名，避免注入侧与执行侧判定不一致。
+_SCHEMA_NAME_PREFIXES = ("tool-", "action-", "agent-")
+
+
+def _strip_schema_prefix(name: str) -> str:
+    """剥掉 schema 调用名的组件类型前缀。"""
+    for prefix in _SCHEMA_NAME_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
 
 @dataclass(frozen=True, slots=True)
 class TaskRequest:
@@ -102,9 +114,11 @@ class TaskExecutor:
         for component_cls in classes:
             getter = getattr(component_cls, "get_signature", None)
             signature = str(getter() or "") if callable(getter) else ""
+            component_name = str(getattr(component_cls, "name", "") or "")
             names = (
                 signature,
-                str(getattr(component_cls, "name", "") or ""),
+                component_name,
+                _strip_schema_prefix(f"tool-{component_name}") if component_name else "",
                 str(getattr(component_cls, "tool_name", "") or ""),
                 str(getattr(component_cls, "action_name", "") or ""),
                 str(getattr(component_cls, "agent_name", "") or ""),
@@ -361,7 +375,9 @@ class TaskExecutor:
             if name in (END_TURN_CALL, STOP_CALL):
                 continue
             signature = build_call_key(name, getattr(call, "args", {}))
-            permission = self.runtime.classify_tool(name, signature)
+            # call.name 是带类型前缀的 schema 名（如 tool-read_file），
+            # 需还原为组件名再过权限策略，与注入侧判定保持一致。
+            permission = self.runtime.classify_tool(_strip_schema_prefix(name), signature)
             if permission == ToolPermission.ALLOW:
                 normal_calls.append(call)
             elif permission == ToolPermission.CONFIRM:
