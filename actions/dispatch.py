@@ -83,7 +83,8 @@ class DispatchTaskAction(BaseAction):
         "适合需要多轮工具调用的调研、代码分析、代码修改、内容整理等任务。"
         "调用后当前行动会等待 sub-agent 完成（受任务预算时限约束），"
         "期间无法响应新消息；拿到结果后由你向用户转述。"
-        "同一对话同一时间只允许一个任务；不要派发简单的一次性查询。"
+        "同一对话任务数量有上限（见配置 max_concurrent_tasks）；"
+        "不要派发简单的一次性查询。"
     )
     primary_action = False
     associated_types = ["text"]
@@ -124,11 +125,15 @@ class DispatchTaskAction(BaseAction):
             return False, "无法确定当前聊天流"
 
         manager = get_task_runtime_manager()
-        active = manager.get_active(stream_id)
-        if active is not None:
+        cap = max(
+            1,
+            int(getattr(tasks_config, "max_concurrent_tasks", 2) or 2),
+        ) if tasks_config is not None else 2
+        active_tasks = manager.get_active_tasks(stream_id)
+        if len(active_tasks) >= cap:
             return False, (
-                "当前对话已有活动任务，请等待其结束，"
-                "或让用户发送『继续任务/取消任务』"
+                f"当前对话已有 {len(active_tasks)} 个任务在运行（上限 {cap}），"
+                "请等待完成或让用户取消；可调用 tool-manage_tasks 查看"
             )
 
         task_type_enum = _resolve_task_type(task_type)

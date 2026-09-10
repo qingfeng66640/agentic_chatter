@@ -58,15 +58,22 @@ async def test_execute_rejects_when_disabled(monkeypatch) -> None:
 async def test_execute_rejects_conflicting_active_task() -> None:
     action, _plugin = _make_action()
     manager = get_task_runtime_manager()
-    conflict = TaskRuntime(TaskState(stream_id="dispatch-stream", user_goal="已有任务"))
-    conflict.start()
-    manager.register(conflict)
+    conflicts = []
     try:
+        # 默认并发上限为 2，占满后 dispatch 拒绝新建
+        for index in range(2):
+            conflict = TaskRuntime(
+                TaskState(stream_id="dispatch-stream", user_goal=f"已有任务{index}")
+            )
+            conflict.start()
+            manager.register(conflict)
+            conflicts.append(conflict)
         ok, text = await action.execute(objective="新任务")
         assert ok is False
-        assert "已有活动任务" in text
+        assert "任务在运行" in text
     finally:
-        manager.remove(conflict.state.task_id)
+        for conflict in conflicts:
+            manager.remove(conflict.state.task_id)
 
 
 @pytest.mark.asyncio

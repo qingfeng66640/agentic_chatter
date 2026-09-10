@@ -91,8 +91,13 @@ async def _submit_task(
     from .chatter import AgenticChatter
 
     manager = get_task_runtime_manager()
-    if manager.get_active(stream_id) is not None:
-        logger.warning("提交任务失败：该聊天流已有活动任务")
+    tasks_config = getattr(getattr(self, "plugin", None), "config", None)
+    cap = max(
+        1,
+        int(getattr(getattr(tasks_config, "tasks", None), "max_concurrent_tasks", 2) or 2),
+    )
+    if len(manager.get_active_tasks(stream_id)) >= cap:
+        logger.warning(f"提交任务失败：该聊天流活动任务数已达上限（{cap}）")
         return None
     budget_kwargs = dict(budget or {})
     try:
