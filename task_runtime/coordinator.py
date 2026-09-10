@@ -13,9 +13,13 @@ from .control import TaskMessageKind, classify_task_message
 from .executor import TaskCommand, TaskExecutor, TaskRequest
 from .models import TaskResult, TaskStatus
 from .persistence import TaskStateStore
-from .runtime import TaskRuntime
+from .runtime import TaskRuntime, get_task_runtime_manager
 
 logger = get_logger("agentic_chatter")
+
+# runner 内 wait_for 相对任务预算的额外宽限秒数；WatchDog 跳过 daemon 任务，
+# 超时兜底必须在插件内执行
+_RUNNER_TIMEOUT_GRACE_SECONDS = 30.0
 
 # 可恢复执行的任务状态：这些状态的任务可由 resume/start_task 继续推进
 RESUMABLE_TASK_STATUSES = (
@@ -161,6 +165,34 @@ async def _notify_completion(
     )
 
 
+async def _run_guarded(
+    executor: TaskExecutor,
+    runtime: TaskRuntime,
+    request: TaskRequest,
+    *,
+    timeout: float,
+) -> TaskResult:
+    """带超时兜底执行任务：悬挂时暂停任务使其可恢复。"""
+    try:
+        return await asyncio.wait_for(executor.run(request), timeout=timeout)
+    except asyncio.TimeoutError:
+        timeout_text = "任务执行超时"
+        if runtime.is_active():
+            result = runtime.finish(
+                TaskStatus.PAUSED, "任务执行超时已暂停", error=timeout_text
+            )
+        else:
+            result = runtime.state.result or TaskResult(
+                runtime.state.status,
+                timeout_text,
+            )
+        try:
+            await executor.send_notice("任务执行超时已暂停，可发送「继续任务」恢复")
+        except Exception:  # noqa: BLE001 - 通知失败不影响状态落点
+            pass
+        return result
+
+
 def start_task(
     chatter: Any,
     runtime: TaskRuntime,
@@ -184,7 +216,16 @@ def start_task(
         if request.result_schema is not None:
             runtime.state.metadata["result_schema"] = request.result_schema
         try:
-            result = await executor.run(request)
+            result = await _run_guarded(
+                executor,
+                runtime,
+                request,
+                timeout=max(
+                    1.0,
+                    runtime.state.budget.timeout_seconds
+                    + _RUNNER_TIMEOUT_GRACE_SECONDS,
+                ),
+            )
             await _notify_completion(chatter, runtime, request, result)
         finally:
             if store is not None:
@@ -193,6 +234,8 @@ def start_task(
             if current is not None and current.executor is executor:
                 if runtime.state.status not in RESUMABLE_TASK_STATUSES:
                     _ACTIVE.pop(runtime.state.task_id, None)
+                if runtime.state.status in (TaskStatus.SUCCEEDED, TaskStatus.CANCELLED):
+                    get_task_runtime_manager().remove(runtime.state.task_id)
 
     task_info = get_task_manager().create_task(
         runner(),
@@ -222,6 +265,36 @@ def _resume_and_restart(active: ActiveTask) -> None:
     )
 
 
+async def _cancel_active(active: ActiveTask, *, notify: bool = True) -> TaskResult:
+    """取消任务并清理后台索引，覆盖运行/暂停/等待/占位四种状态。"""
+    runtime = active.executor.runtime
+    result = runtime.cancel()
+    if not active.task.done():
+        get_task_manager().cancel_task(active.task_info_id)
+    else:
+        # _IdlePlaceholder：无 runner finally，必须显式清理与落盘
+        _ACTIVE.pop(runtime.state.task_id, None)
+        get_task_runtime_manager().remove(runtime.state.task_id)
+        if active.store is not None:
+            active.store.save(runtime)
+    if notify:
+        goal = str(runtime.state.user_goal or "").strip()[:30] or "未命名任务"
+        await active.executor.send_notice(f"任务「{goal}」已取消")
+    return result
+
+
+async def cancel_task_runtime(runtime: TaskRuntime, *, notify: bool = False) -> str:
+    """取消任务运行时的公开入口，返回确认文本（不主动发通知）。"""
+    active = _ACTIVE.get(runtime.state.task_id)
+    if active is not None:
+        await _cancel_active(active, notify=notify)
+    else:
+        runtime.cancel()
+        get_task_runtime_manager().remove(runtime.state.task_id)
+    goal = str(runtime.state.user_goal or "").strip()[:30] or "未命名任务"
+    return f"任务「{goal}」已取消"
+
+
 async def route_message(task_id: str, text: str) -> bool:
     """将任务流中的新消息分流到后台执行器，必要时恢复执行。"""
     active = _ACTIVE.get(task_id)
@@ -240,11 +313,14 @@ async def route_message(task_id: str, text: str) -> bool:
         await active.executor.send_notice(summary)
         return True
     if message.kind == TaskMessageKind.CONTROL and message.text in ("pause", "cancel"):
-        if active.executor.runtime.state.status == TaskStatus.RUNNING and not active.task.done():
-            if message.text == "pause":
-                active.executor.runtime.pause()
-            else:
-                active.executor.runtime.cancel()
+        if message.text == "cancel":
+            # cancel 无条件执行：RUNNING/PAUSED/WAITING_USER/占位任务均可取消
+            await _cancel_active(active)
+        elif (
+            active.executor.runtime.state.status == TaskStatus.RUNNING
+            and not active.task.done()
+        ):
+            active.executor.runtime.pause()
             get_task_manager().cancel_task(active.task_info_id)
         return True
     if active.task.done() and message.kind == TaskMessageKind.INPUT:
