@@ -129,6 +129,13 @@ from .task_runtime import (
     get_task_runtime_manager,
     get_task_templates,
 )
+from .task_runtime.control import (
+    TaskMessageKind,
+    classify_task_message,
+    describe_tasks,
+    match_task_ref,
+    resolve_control_target,
+)
 from .task_runtime.coordinator import (
     drain_completed_events,
     has_completed_events,
@@ -215,6 +222,10 @@ def _restore_persisted_tasks(
     manager = get_task_runtime_manager()
     task_store = _build_task_store(config)
     manager.configure_store(task_store)
+    if config is not None:
+        manager.configure_limits(
+            max(1, int(getattr(config.tasks, "max_concurrent_tasks", 2)))
+        )
     if task_store is None:
         return manager
     for restored in task_store.load_active():
@@ -483,21 +494,22 @@ class _AgenticChatterBase(BaseChatter):
                         config=config,
                     )
 
-                    active_runtime = manager.get_active(self.stream_id)
+                    active_tasks = manager.get_active_tasks(self.stream_id)
                     task_runtime: TaskRuntime | None = None
                     task_type: TaskType | None = None
-                    if active_runtime is not None and await self._route_task_message(
-                        active_runtime, unread_msgs, unread_text
-                    ):
-                        task_runtime = active_runtime
-                    if task_runtime is None:
+                    consumed = False
+                    if active_tasks:
+                        task_runtime, consumed = await self._route_task_message(
+                            active_tasks, unread_msgs, unread_text
+                        )
+                    if task_runtime is None and not consumed:
                         task_type = _detect_task_type(unread_text)
                         if task_type is not None and _is_task_enabled(config):
-                            task_runtime = self._create_task_runtime(
+                            task_runtime = await self._create_task_runtime(
                                 config, unread_text, task_type, generation
                             )
 
-                    if task_runtime is not None:
+                    if task_runtime is not None or consumed:
                         turn_result = await self._commit_task_turn(
                             config,
                             mailbox,
@@ -616,36 +628,94 @@ class _AgenticChatterBase(BaseChatter):
 
     async def _route_task_message(
         self,
-        runtime: TaskRuntime,
+        tasks: list[TaskRuntime],
         unread_msgs: list["Message"],
         unread_text: str,
-    ) -> bool:
-        """把本轮消息依次交给活动任务；任一条被接受即视为已路由。"""
-        any_routed = False
-        for message in unread_msgs:
-            any_routed = await route_message(
-                runtime.state.task_id,
-                str(getattr(message, "content", "") or unread_text),
-            ) or any_routed
-        return any_routed
+    ) -> tuple[TaskRuntime | None, bool]:
+        """把本轮消息按引用/控制/输入分流到活动任务。
 
-    def _create_task_runtime(
+        Returns:
+            tuple[TaskRuntime | None, bool]: (本轮启动交互的任务, 是否有消息被任务消费)。
+        """
+        routed_task: TaskRuntime | None = None
+        consumed = False
+        for message in unread_msgs:
+            text = str(getattr(message, "content", "") or unread_text)
+            # 1) 序号 / 任务ID前缀 精确路由
+            ref_task = match_task_ref(text, tasks)
+            if ref_task is not None:
+                if await route_message(ref_task.state.task_id, text):
+                    routed_task = ref_task
+                    consumed = True
+                continue
+
+            classified = classify_task_message(text)
+            if classified.kind == TaskMessageKind.CHAT:
+                continue
+            if classified.kind == TaskMessageKind.CONTROL:
+                command = classified.text
+                target, notice = resolve_control_target(command, text, tasks)
+                if notice:
+                    # 多任务消歧：提示用户带序号或任务ID前缀
+                    try:
+                        await send_api.send_text(content=notice, stream_id=self.stream_id)
+                    except Exception as exc:
+                        logger.warning(f"[{self.stream_id[:8]}] 任务消歧提示发送失败：{exc}")
+                    consumed = True
+                    continue
+                if command == "status":
+                    if len(tasks) == 1:
+                        if await route_message(tasks[0].state.task_id, text):
+                            routed_task = tasks[0]
+                            consumed = True
+                    else:
+                        try:
+                            await send_api.send_text(
+                                content=describe_tasks(tasks), stream_id=self.stream_id
+                            )
+                        except Exception as exc:
+                            logger.warning(f"[{self.stream_id[:8]}] 任务状态发送失败：{exc}")
+                        consumed = True
+                    continue
+                if target is not None and await route_message(target.state.task_id, text):
+                    routed_task = target
+                    consumed = True
+                continue
+
+            # 2) INPUT（补充任务/补充资料前缀）：裸输入时最新创建任务优先
+            target = ref_task or tasks[-1]
+            if await route_message(target.state.task_id, text):
+                routed_task = target
+                consumed = True
+        return routed_task, consumed
+
+    async def _create_task_runtime(
         self,
         config: AgenticChatterConfig,
         unread_text: str,
         task_type: TaskType,
         generation: int,
-    ) -> TaskRuntime:
-        """按检测到的任务类型创建并启动后台任务。"""
-        task_runtime = get_task_runtime_manager().create(
-            self.stream_id,
-            unread_text,
-            task_type=task_type,
-            parent_turn_id=f"{self.stream_id}:{generation}",
-            allowed_tools=tuple(getattr(config.tasks, "default_allowed_tools", ()) or ()) or None,
-            budget=_build_task_budget(config),
-            denied_tools=tuple(getattr(config.tasks, "denied_tools", ()) or ()),
-        )
+    ) -> TaskRuntime | None:
+        """按检测到的任务类型创建并启动后台任务；达到并发上限时提示并返回 None。"""
+        try:
+            task_runtime = get_task_runtime_manager().create(
+                self.stream_id,
+                unread_text,
+                task_type=task_type,
+                parent_turn_id=f"{self.stream_id}:{generation}",
+                allowed_tools=tuple(getattr(config.tasks, "default_allowed_tools", ()) or ()) or None,
+                budget=_build_task_budget(config),
+                denied_tools=tuple(getattr(config.tasks, "denied_tools", ()) or ()),
+            )
+        except ValueError as exc:
+            logger.warning(f"[{self.stream_id[:8]}] 任务创建失败：{exc}")
+            try:
+                await send_api.send_text(
+                    content=f"任务创建失败：{exc}", stream_id=self.stream_id
+                )
+            except Exception as notify_exc:
+                logger.warning(f"[{self.stream_id[:8]}] 任务创建失败提示发送失败：{notify_exc}")
+            return None
         task_runtime.start()
         logger.info(
             f"[{self.stream_id[:8]}] 已创建复杂任务 event=task_created "
@@ -679,7 +749,7 @@ class _AgenticChatterBase(BaseChatter):
         config: AgenticChatterConfig | None,
         mailbox: StreamMailbox,
         claim: TurnClaim,
-        task_runtime: TaskRuntime,
+        task_runtime: TaskRuntime | None,
         unread_msgs: list["Message"],
         unread_text: str,
         task_type: TaskType | None,
@@ -691,10 +761,10 @@ class _AgenticChatterBase(BaseChatter):
             config: 插件配置。
             mailbox: 当前流的 mailbox。
             claim: 本轮持有的 claim。
-            task_runtime: 活动或新建的任务运行时。
+            task_runtime: 活动或新建的任务运行时；消息仅被控制命令消费时为 None。
             unread_msgs: 本轮未读消息。
             unread_text: 已合并的消息文本。
-            task_type: 新建任务的类型；路由给已有任务时为 None。
+            task_type: 新建任务的类型；路由给已有任务或仅消费控制消息时为 None。
             generation: 当前回合代次。
 
         Returns:
@@ -702,7 +772,7 @@ class _AgenticChatterBase(BaseChatter):
         """
         task_request: TaskRequest | None = None
         task_store: TaskStateStore | None = None
-        if task_type is not None:
+        if task_type is not None and task_runtime is not None:
             task_request, task_store = self._build_task_request(
                 config, task_type, unread_text, unread_msgs
             )
@@ -713,16 +783,19 @@ class _AgenticChatterBase(BaseChatter):
                 f"event=task_claim_commit_failed 代次={generation}"
             )
             raise RuntimeError("任务 claim 提交失败")
-        if task_request is not None:
+        if task_request is not None and task_runtime is not None:
             start_task(self, task_runtime, task_request, task_store)
             logger.info(
                 f"[{self.stream_id[:8]}] 任务已转入后台 event=task_background_started "
                 f"任务ID={task_runtime.state.task_id}"
             )
+        task_label = (
+            task_runtime.state.task_id if task_runtime is not None else "无（控制消息）"
+        )
         logger.info(
             f"[{self.stream_id[:8]}] 任务消息已确认 event=task_turn_committed "
             f"代次={generation} 消息数={len(unread_msgs)} "
-            f"任务ID={task_runtime.state.task_id}"
+            f"任务ID={task_label}"
         )
         return Wait(time=DEFAULT_TURN_RETRY_SECONDS)
 
