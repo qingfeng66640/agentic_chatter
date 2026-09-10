@@ -5,6 +5,7 @@
 
 from .dedupe import CallDeduper, DedupeDecision, DedupeMode, build_call_key
 from .explore import ExploreToolsTool
+from .manage_tasks import ManageTasksTool
 from .registry import (
     ToolLayout,
     build_encouragement_prompt,
@@ -17,6 +18,7 @@ __all__ = [
     "DedupeDecision",
     "DedupeMode",
     "ExploreToolsTool",
+    "ManageTasksTool",
     "ToolLayout",
     "build_call_key",
     "build_encouragement_prompt",
