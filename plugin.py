@@ -32,7 +32,7 @@ from .prompts import (
     user_prompt,
 )
 from .service import PipelineService, TaskRuntimeService
-from .tooling import ExploreToolsTool
+from .tooling import ExploreToolsTool, ManageTasksTool
 
 logger = get_logger("agentic_chatter")
 
@@ -138,6 +138,15 @@ class AgenticChatterPlugin(BasePlugin):
 
         logger.info("agentic_chatter 插件已加载")
 
+        config = self.config
+        tasks_config = getattr(config, "tasks", None)
+        if tasks_config is not None:
+            from .task_runtime import get_task_runtime_manager
+
+            get_task_runtime_manager().configure_limits(
+                int(getattr(tasks_config, "max_concurrent_tasks", 2))
+            )
+
     async def on_plugin_unloaded(self) -> None:
         """插件卸载前的清理。"""
         logger.info("agentic_chatter 插件已卸载")
@@ -158,6 +167,7 @@ class AgenticChatterPlugin(BasePlugin):
             PipelineService,
             TaskRuntimeService,
             ExploreToolsTool,
+            ManageTasksTool,
             SayAction,
             DispatchTaskAction,
             EndTurnAction,

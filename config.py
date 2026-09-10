@@ -814,6 +814,14 @@ class AgenticChatterConfig(BaseConfig):
             label="允许呼出任务子代理",
             tag="ai",
         )
+        max_concurrent_tasks: int = Field(
+            default=2,
+            description="同一聊天流允许同时处于活动状态（运行/暂停/等待输入）的任务数上限",
+            label="任务并发上限",
+            ge=1,
+            le=8,
+            tag="performance",
+        )
         max_iterations: int = Field(
             default=12,
             description="单个复杂任务的最大执行迭代次数，不影响普通聊天回合",

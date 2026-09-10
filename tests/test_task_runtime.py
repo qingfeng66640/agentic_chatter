@@ -558,15 +558,20 @@ def test_message_classification_and_mailbox() -> None:
     asyncio.run(scenario())
 
 
-def test_manager_rejects_second_active_task() -> None:
+def test_manager_allows_concurrent_tasks_up_to_limit() -> None:
     manager = TaskRuntimeManager()
     first = manager.create("stream", "第一个", task_type=TaskType.RESEARCH)
     assert manager.get(first.state.task_id) is first
-    with pytest.raises(ValueError, match="已有活动任务"):
-        manager.create("stream", "第二个")
-    first.cancel()
     second = manager.create("stream", "第二个")
     assert second.state.task_id != first.state.task_id
+    with pytest.raises(ValueError, match="已达上限"):
+        manager.create("stream", "第三个")
+    first.cancel()
+    third = manager.create("stream", "第三个")
+    assert third.state.task_id != first.state.task_id
+    manager.configure_limits(1)
+    with pytest.raises(ValueError, match="已达上限"):
+        manager.create("stream", "第四个")
 
 
 def test_completed_task_cannot_be_cancelled() -> None:

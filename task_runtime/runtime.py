@@ -8,6 +8,15 @@ from .models import TaskBudget, TaskCheckpoint, TaskResult, TaskState, TaskStatu
 from .policy import ToolPermission, ToolPolicy
 from .templates import TaskTemplateRegistry, get_task_templates
 
+# 仍占用并发名额的任务状态；终态（SUCCEEDED/FAILED/CANCELLED）不阻塞新建
+ACTIVE_STATUSES = (
+    TaskStatus.CREATED,
+    TaskStatus.PLANNING,
+    TaskStatus.RUNNING,
+    TaskStatus.WAITING_USER,
+    TaskStatus.PAUSED,
+)
+
 
 class RuntimeStore(Protocol):
     """完整任务状态存储协议。"""
@@ -235,7 +244,7 @@ class TaskRuntime:
 
 
 class TaskRuntimeManager:
-    """按聊天流管理单个活动任务。"""
+    """按聊天流管理多个有容量上限的活动任务。"""
 
     def __init__(
         self,
@@ -245,8 +254,13 @@ class TaskRuntimeManager:
         """创建任务管理器。"""
         self._tasks: dict[str, TaskRuntime] = {}
         self._templates = templates or get_task_templates()
+        self._max_concurrent = 2
         self._store: RuntimeStore | None = None
         self.configure_store(store)
+
+    def configure_limits(self, max_concurrent: int) -> None:
+        """设置单流活动任务数上限。"""
+        self._max_concurrent = max(1, int(max_concurrent))
 
     def create(
         self,
@@ -259,10 +273,16 @@ class TaskRuntimeManager:
         budget: TaskBudget | None = None,
         denied_tools: tuple[str, ...] | None = None,
     ) -> TaskRuntime:
-        """为聊天流创建唯一活动任务。"""
-        active = self.get_active(stream_id)
-        if active is not None:
-            raise ValueError(f"聊天流已有活动任务：{active.state.task_id}")
+        """为聊天流创建活动任务，超过并发上限时拒绝。"""
+        active_tasks = self.get_active_tasks(stream_id)
+        if len(active_tasks) >= self._max_concurrent:
+            occupied = "、".join(
+                task.state.task_id[:8] for task in active_tasks
+            )
+            raise ValueError(
+                f"聊天流任务数已达上限（{self._max_concurrent}）：{occupied}，"
+                "可先取消或等待完成"
+            )
         template = self._templates.get(task_type)
         state = TaskState(
             stream_id=stream_id,
@@ -307,23 +327,22 @@ class TaskRuntimeManager:
         """按 ID 获取任务。"""
         return self._tasks.get(task_id)
 
-    def get_active(self, stream_id: str) -> TaskRuntime | None:
-        """获取聊天流的活动或可恢复任务。"""
-        active = (
-            TaskStatus.CREATED,
-            TaskStatus.PLANNING,
-            TaskStatus.RUNNING,
-            TaskStatus.WAITING_USER,
-            TaskStatus.PAUSED,
-        )
-        return next(
+    def get_active_tasks(self, stream_id: str) -> list[TaskRuntime]:
+        """获取聊天流的全部活动或可恢复任务，按创建时间升序。"""
+        return sorted(
             (
                 runtime
                 for runtime in self._tasks.values()
-                if runtime.state.stream_id == stream_id and runtime.state.status in active
+                if runtime.state.stream_id == stream_id
+                and runtime.state.status in ACTIVE_STATUSES
             ),
-            None,
+            key=lambda runtime: runtime.state.created_at,
         )
+
+    def get_active(self, stream_id: str) -> TaskRuntime | None:
+        """获取聊天流最新的活动或可恢复任务（兼容单任务语义）。"""
+        tasks = self.get_active_tasks(stream_id)
+        return tasks[-1] if tasks else None
 
     def remove(self, task_id: str) -> bool:
         """移除任务。"""
