@@ -1138,6 +1138,49 @@ async def test_stage_act_does_not_inject_blacklisted_explore_tool() -> None:
     assert tool_payload.content == []
 
 
+async def test_stage_act_only_offers_available_unblocked_skill_tools(tmp_path) -> None:
+    """仅在工具可用且未被黑名单禁止时向 ACT 暴露技能。"""
+    from ..tooling import skills
+    from ..tooling.skills import ReadSkillReferenceTool, ReadSkillTool
+
+    root = tmp_path / "demo"
+    root.mkdir()
+    (root / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: 阅读资料\n---\n", encoding="utf-8"
+    )
+    skills.refresh_skills([str(tmp_path)])
+    try:
+        for enabled, blacklist, usables, expected in (
+            (True, [], [ReadSkillTool, ReadSkillReferenceTool], True),
+            (True, ["agentic_chatter:tool:read_skill"], [ReadSkillTool], False),
+            (True, [], [], False),
+            (False, [], [ReadSkillTool], False),
+        ):
+            config = _ToolConfig()
+            config.tools.blacklist = blacklist
+            config.skills = SimpleNamespace(enabled=enabled)
+            config.tools.enable_explore_tools = False
+            response = _PayloadResponse([], [])
+            request = _RequestReturningResponse(response)
+            chatter = AgenticChatter(stream_id="skill-visibility", plugin=object())
+            chatter.get_llm_usables = AsyncMock(return_value=usables)
+            chatter.modify_llm_usables = AsyncMock(return_value=usables)
+            chatter._build_layout = lambda _config, _usables: SimpleNamespace(
+                exposed=[], collapsed_categories={}, collapsed_classes={}
+            )
+            chatter._build_system_prompt = AsyncMock(return_value="system")
+            chatter._build_user_prompt = AsyncMock(return_value="user")
+            chatter.create_request = lambda **_kwargs: request
+            chatter._has_new_unreads = AsyncMock(return_value=False)
+            chatter._deliver_message = AsyncMock(return_value=(False, False))
+            await chatter._stage_act(config, object(), TurnState(stream_id="skill-visibility"), [])
+            layout = chatter._build_system_prompt.await_args.args[2]
+            assert (ReadSkillTool in layout.exposed) is expected
+            chatter._build_system_prompt.reset_mock()
+    finally:
+        skills.clear_skills()
+
+
 async def test_stage_act_filters_blacklisted_expanded_tools(monkeypatch) -> None:
     """展开结果在注册前仍必须遵守黑名单。"""
     config = _ToolConfig()

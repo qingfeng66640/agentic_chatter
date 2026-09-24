@@ -144,6 +144,7 @@ from .task_runtime.coordinator import (
     route_message,
     start_task,
 )
+from .tooling.skills import ReadSkillReferenceTool, ReadSkillTool, clear_scope, skill_catalog
 from .tooling.provider_error_record import (
     append_provider_error_request_record,
     build_provider_error_request_record,
@@ -1282,12 +1283,22 @@ class _AgenticChatterBase(BaseChatter):
             unread_msgs: 本轮未读消息。
             claim: mailbox 固定的本轮输入；兼容直接调用时可为空。
         """
+        clear_scope(self.stream_id)
         usables = await self.get_llm_usables()
         usables = await self.modify_llm_usables(usables)  # type: ignore[arg-type]
 
         layout = self._build_layout(config, usables)
         blacklist = [] if config is None else list(config.tools.blacklist)
         layout.exposed = [usable for usable in layout.exposed if usable is not ExploreToolsTool]
+        skill_tools = (ReadSkillTool, ReadSkillReferenceTool)
+        layout.exposed = [usable for usable in layout.exposed if usable not in skill_tools]
+        if (config is None or getattr(getattr(config, "skills", None), "enabled", True)) and skill_catalog():
+            layout.exposed[:0] = [
+                usable for usable in skill_tools
+                if usable in usables
+                and not is_blacklisted_component(usable, blacklist)
+                and not signature_matches(f"agentic_chatter:tool:{usable.tool_name}", blacklist)
+            ]
         explore_enabled = config is None or bool(config.tools.enable_explore_tools)
         explore_blacklisted = is_blacklisted_component(ExploreToolsTool, blacklist) or signature_matches(
             "agentic_chatter:tool:explore_tools", blacklist
@@ -1336,6 +1347,7 @@ class _AgenticChatterBase(BaseChatter):
                 state.error = str(exc)
                 logger.error(f"[{self.stream_id[:8]}] 语言模型调用失败：{exc}")
                 clear_stream_catalog(self.stream_id)
+                clear_scope(self.stream_id)
                 return
 
             calls = list(getattr(response, "call_list", None) or [])
@@ -1349,6 +1361,7 @@ class _AgenticChatterBase(BaseChatter):
                 state.failed = True
                 state.error = "生成期间收到新消息，重新规划"
                 clear_stream_catalog(self.stream_id)
+                clear_scope(self.stream_id)
                 return
 
             had_spoken_before_iteration = state.spoke
@@ -1455,6 +1468,7 @@ class _AgenticChatterBase(BaseChatter):
                     f"终止说明={_label(_TERMINATION_LABELS, iteration_decision.reason)}"
                 )
                 clear_stream_catalog(self.stream_id)
+                clear_scope(self.stream_id)
                 return
 
             if not spoke_now and not normal_calls:
@@ -1467,6 +1481,7 @@ class _AgenticChatterBase(BaseChatter):
                 f"终止说明={_label(_TERMINATION_LABELS, state.termination.reason)}"
             )
         clear_stream_catalog(self.stream_id)
+        clear_scope(self.stream_id)
 
     async def _stage_reflect(
         self,
@@ -2387,6 +2402,12 @@ class _AgenticChatterBase(BaseChatter):
             .set("global_awareness", awareness)
             .set("mood_guidance", mood_text)
             .set("system_prompt_extra", extra)
+            .set(
+                "skill_catalog",
+                skill_catalog()
+                if ReadSkillTool in layout.exposed
+                else "",
+            )
             .build()
         )
 

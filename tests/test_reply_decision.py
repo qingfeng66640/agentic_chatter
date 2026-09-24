@@ -658,6 +658,24 @@ def test_decide_stage_is_before_plan_and_act() -> None:
     assert order.index(STAGE_DECIDE) < order.index(STAGE_ACT)
 
 
+async def test_skill_alias_does_not_wake_silent_decision(tmp_path) -> None:
+    """别名只提供 ACT 选择参考，不能覆盖 DECIDE 的静默结果。"""
+    from ..tooling import skills
+
+    root = tmp_path / "skills" / "summarize"
+    root.mkdir(parents=True)
+    (root / "SKILL.md").write_text(
+        "---\nname: summarize\ndescription: 总结长文\ntriggers: 群聊消息\n---\n",
+        encoding="utf-8",
+    )
+    try:
+        skills.refresh_skills([str(tmp_path / "skills")])
+        assert "群聊消息" in skills.skill_catalog()
+        await test_silent_decision_skips_plan_and_act_but_reflects()
+    finally:
+        skills.clear_skills()
+
+
 async def test_silent_decision_skips_plan_and_act_but_reflects() -> None:
     """成功静默应继续 reflect，而不是进入失败重试或 Stop。"""
     chatter = AgenticChatter(stream_id="stream", plugin=object())

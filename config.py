@@ -566,6 +566,23 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
 
+    @config_section("skills", title="技能目录", tag="ai")
+    class SkillsSection(SectionBase):
+        """只读技能发现与加载配置。"""
+
+        enabled: bool = Field(
+            default=True,
+            description="是否发现本地 SKILL.md 技能并向 Agent 提供只读按需加载工具",
+            label="启用技能",
+            tag="ai",
+        )
+        paths: list[str] = Field(
+            default_factory=lambda: ["skill"],
+            description="技能根目录或包含技能子目录的路径；相对路径基于项目根目录",
+            label="技能路径",
+            tag="ai",
+        )
+
     @config_section("humanize", title="拟人化", tag="ai")
     class HumanizeSection(SectionBase):
         """拟人化行为配置。"""
@@ -978,3 +995,4 @@ class AgenticChatterConfig(BaseConfig):
     tasks: TaskSection = Field(default_factory=TaskSection)
     global_mind: GlobalMindSection = Field(default_factory=GlobalMindSection)
     persona: PersonaSection = Field(default_factory=PersonaSection)
+    skills: SkillsSection = Field(default_factory=SkillsSection)

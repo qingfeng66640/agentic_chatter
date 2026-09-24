@@ -55,6 +55,21 @@
             "dependencies": []
         },
         {
+            "component_type": "command",
+            "component_name": "agentic_skill",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "read_skill",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "read_skill_reference",
+            "dependencies": []
+        },
+        {
             "component_type": "action",
             "component_name": "say",
             "dependencies": []

@@ -32,7 +32,9 @@ from .prompts import (
     user_prompt,
 )
 from .service import PipelineService, TaskRuntimeService
-from .tooling import ExploreToolsTool, ManageTasksTool
+from .tooling import ExploreToolsTool, ManageTasksTool, ReadSkillReferenceTool, ReadSkillTool
+from .tooling.skill_command import AgenticSkillCommand
+from .tooling.skills import clear_skills, refresh_skills
 
 logger = get_logger("agentic_chatter")
 
@@ -92,6 +94,7 @@ class AgenticChatterPlugin(BasePlugin):
                 "global_awareness": optional(""),
                 "mood_guidance": optional(""),
                 "system_prompt_extra": optional(""),
+                "skill_catalog": optional(""),
                 "how_you_speak": optional(DEFAULT_HOW_YOU_SPEAK),
                 "how_you_act": optional(DEFAULT_HOW_YOU_ACT),
                 "when_to_stop": optional(DEFAULT_WHEN_TO_STOP),
@@ -139,6 +142,11 @@ class AgenticChatterPlugin(BasePlugin):
         logger.info("agentic_chatter 插件已加载")
 
         config = self.config
+        skills = getattr(config, "skills", None)
+        refresh_skills(
+            list(getattr(skills, "paths", ["skill"])),
+            enabled=bool(getattr(skills, "enabled", True)),
+        )
         tasks_config = getattr(config, "tasks", None)
         if tasks_config is not None:
             from .task_runtime import get_task_runtime_manager
@@ -149,6 +157,7 @@ class AgenticChatterPlugin(BasePlugin):
 
     async def on_plugin_unloaded(self) -> None:
         """插件卸载前的清理。"""
+        clear_skills()
         logger.info("agentic_chatter 插件已卸载")
 
     def get_components(self) -> list[type]:
@@ -168,11 +177,17 @@ class AgenticChatterPlugin(BasePlugin):
             TaskRuntimeService,
             ExploreToolsTool,
             ManageTasksTool,
+            AgenticSkillCommand,
+            ReadSkillTool,
+            ReadSkillReferenceTool,
             SayAction,
             DispatchTaskAction,
             EndTurnAction,
             StopConversationAction,
         ]
+        if config is not None and not getattr(config.skills, "enabled", True):
+            components.remove(ReadSkillTool)
+            components.remove(ReadSkillReferenceTool)
         if config is None or config.plugin.private_enabled:
             components.insert(1, AgenticPrivateChatter)
         return components

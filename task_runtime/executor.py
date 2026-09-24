@@ -111,7 +111,11 @@ class TaskExecutor:
         filtered = ToolRegistry()
         tools = getattr(registry, "_tools", None)
         classes = tools.values() if isinstance(tools, dict) else ()
+        from ..tooling.skills import ReadSkillReferenceTool, ReadSkillTool
+
         for component_cls in classes:
+            if component_cls in (ReadSkillTool, ReadSkillReferenceTool):
+                continue
             getter = getattr(component_cls, "get_signature", None)
             signature = str(getter() or "") if callable(getter) else ""
             component_name = str(getattr(component_cls, "name", "") or "")

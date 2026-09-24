@@ -86,6 +86,8 @@ system_prompt = """你是{nickname}。
 </custom_rules>
 
 {system_prompt_extra}
+
+{skill_catalog}
 """
 
 

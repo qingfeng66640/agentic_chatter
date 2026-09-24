@@ -774,3 +774,20 @@ def test_visible_tools_injects_schema_allowed_tools() -> None:
     filtered = executor._visible_tools(_Registry())
     assert isinstance(filtered, ToolRegistry)
     assert filtered.get("tool-explore_tools") is _FakeExplore
+
+
+def test_visible_tools_excludes_skill_readers_even_when_allowed() -> None:
+    """子任务即使配置了 read*，也不注入主回合技能工具。"""
+    from ..task_runtime.executor import TaskExecutor
+    from ..tooling.skills import ReadSkillReferenceTool, ReadSkillTool
+
+    runtime = TaskRuntime(
+        TaskState(stream_id="s", user_goal="读取", allowed_tools=("read*",))
+    )
+    executor = TaskExecutor.__new__(TaskExecutor)
+    executor.runtime = runtime
+    registry = type("Registry", (), {"_tools": {
+        "read_skill": ReadSkillTool,
+        "read_skill_reference": ReadSkillReferenceTool,
+    }})()
+    assert executor._visible_tools(registry).get_all() == []

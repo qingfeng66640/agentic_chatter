@@ -6,6 +6,7 @@
 from .dedupe import CallDeduper, DedupeDecision, DedupeMode, build_call_key
 from .explore import ExploreToolsTool
 from .manage_tasks import ManageTasksTool
+from .skills import ReadSkillReferenceTool, ReadSkillTool
 from .registry import (
     ToolLayout,
     build_encouragement_prompt,
@@ -19,6 +20,8 @@ __all__ = [
     "DedupeMode",
     "ExploreToolsTool",
     "ManageTasksTool",
+    "ReadSkillTool",
+    "ReadSkillReferenceTool",
     "ToolLayout",
     "build_call_key",
     "build_encouragement_prompt",
