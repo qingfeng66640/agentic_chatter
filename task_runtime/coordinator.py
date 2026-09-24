@@ -65,6 +65,26 @@ def has_completed_events(stream_id: str) -> bool:
     return bool(_COMPLETED_EVENTS.get(stream_id))
 
 
+def pending_completed_events(stream_id: str) -> tuple[dict[str, Any], ...]:
+    """读取待汇报事件快照，不提前移出队列。"""
+    return tuple(_COMPLETED_EVENTS.get(stream_id, ()))
+
+
+def acknowledge_completed_events(
+    stream_id: str, events: tuple[dict[str, Any], ...]
+) -> None:
+    """仅确认本轮已成功汇报的事件，保留执行期间新增的事件。"""
+    current = _COMPLETED_EVENTS.get(stream_id)
+    if current is None:
+        return
+    acknowledged = {id(event) for event in events}
+    remaining = [event for event in current if id(event) not in acknowledged]
+    if remaining:
+        _COMPLETED_EVENTS[stream_id] = remaining
+    else:
+        _COMPLETED_EVENTS.pop(stream_id, None)
+
+
 @dataclass(slots=True)
 class ActiveTask:
     """一个正在后台运行的任务。"""

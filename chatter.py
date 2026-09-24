@@ -137,8 +137,9 @@ from .task_runtime.control import (
     resolve_control_target,
 )
 from .task_runtime.coordinator import (
-    drain_completed_events,
+    acknowledge_completed_events,
     has_completed_events,
+    pending_completed_events,
     register_task,
     route_message,
     start_task,
@@ -454,24 +455,21 @@ class _AgenticChatterBase(BaseChatter):
                     continue
 
                 claim = await mailbox.claim_pending(turn_token, generation)
+                report_events: tuple[dict[str, Any], ...] = ()
 
-                # 兜底 drain：resume 单槽可能被新事件覆盖导致本轮未消费到
-                # source=="sub_agent"，但完成事件仍在注册表中，顺带拼入汇报。
-                if claim is None and _is_task_resume_event(resume_event):
-                    report_events = tuple(drain_completed_events(self.stream_id))
+                # resume 单槽可能被新事件覆盖；队列快照保留到汇报成功后再确认。
+                if claim is None and (
+                    _is_task_resume_event(resume_event)
+                    or has_completed_events(self.stream_id)
+                ):
+                    report_events = pending_completed_events(self.stream_id)
                     if report_events:
-                        turn_result = await self._run_report_turn(
+                        turn_result, reported = await self._run_report_turn(
                             config, chat_stream=None, events=report_events
                         )
+                        if reported:
+                            acknowledge_completed_events(self.stream_id, report_events)
                         resume_event = None
-                        continue
-                elif claim is None and has_completed_events(self.stream_id):
-                    report_events = tuple(drain_completed_events(self.stream_id))
-                    if report_events:
-                        turn_result = await self._run_report_turn(
-                            config, chat_stream=None, events=report_events
-                        )
-                        continue
 
                 if claim is not None:
                     from src.core.managers import get_stream_manager
@@ -528,9 +526,9 @@ class _AgenticChatterBase(BaseChatter):
                         if _is_task_resume_event(resume_event) or has_completed_events(
                             self.stream_id
                         ):
-                            state.task_report = build_task_report_prompt(
-                                tuple(drain_completed_events(self.stream_id))
-                            )
+                            report_events = pending_completed_events(self.stream_id)
+                            if report_events:
+                                state.task_report = build_task_report_prompt(report_events)
                         turn_result, claim = await self._run_normal_turn(
                             config,
                             mailbox,
@@ -540,6 +538,8 @@ class _AgenticChatterBase(BaseChatter):
                             unread_msgs,
                             generation,
                         )
+                        if report_events and claim is None and not state.failed and state.spoke:
+                            acknowledge_completed_events(self.stream_id, report_events)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -559,7 +559,7 @@ class _AgenticChatterBase(BaseChatter):
         chat_stream: "ChatStream | None",
         *,
         events: tuple[dict[str, Any], ...],
-    ) -> ChatterResult:
+    ) -> tuple[ChatterResult, bool]:
         """执行无 claim 的任务汇报轮。
 
         本轮没有真实用户消息，不取 claim 也不 commit；直接以 ACT 阶段
@@ -568,10 +568,10 @@ class _AgenticChatterBase(BaseChatter):
         Args:
             config: 插件配置。
             chat_stream: 聊天流；为 None 时按需获取。
-            events: 已 drain 的任务完成事件。
+            events: 待汇报的任务完成事件快照。
 
         Returns:
-            ChatterResult: 汇报轮结束后的等待结果。
+            tuple[ChatterResult, bool]: 等待结果及是否已成功汇报。
         """
         if chat_stream is None:
             from src.core.managers import get_stream_manager
@@ -594,7 +594,8 @@ class _AgenticChatterBase(BaseChatter):
             raise
         except Exception as exc:
             logger.error(f"[{self.stream_id[:8]}] 任务汇报轮失败：{exc}")
-        return Wait(time=DEFAULT_TURN_RETRY_SECONDS)
+            return Wait(time=DEFAULT_TURN_RETRY_SECONDS), False
+        return Wait(time=DEFAULT_TURN_RETRY_SECONDS), not state.failed and state.spoke
 
     async def _release_claim_safely(
         self,

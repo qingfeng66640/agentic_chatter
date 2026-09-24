@@ -130,7 +130,8 @@ def test_run_turns_has_report_branch() -> None:
 
     source = inspect.getsource(_AgenticChatterBase._run_turns)
     assert "_is_task_resume_event(resume_event)" in source
-    assert "drain_completed_events" in source
+    assert "pending_completed_events" in source
+    assert "acknowledge_completed_events" in source
     assert "_run_report_turn" in source
     assert "resume_event = yield turn_result" in source
 
@@ -159,6 +160,164 @@ def test_input_confirmed_moved_after_commit() -> None:
     commit_index = run_turns.index("_commit_task_turn")
     segment = run_turns[route_index:commit_index]
     assert "state.input_confirmed = True" not in segment
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["exception", "failed_state", "no_speech"])
+async def test_report_turn_failure_keeps_events_for_retry(monkeypatch, failure: str) -> None:
+    """无 claim 的汇报异常、模型失败或无发言后仍可重试。"""
+    from .. import chatter as chatter_module
+    from ..chatter import _AgenticChatterBase
+
+    stream_id = f"report-retry-{failure}"
+    event = {"task_id": "retry-task", "status": "succeeded", "summary": "任务结果"}
+    coordinator.push_completed_event(stream_id, event)
+
+    class _Mailbox:
+        async def try_acquire(self, owner: object) -> int:
+            return 1
+
+        async def merge_snapshot(self, messages: list[Any]) -> int:
+            return 0
+
+        async def pending_state(self, window: float) -> tuple[int, float]:
+            return 0, 0.0
+
+        async def claim_pending(self, owner: object, generation: int) -> None:
+            return None
+
+        async def release_owner(self, owner: object, generation: int) -> bool:
+            return True
+
+    class _Chatter:
+        def __init__(self) -> None:
+            self.stream_id = stream_id
+            self.attempts: list[tuple[dict[str, Any], ...]] = []
+
+        async def fetch_unreads(self) -> tuple[None, list[Any]]:
+            return None, []
+
+        def _build_deduper(self, config: Any) -> None:
+            return None
+
+        async def _stage_act(
+            self, config: Any, chat_stream: Any, state: Any,
+            unread_msgs: list[Any], *, claim: Any = None,
+        ) -> None:
+            self.attempts.append((event,))
+            if len(self.attempts) == 1:
+                if failure == "exception":
+                    raise RuntimeError("模拟汇报失败")
+                if failure == "failed_state":
+                    state.failed = True
+            else:
+                state.spoke = True
+
+        async def _run_report_turn(self, *args: Any, **kwargs: Any) -> Any:
+            return await _AgenticChatterBase._run_report_turn(self, *args, **kwargs)
+
+        async def _release_owner_safely(self, *args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(chatter_module, "get_stream_mailbox", lambda _: _Mailbox())
+    import src.core.managers as managers
+
+    class _StreamManager:
+        async def get_or_create_stream(self, *, stream_id: str) -> object:
+            return object()
+
+    monkeypatch.setattr(managers, "get_stream_manager", lambda: _StreamManager())
+    chatter = _Chatter()
+    generator = _AgenticChatterBase._run_turns(chatter, None)
+    try:
+        await generator.asend(None)
+        assert coordinator.has_completed_events(stream_id)
+        await generator.asend(None)
+        assert chatter.attempts == [(event,), (event,)]
+        assert not coordinator.has_completed_events(stream_id)
+        await generator.asend(None)
+        assert chatter.attempts == [(event,), (event,)]
+    finally:
+        await generator.aclose()
+        coordinator.drain_completed_events(stream_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [True, False])
+async def test_normal_turn_acknowledges_report_only_after_success(monkeypatch, failed: bool) -> None:
+    """有真实消息时，普通回合失败保留事件，成功汇报才确认。"""
+    from .. import chatter as chatter_module
+    from ..chatter import _AgenticChatterBase
+
+    stream_id = f"normal-report-{failed}"
+    event = {"task_id": "normal-task", "status": "succeeded", "summary": "任务结果"}
+    coordinator.push_completed_event(stream_id, event)
+    message = SimpleNamespace(content="你好")
+
+    class _Mailbox:
+        async def try_acquire(self, owner: object) -> int:
+            return 1
+
+        async def merge_snapshot(self, messages: list[Any]) -> int:
+            return 1
+
+        async def pending_state(self, window: float) -> tuple[int, float]:
+            return 1, 0.0
+
+        async def claim_pending(self, owner: object, generation: int) -> Any:
+            return SimpleNamespace(messages=[message])
+
+        async def release_owner(self, owner: object, generation: int) -> bool:
+            return True
+
+    class _Manager:
+        def get_active_tasks(self, stream_id: str) -> list[Any]:
+            return []
+
+    class _Chatter:
+        def __init__(self) -> None:
+            self.stream_id = stream_id
+            self.reports: list[str] = []
+
+        async def fetch_unreads(self) -> tuple[None, list[Any]]:
+            return None, [message]
+
+        def format_message_line(self, message: Any) -> str:
+            return message.content
+
+        def _build_deduper(self, config: Any) -> None:
+            return None
+
+        async def _run_normal_turn(self, config: Any, mailbox: Any, claim: Any,
+                                   chat_stream: Any, state: Any, messages: list[Any],
+                                   generation: int) -> tuple[Any, None]:
+            self.reports.append(state.task_report)
+            state.failed = failed
+            state.spoke = not failed
+            return object(), None
+
+        async def _release_owner_safely(self, *args: Any) -> None:
+            return None
+
+    class _StreamManager:
+        async def get_or_create_stream(self, *, stream_id: str) -> object:
+            return object()
+
+    monkeypatch.setattr(chatter_module, "get_stream_mailbox", lambda _: _Mailbox())
+    monkeypatch.setattr(chatter_module, "_restore_persisted_tasks", lambda **kwargs: _Manager())
+    import src.core.managers as managers
+
+    monkeypatch.setattr(managers, "get_stream_manager", lambda: _StreamManager())
+    chatter = _Chatter()
+    generator = _AgenticChatterBase._run_turns(chatter, None)
+    try:
+        await generator.asend(None)
+        assert len(chatter.reports) == 1
+        assert "任务结果" in chatter.reports[0]
+        assert coordinator.has_completed_events(stream_id) is failed
+    finally:
+        await generator.aclose()
+        coordinator.drain_completed_events(stream_id)
 
 
 # ---------------------------------------------------------------------------

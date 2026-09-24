@@ -142,6 +142,17 @@ def test_push_is_idempotent_per_task_id() -> None:
     assert len(coordinator._COMPLETED_EVENTS["stream-g"]) == 1
 
 
+def test_acknowledge_only_snapshot_preserves_new_events() -> None:
+    first = {"task_id": "first", "summary": "第一条"}
+    second = {"task_id": "second", "summary": "第二条"}
+    push_completed_event("stream-snapshot", first)
+    snapshot = coordinator.pending_completed_events("stream-snapshot")
+    push_completed_event("stream-snapshot", second)
+
+    coordinator.acknowledge_completed_events("stream-snapshot", snapshot)
+    assert drain_completed_events("stream-snapshot") == [second]
+
+
 def test_drain_is_single_consumption() -> None:
     push_completed_event(
         "stream-h",
