@@ -24,6 +24,7 @@ class AgenticSkillCommand(BaseCommand):
         count = refresh_skills(
             list(getattr(section, "paths", ["skill"])),
             enabled=bool(getattr(section, "enabled", True)),
+            max_description_chars=int(getattr(section, "max_description_chars", 500)),
         )
         message = f"技能目录已刷新：{count} 个。"
         await send_text(message, stream_id=self.stream_id)

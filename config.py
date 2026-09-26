@@ -52,6 +52,23 @@ class AgenticChatterConfig(BaseConfig):
             label="私聊模型名称",
             tag="ai",
         )
+        native_multimodal: bool = Field(
+            default=False,
+            description=(
+                "是否在主 Agent 的 ACT 阶段以原生图片内容传入本轮新消息。"
+                "DECIDE、感知、规划和后台任务仍使用文本上下文；需要模型支持视觉输入。"
+            ),
+            label="主 Agent 原生多模态",
+            tag="ai",
+        )
+        max_input_images: int = Field(
+            default=3,
+            description="原生多模态模式下单次新输入最多传入的图片数量",
+            label="单次最大图片数",
+            ge=0,
+            le=32,
+            tag="performance",
+        )
 
     @config_section("pipeline", title="回复管线", tag="ai")
     class PipelineSection(SectionBase):
@@ -580,6 +597,16 @@ class AgenticChatterConfig(BaseConfig):
             default_factory=lambda: ["skill"],
             description="技能根目录或包含技能子目录的路径；相对路径基于项目根目录",
             label="技能路径",
+            tag="ai",
+        )
+        max_description_chars: int = Field(
+            default=500,
+            ge=1,
+            description=(
+                "SKILL.md 元数据 description 的最大字符数；"
+                "不改变技能文件大小限制和提示词目录展示预算"
+            ),
+            label="技能描述最大字符数",
             tag="ai",
         )
 

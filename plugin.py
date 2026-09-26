@@ -146,6 +146,7 @@ class AgenticChatterPlugin(BasePlugin):
         refresh_skills(
             list(getattr(skills, "paths", ["skill"])),
             enabled=bool(getattr(skills, "enabled", True)),
+            max_description_chars=int(getattr(skills, "max_description_chars", 500)),
         )
         tasks_config = getattr(config, "tasks", None)
         if tasks_config is not None:

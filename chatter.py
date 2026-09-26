@@ -64,6 +64,7 @@ from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
 from .humanize.qqbot_streaming import create_streaming_session
+from .multimodal import image_count, inline_message_images
 from .humanize.segmenter import (
     CleanReplyResult,
     clean_reply_text_with_metadata,
@@ -378,6 +379,13 @@ class _AgenticChatterBase(BaseChatter):
             yield Success("AgenticChatter 已禁用")
             return
 
+        multimodal_enabled = config is not None and bool(
+            getattr(config.plugin, "native_multimodal", False)
+        )
+        if multimodal_enabled:
+            from src.core.managers.media_manager import get_media_manager
+
+            get_media_manager().skip_recognition_for_stream(self.stream_id, ["image"])
         gen = self._run_turns(config)
         try:
             result = await gen.asend(None)  # 首次拉起，值必须为 None
@@ -393,6 +401,10 @@ class _AgenticChatterBase(BaseChatter):
             yield Failure(f"agent 循环异常: {exc}", exception=exc)
         finally:
             await gen.aclose()
+            if multimodal_enabled:
+                from src.core.managers.media_manager import get_media_manager
+
+                get_media_manager().unskip_recognition_for_stream(self.stream_id)
 
     async def _run_turns(
         self,
@@ -1318,10 +1330,28 @@ class _AgenticChatterBase(BaseChatter):
         system_text = await self._build_system_prompt(config, chat_stream, layout)
         user_text = await self._build_user_prompt(config, chat_stream, state, unread_msgs)
 
+        user_content = Text(user_text)
+        if config is not None and bool(getattr(config.plugin, "native_multimodal", False)):
+            history_messages = list(chat_stream.context.history_messages)
+            multimodal_messages = history_messages + list(unread_msgs)
+            max_images = max(0, int(getattr(config.plugin, "max_input_images", 3)))
+            user_content = inline_message_images(
+                user_text,
+                multimodal_messages,
+                preferred_messages=unread_msgs,
+                max_images=max_images,
+            )
+            total_images = image_count(multimodal_messages)
+            if total_images > max_images:
+                logger.warning(
+                    f"[{self.stream_id[:8]}] 本轮图片达到上限，跳过多余图片 "
+                    f"event=multimodal_image_limit total={total_images} limit={max_images}"
+                )
+
         request = self._create_act_request(config)
         request.add_payload(LLMPayload(ROLE.SYSTEM, Text(system_text)))
         request.add_payload(LLMPayload(ROLE.TOOL, registry.get_all()))  # type: ignore[arg-type]
-        request.add_payload(LLMPayload(ROLE.USER, Text(user_text)))
+        request.add_payload(LLMPayload(ROLE.USER, user_content))
 
         max_iterations = 6 if config is None else max(1, int(config.pipeline.max_iterations))
         response: Any = request
