@@ -280,6 +280,18 @@ def read_reference(scope_id: str, name: str, location: str) -> tuple[bool, str]:
     if not location.strip() or relative.is_absolute() or ".." in relative.parts or ":" in location:
         return False, "引用路径无效"
     target = (entry.root / relative).resolve()
+    if not _inside(entry.root, target):
+        return False, "引用文件不可用"
+    if not target.exists():
+        escaped = re.sub(
+            r"\\([\\`*_{}\[\]()#+.!<>~ \-])",
+            lambda match: "/" if match.group(1) == "\\" else match.group(1),
+            location,
+        )
+        relative = Path(escaped.replace("\\", "/"))
+        if relative.is_absolute() or ".." in relative.parts or ":" in escaped:
+            return False, "引用路径无效"
+        target = (entry.root / relative).resolve()
     if not _inside(entry.root, target) or target.suffix.lower() != ".md" or not target.is_file():
         return False, "引用文件不可用"
     try:

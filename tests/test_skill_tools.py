@@ -47,6 +47,43 @@ def test_skill_reference_requires_selection_and_rejects_traversal(tmp_path: Path
     assert "无效" in message
 
 
+def test_skill_reference_accepts_escaped_markdown_path(tmp_path: Path) -> None:
+    """Markdown 转义的空格和括号与 Windows 路径分隔符均可定位引用。"""
+    root = _write_skill(tmp_path)
+    reference = root / "refs" / "usage guide (v2).md"
+    reference.parent.mkdir()
+    reference.write_text("已找到引用", encoding="utf-8")
+    for filename in ("_guide.md", ".hidden.md"):
+        (reference.parent / filename).write_text(f"原始路径：{filename}", encoding="utf-8")
+        (root / f"refs{filename}").write_text(f"转义路径：{filename}", encoding="utf-8")
+    skills.refresh_skills([str(tmp_path)])
+    assert skills.read_skill("stream-a", "demo")[0] is True
+    for location in (
+        r"refs/usage\ guide\ \(v2\).md",
+        r"refs\usage guide (v2).md",
+    ):
+        success, content = skills.read_reference("stream-a", "demo", location)
+        assert success is True, content
+        assert "已找到引用" in content
+    for filename in ("_guide.md", ".hidden.md"):
+        success, content = skills.read_reference("stream-a", "demo", rf"refs\{filename}")
+        assert success is True, content
+        assert f"原始路径：{filename}" in content
+        assert "转义路径：" not in content
+    assert skills.read_reference("stream-a", "demo", r"refs/\.\./outside.md")[0] is False
+
+
+def test_skill_reference_does_not_fallback_from_existing_unsafe_path(tmp_path: Path) -> None:
+    """原始路径存在但不是文件时，不能读取另一个转义候选文件。"""
+    root = _write_skill(tmp_path)
+    (root / "refs").mkdir()
+    (root / "refs" / "_guide.md").mkdir()
+    (root / "refs_guide.md").write_text("错误候选", encoding="utf-8")
+    skills.refresh_skills([str(tmp_path)])
+    assert skills.read_skill("stream-a", "demo")[0] is True
+    assert skills.read_reference("stream-a", "demo", r"refs\_guide.md")[0] is False
+
+
 def test_refresh_rejects_invalid_metadata(tmp_path: Path) -> None:
     _write_skill(tmp_path, "valid")
     invalid = tmp_path / "invalid"
