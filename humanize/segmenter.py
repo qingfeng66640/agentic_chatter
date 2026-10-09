@@ -132,6 +132,16 @@ def detect_provider_error_text(text: str) -> str | None:
     if not normalized:
         return None
 
+    gemini_blocked = (
+        "this request was blocked by gemini's filters" in normalized
+        and (
+            "try rephrasing your prompt" in normalized
+            or "they can occasionally trigger by mistake" in normalized
+        )
+    )
+    if gemini_blocked:
+        return "gemini_filter_block"
+
     submission_blocked = "the prompt could not be submitted" in normalized
     sensitive_prompt = (
         "prompt contains sensitive words" in normalized

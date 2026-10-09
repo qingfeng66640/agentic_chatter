@@ -81,6 +81,59 @@ async def test_streaming_uses_only_visible_text_delta() -> None:
     assert "不能发送" not in session.visible_text
 
 
+async def test_streaming_does_not_emit_gemini_filter_message() -> None:
+    controller = SimpleNamespace(update=AsyncMock(), end=AsyncMock())
+    service = SimpleNamespace(
+        start_streaming=AsyncMock(return_value={"success": True, "controller": controller})
+    )
+    session = QQBotStreamingSession(QQBotStreamingContext("openid", msg_id="msg"), service)
+    text = (
+        "This request was blocked by Gemini's filters. They can occasionally trigger "
+        "by mistake on safe coding, security, or biology-related queries. Please try "
+        "rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) "
+        "or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."
+    )
+    parts = ("This req", "uest was blocked by Gemini's filters.")
+    for delta in ("<think>内部</think>" + parts[0], parts[1]):
+        await session.on_event(StreamEvent(text_delta=delta))
+        service.start_streaming.assert_not_awaited()
+    await session.on_event(StreamEvent(text_delta=text[len("".join(parts)):]))
+
+    assert (await session.finalize(text)).text == ""
+    service.start_streaming.assert_not_awaited()
+    controller.update.assert_not_awaited()
+    controller.end.assert_not_awaited()
+
+
+async def test_streaming_does_not_emit_old_google_filter_message() -> None:
+    service = SimpleNamespace(start_streaming=AsyncMock())
+    session = QQBotStreamingSession(QQBotStreamingContext("openid", msg_id="msg"), service)
+    text = (
+        "The prompt could not be submitted. The prompt contains sensitive words "
+        "that violate Google's [Generative AI Prohibited Use Policy]. "
+        "Try rephrasing the prompt."
+    )
+    parts = ("The prom", "pt could not be submitted.")
+    for delta in (*parts, text[len("".join(parts)):]):
+        await session.on_event(StreamEvent(text_delta=delta))
+
+    assert (await session.finalize(text)).text == ""
+    service.start_streaming.assert_not_awaited()
+
+
+async def test_streaming_flushes_normal_text_after_false_alarm() -> None:
+    controller = SimpleNamespace(update=AsyncMock(return_value=True), end=AsyncMock())
+    service = SimpleNamespace(
+        start_streaming=AsyncMock(return_value={"success": True, "controller": controller})
+    )
+    session = QQBotStreamingSession(QQBotStreamingContext("openid", msg_id="msg"), service)
+    await session.on_event(StreamEvent(text_delta="This request"))
+    service.start_streaming.assert_not_awaited()
+    await session.on_event(StreamEvent(text_delta=" is ready."))
+    service.start_streaming.assert_awaited_once()
+    assert service.start_streaming.await_args.kwargs["initial_text"] == "This request is ready."
+
+
 async def test_streaming_filters_thought_tags_across_chunks() -> None:
     controller = SimpleNamespace(update=AsyncMock(return_value=True), end=AsyncMock(return_value=True))
     service = SimpleNamespace(

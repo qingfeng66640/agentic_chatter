@@ -161,6 +161,25 @@ async def test_deliver_message_intercepts_provider_error_text(monkeypatch) -> No
     assert state.visible_text_emissions == 0
 
 
+async def test_deliver_message_intercepts_gemini_filter_text(monkeypatch) -> None:
+    send_text = AsyncMock(return_value=True)
+    monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
+    chatter = AgenticChatter(stream_id="gemini-filter", plugin=object())
+    state = TurnState(stream_id="gemini-filter")
+    text = (
+        "This request was blocked by Gemini's filters. They can occasionally trigger "
+        "by mistake on safe coding, security, or biology-related queries. Please try "
+        "rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) "
+        "or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."
+    )
+
+    assert await chatter._deliver_message(
+        None, SimpleNamespace(message=text), state
+    ) == (False, False)
+    send_text.assert_not_awaited()
+    assert not state.spoke
+
+
 async def test_deliver_message_provider_error_recording_is_disabled_by_default(
     monkeypatch,
 ) -> None:

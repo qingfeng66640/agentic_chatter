@@ -21,6 +21,19 @@ def test_detect_provider_error_text_matches_google_policy_response() -> None:
     assert detect_provider_error_text(text) == "google_prompt_policy_block"
 
 
+def test_detect_provider_error_text_matches_gemini_filter_response() -> None:
+    text = (
+        "This request was blocked by Gemini's filters. They can occasionally trigger "
+        "by mistake on safe coding, security, or biology-related queries. Please try "
+        "rephrasing your prompt. You can [send feedback] or read more about our policies here."
+    )
+    assert detect_provider_error_text(text) == "gemini_filter_block"
+    assert detect_provider_error_text(
+        "THIS REQUEST WAS BLOCKED BY GEMINI'S FILTERS.\n"
+        "Please try rephrasing your prompt."
+    ) == "gemini_filter_block"
+
+
 def test_detect_provider_error_text_normalizes_case_and_whitespace() -> None:
     text = (
         "THE PROMPT COULD NOT BE SUBMITTED.\n"
@@ -34,6 +47,8 @@ def test_detect_provider_error_text_does_not_match_generic_discussion() -> None:
     assert detect_provider_error_text("请解释 content policy 和 API error 的区别。") is None
     assert detect_provider_error_text("The prompt could not be submitted.") is None
     assert detect_provider_error_text("Try rephrasing the prompt.") is None
+    assert detect_provider_error_text("Gemini's filters can block a request.") is None
+    assert detect_provider_error_text("Please try rephrasing your prompt.") is None
 
 
 def test_detect_provider_error_text_requires_complete_provider_signal() -> None:

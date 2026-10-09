@@ -9,10 +9,14 @@ from typing import Any, Callable
 
 from src.app.plugin_system.api import service_api
 
-from .segmenter import CleanReplyResult, clean_reply_text_with_metadata
+from .segmenter import CleanReplyResult, clean_reply_text_with_metadata, detect_provider_error_text
 
 DEFAULT_STREAMING_SERVICE = "qqbot_adapter:service:qqbot"
 _THOUGHT_TAGS = ("think", "analysis", "reasoning")
+_PROVIDER_ERROR_PREFIXES = (
+    "this request was blocked by gemini's filters",
+    "the prompt could not be submitted",
+)
 _OPENING_THOUGHT_TAG = re.compile(
     r"<\s*(?P<tag>think|analysis|reasoning)\b[^>]*>",
     flags=re.IGNORECASE,
@@ -209,6 +213,12 @@ class QQBotStreamingSession:
         current = self.visible_text
         if not current or self.start_failed or self.update_failed:
             return
+        normalized = " ".join(current.casefold().split())
+        if detect_provider_error_text(current) is not None or any(
+            prefix.startswith(normalized) or normalized.startswith(prefix)
+            for prefix in _PROVIDER_ERROR_PREFIXES
+        ):
+            return
         if not self.started:
             if len(current) < max(1, int(self.initial_chars)):
                 return
@@ -253,6 +263,8 @@ class QQBotStreamingSession:
     async def finalize(self, final_raw_text: str) -> CleanReplyResult:
         """使用完整正文权威清洗并结束已启动的 QQBot 流。"""
         result = clean_reply_text_with_metadata(final_raw_text or self.raw_text)
+        if detect_provider_error_text(result.text) is not None:
+            return CleanReplyResult("")
         if not self.started or self.ended:
             return result
         self.ended = True
