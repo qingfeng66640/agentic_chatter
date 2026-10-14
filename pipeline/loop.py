@@ -14,9 +14,9 @@ from typing import Any, Protocol
 
 from src.kernel.llm import LLMPayload, ROLE, Text, ToolResult
 
-from ..actions.control import clamp_stop_minutes
 from ..humanize.segmenter import Segment, segment_reply
 from ..tooling.dedupe import build_result_preview
+from .control_constants import clamp_stop_minutes
 from .state import (
     LoopDecision,
     TerminationReason,

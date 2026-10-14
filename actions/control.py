@@ -12,30 +12,21 @@ from typing import Annotated
 
 from src.core.components.base.action import BaseAction
 
-# 结束对话的默认冷却分钟数
-DEFAULT_STOP_MINUTES = 5.0
-# 冷却时间的合法上限，防止模型设置过长导致长时间失联
-MAX_STOP_MINUTES = 120.0
+# 冷却常量与钳制函数实现在 pipeline.control_constants。
+# 此处重新导出以保留既有导入路径，同时避免 pipeline -> actions 的循环导入。
+from ..pipeline.control_constants import (
+    DEFAULT_STOP_MINUTES,
+    MAX_STOP_MINUTES,
+    clamp_stop_minutes,
+)
 
-
-def clamp_stop_minutes(raw: object) -> float:
-    """把模型传入的冷却分钟数解析并钳制到合法区间。
-
-    非法输入（None/非数值）回退到默认值。
-
-    Args:
-        raw: 模型传入的原始分钟数。
-
-    Returns:
-        float: 介于 0 与 MAX_STOP_MINUTES 之间的冷却分钟数。
-    """
-    try:
-        minutes = float(raw if raw is not None else DEFAULT_STOP_MINUTES)
-    except (TypeError, ValueError):
-        return DEFAULT_STOP_MINUTES
-    if minutes <= 0:
-        minutes = DEFAULT_STOP_MINUTES
-    return min(MAX_STOP_MINUTES, minutes)
+__all__ = [
+    "DEFAULT_STOP_MINUTES",
+    "MAX_STOP_MINUTES",
+    "EndTurnAction",
+    "StopConversationAction",
+    "clamp_stop_minutes",
+]
 
 
 class EndTurnAction(BaseAction):
