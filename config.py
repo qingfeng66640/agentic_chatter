@@ -198,9 +198,11 @@ class AgenticChatterConfig(BaseConfig):
         local_gate_enabled: bool = Field(
             default=True,
             description=(
-                "是否启用本地规则、embedding 和置信区间初判。关闭后，除私聊和"
-                "直接召唤等硬规则外，普通群聊不做本地直通，全部交给 sub_actor；"
-                "这不会关闭回复功能。"
+                "是否启用本地规则、embedding 和置信区间初判。关闭后不做 embedding "
+                "计算，也不做本地评分直通：硬规则（含走神判定）之后的每条群聊消息"
+                "都交给 gray_zone_decider 指定的裁决者。"
+                "此时 semantic_continuity 与 bot_history_continuity 恒为 0，"
+                "裁决者需依据对话原文判断。"
             ),
             label="启用本地初判",
             tag="ai",
@@ -693,7 +695,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="performance",
         )
         total_budget_seconds: float = Field(
-            default=12.0,
+            default=4.0,
             description=(
                 "一次灰区裁决的总耗时硬上限（秒）。群聊回合在此期间被阻塞，"
                 "因此不应设得过大；单次尝试会取 timeout_seconds 与剩余预算的较小值，"

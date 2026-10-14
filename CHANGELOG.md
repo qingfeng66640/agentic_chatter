@@ -31,6 +31,9 @@
 
 ### Fixed
 
+- 修复关闭 `local_gate_enabled` 时的信号失真：`extract_features` 收到 `None` 会加 `uncertainty += 0.18` 并打上 `semantic_unknown`，而补偿该惩罚的代码位于闸门块内，导致关闭闸门时惩罚永久生效，并把虚假的 0 值语义信号传给裁决者。现显式传入 0.0，不再触发惩罚。
+- 优化 Jev 提问语料：instructions 改为「此刻开口是否自然」的四步判断框架（受话人 → 是否承接 bot 刚说的话 → 群聊节奏 → 话题是否结束），并明确指出中文疑问句不一定在问 bot、群内非 bot 名字不代表在叫 bot；新增 `reply_to` 字段标注消息是否在回复 bot；信号图例补充「未启用语义计算时恒为 0」与「仅按疑问语气识别，问谁需自行判断」。真实端点实测「这个 bug 怎么解决」由误判 respond 纠正为 silent。
+- `total_budget_seconds` 默认值由 12 秒调整为 4 秒。
 - 修复灰区喊名字不回应：`state.bot` 此前只有 `is_chatbot`，Jev 不知道群里怎么称呼
   它，收到「小蝶，这个咋办」会判成静默（实测 confidence 0.12）。现下发
   `state.bot.names`（昵称与别名）并在 instructions 写明召唤判据；同时补发

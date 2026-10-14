@@ -1158,8 +1158,12 @@ class _AgenticChatterBase(BaseChatter):
             bot_nickname=bot_nicknames,
             bot_message_ids=bot_message_ids,
             participation=participation,
-            semantic_continuity=None,
-            bot_history_continuity=None,
+            # local_gate 关闭时不会做 embedding 计算，因此此处不传 None：
+            # 传 None 会触发 signals 中 semantic_unknown 的 +0.18 不确定度惩罚，
+            # 而补偿该惩罚的代码位于 local_gate 块内，导致关闭 gate 时惩罚永久生效，
+            # 并把虚假的 0 值语义信号传给裁决者。
+            semantic_continuity=0.0,
+            bot_history_continuity=0.0,
             participation_window_seconds=float(
                 decision_config.participation_window_seconds
             ),
@@ -1238,6 +1242,7 @@ class _AgenticChatterBase(BaseChatter):
             unread_msgs=unread_msgs,
             signal_summary=signal_summary,
             bot_nicknames=bot_nicknames,
+            bot_message_ids=frozenset(bot_message_ids),
             score=score,
             lower=lower,
             upper=upper,
@@ -1325,6 +1330,7 @@ class _AgenticChatterBase(BaseChatter):
         unread_msgs: list["Message"],
         signal_summary: dict[str, Any],
         bot_nicknames: tuple[str, ...],
+        bot_message_ids: frozenset[str],
         score: float,
         lower: float,
         upper: float,
@@ -1346,6 +1352,7 @@ class _AgenticChatterBase(BaseChatter):
             unread_msgs: 本轮待判断的新消息。
             signal_summary: 本地信号摘要。
             bot_nicknames: 群里称呼 bot 的昵称与别名。
+            bot_message_ids: bot 自身发言的消息 ID 集合，用于标注回复关系。
             score: 本地评分标量。
             lower: 本地评分区间下界。
             upper: 本地评分区间上界。
@@ -1424,6 +1431,10 @@ class _AgenticChatterBase(BaseChatter):
                 is_bot=(
                     str(getattr(message, "sender_role", "") or "").lower() == "bot"
                     or str(getattr(message, "sender_id", "") or "") == bot_id
+                ),
+                reply_to_bot=(
+                    bool(str(getattr(message, "reply_to", "") or ""))
+                    and str(getattr(message, "reply_to", "") or "") in bot_message_ids
                 ),
             )
 

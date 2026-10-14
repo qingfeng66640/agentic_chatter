@@ -87,7 +87,18 @@ fallback_decider = "sub_actor"    # sub_actor（默认）| silent
 | `sub_actor`（默认） | → sub_actor | 与既有行为完全一致，不产生任何外部请求 |
 | `jev` | → Jev | 灰区改由 Jev 裁决 |
 
-无论选哪个，硬规则与本地评分直通都仍然生效，Jev 只出现在灰区这一格。
+硬规则在两种模式下都生效。是否还有本地评分直通，取决于 `decision.local_gate_enabled`：为 true 时先走评分直通、其余落入灰区交给裁决者；为 false 时不做评分直通也不计算 embedding，硬规则之后的每条消息都交给裁决者。
+
+#### 两种 local_gate 模式
+
+| `local_gate_enabled` | 硬规则之后 | embedding | 本地评分直通 |
+| --- | --- | --- | --- |
+| `true`（默认） | 评分直通 → 灰区 | 计算 | 有，越过边界即直接裁决 |
+| `false` | 每条消息都交裁决者 | 不计算 | 无 |
+
+`false` 时 `semantic_continuity` 与 `bot_history_continuity` 恒为 0
+（图例已注明「本地规则未启用语义计算时恒为 0」），裁决者需主要依据对话原文判断。
+`local_gate_enabled` 关闭时，硬规则与「走神」判定仍然生效。
 
 #### Jev 灰区裁决
 
