@@ -1218,6 +1218,9 @@ class _AgenticChatterBase(BaseChatter):
             f"本地原因={features.reasons}"
         )
         signal_summary = {
+            # direct_address 必须下发：本地规则已确认这条消息在称呼 bot 时，
+            # Jev 必须知道那是召唤，不能因为不认识名字而静默。
+            "direct_address": features.direct_address,
             "question_or_request": features.question_or_request,
             "directed_elsewhere": features.directed_elsewhere,
             "interruption_cost": features.interruption_cost,
@@ -1234,6 +1237,7 @@ class _AgenticChatterBase(BaseChatter):
             history_messages=recent_history,
             unread_msgs=unread_msgs,
             signal_summary=signal_summary,
+            bot_nicknames=bot_nicknames,
             score=score,
             lower=lower,
             upper=upper,
@@ -1320,6 +1324,7 @@ class _AgenticChatterBase(BaseChatter):
         history_messages: list["Message"],
         unread_msgs: list["Message"],
         signal_summary: dict[str, Any],
+        bot_nicknames: tuple[str, ...],
         score: float,
         lower: float,
         upper: float,
@@ -1340,6 +1345,7 @@ class _AgenticChatterBase(BaseChatter):
             history_messages: 近期群聊历史消息。
             unread_msgs: 本轮待判断的新消息。
             signal_summary: 本地信号摘要。
+            bot_nicknames: 群里称呼 bot 的昵称与别名。
             score: 本地评分标量。
             lower: 本地评分区间下界。
             upper: 本地评分区间上界。
@@ -1429,6 +1435,7 @@ class _AgenticChatterBase(BaseChatter):
             history=history_views,
             signals=signal_summary,
             max_history_messages=settings.max_history_messages,
+            bot_names=bot_nicknames,
         )
         try:
             # 复用共享客户端以保留连接池；单次请求的超时由 request_decision

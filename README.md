@@ -98,8 +98,13 @@ Jev 是 TypeSafe 的 System One 模型，返回 typed answer 与概率而非自�
 - **只有选 `jev` 才会发请求**。`decider = sub_actor` 时即使 `[jev]` 全部配置齐全，
   也不会产生任何外部调用。
 - **提问语料**：`state` 只含 `bot` 身份、最近 `max_history_messages`(8) 条对话、
-  本轮 `incoming` 新消息与 8 个本地信号值。单条消息按 `max_chars_per_message`(200)
+  本轮 `incoming` 新消息与 9 个本地信号值。单条消息按 `max_chars_per_message`(200)
   截断。Choice 的两个选项顺序固定（Jev 偏向排在前面的选项）。
+- **bot 身份包含称呼**：`state.bot.names` 下发群里称呼 bot 的昵称与别名，
+  并在 instructions 中写明「以这些名字开头或 @ 这些名字即召唤」。缺少这一步时，
+  Jev 不认识自己的名字，冷却期内喊名字会被判成静默。
+- **`direct_address` 信号**：本地规则已经确认消息在称呼 bot 时会下发该信号，
+  避免 Jev 仅凭字面语义重新判断一次召唤。
 - **失败处理**：超时、限流(429)、过载(529) 按 `max_retries`(2) 递增退避重试；
   鉴权(401)、参数错误(422)、网络错误、响应结构非法、置信度低于 `min_confidence`
   均视为不可用，按 `fallback_decider` 处理：

@@ -31,6 +31,11 @@
 
 ### Fixed
 
+- 修复灰区喊名字不回应：`state.bot` 此前只有 `is_chatbot`，Jev 不知道群里怎么称呼
+  它，收到「小蝶，这个咋办」会判成静默（实测 confidence 0.12）。现下发
+  `state.bot.names`（昵称与别名）并在 instructions 写明召唤判据；同时补发
+  `direct_address` 信号，使本地已确认的称呼不必由 Jev 重新判断。实测
+  「喊昵称」「@昵称」「昵称在句中」由静默转为接话（confidence 0.76-1.00）。
 - 修复 `chatter -> pipeline -> actions -> chatter` 循环导入：`pipeline.loop` 依赖的
   `clamp_stop_minutes` 与冷却常量移入中立的 `pipeline.control_constants`，
   `actions.control` 改为重新导出保留既有导入路径。此前直接导入 `chatter` 或

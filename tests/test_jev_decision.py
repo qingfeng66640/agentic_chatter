@@ -98,7 +98,7 @@ def test_build_state_marks_bot_messages() -> None:
     )
 
     assert state["messages"][0]["role"] == "bot"
-    assert state["bot"] == {"is_chatbot": True}
+    assert state["bot"]["is_chatbot"] is True
 
 
 def test_build_state_drops_empty_messages() -> None:
@@ -504,6 +504,7 @@ async def _run_jev(
         history_messages=[],
         unread_msgs=_messages(),
         signal_summary={"question_or_request": 1.0},
+        bot_nicknames=("小蝶",),
         score=0.0,
         lower=-0.2,
         upper=0.2,
@@ -561,6 +562,7 @@ async def test_returns_none_when_config_is_none() -> None:
         history_messages=[],
         unread_msgs=_messages(),
         signal_summary={},
+        bot_nicknames=("小蝶",),
         score=0.0,
         lower=0.0,
         upper=0.0,
@@ -653,6 +655,7 @@ async def test_silent_fallback_on_disabled() -> None:
         history_messages=[],
         unread_msgs=_messages(),
         signal_summary={},
+        bot_nicknames=("小蝶",),
         score=0.02,
         lower=-0.3,
         upper=0.34,
@@ -676,6 +679,7 @@ async def test_silent_fallback_on_missing_api_key() -> None:
         history_messages=[],
         unread_msgs=_messages(),
         signal_summary={},
+        bot_nicknames=("小蝶",),
         score=0.0,
         lower=0.0,
         upper=0.0,
@@ -895,6 +899,7 @@ async def test_custom_base_url_is_actually_used(monkeypatch) -> None:
         history_messages=[],
         unread_msgs=_messages(),
         signal_summary={},
+        bot_nicknames=("小蝶",),
         score=0.0,
         lower=0.0,
         upper=0.0,
@@ -902,3 +907,56 @@ async def test_custom_base_url_is_actually_used(monkeypatch) -> None:
     )
 
     assert captured["url"] == "https://my-proxy.internal/v1/systemone"
+
+# --- bot 身份与召唤信号（回归：曾因只发 is_chatbot 导致喊名字不回应）------
+
+
+def test_state_declares_bot_names() -> None:
+    """state 必须告知 Jev 群里怎么称呼它，否则无法识别召唤。"""
+    state = build_state(
+        incoming=[_MessageView(sender="小明", text="小蝶，在吗")],
+        history=[],
+        signals={"direct_address": 1.0},
+        max_history_messages=5,
+        bot_names=("小蝶", "蝶蝶"),
+    )
+
+    bot = state["bot"]
+    assert bot["is_chatbot"] is True
+    assert bot["names"] == ["小蝶", "蝶蝶"]
+    # note 不重复具体昵称，只指向 names 字段，避免与 names 不同步
+    assert "names" in bot["note"]
+
+
+def test_state_without_names_falls_back_to_pronoun_note() -> None:
+    state = build_state(
+        incoming=[],
+        history=[],
+        signals={},
+        max_history_messages=5,
+    )
+
+    assert state["bot"]["names"] == []
+    assert "没有登记" in state["bot"]["note"]
+
+
+def test_direct_address_signal_has_legend() -> None:
+    """direct_address 必须有图例，否则 Jev 不知道 1 意味着被点名。"""
+    state = build_state(
+        incoming=[],
+        history=[],
+        signals={"direct_address": 1.0},
+        max_history_messages=5,
+    )
+
+    keys = list(state["signals"])
+    assert any(key.startswith("direct_address（") for key in keys)
+
+
+def test_instructions_mention_calling_bot_by_name() -> None:
+    """instructions 必须写明以 bot 名字开头即召唤。"""
+    from ..decision import jev as jev_module
+
+    text = jev_module._INSTRUCTIONS
+    assert "names" in text
+    assert "@" in text
