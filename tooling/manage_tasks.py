@@ -48,18 +48,31 @@ def _resolve_task_ref(
 ) -> tuple["TaskRuntime | None", str]:
     """按序号或任务ID前缀定位任务。
 
+    纯数字输入先按序号解释；序号越界时再回退按 ID 前缀匹配，避免把
+    纯数字任务ID前缀误判为越界序号。
+
     Returns:
         tuple[TaskRuntime | None, str]: (命中的任务, 错误提示；命中时为空串)。
     """
     normalized = str(task_ref or "").strip()
     if not normalized:
         return None, "请提供任务序号（list 输出中的序号）或任务ID前缀"
+
+    # 长度不足以作为 ID 前缀时，只能按序号解释。
+    if len(normalized) < _MIN_REF_PREFIX_LENGTH:
+        if normalized.isdigit():
+            position = int(normalized)
+            if 1 <= position <= len(tasks):
+                return tasks[position - 1], ""
+            return None, f"序号 {position} 超出范围；当前共 {len(tasks)} 个任务"
+        return None, f"ID 前缀至少 {_MIN_REF_PREFIX_LENGTH} 位，或直接使用序号"
+
+    # 长度足够时，先按序号解释；序号越界再回退按 ID 前缀匹配，
+    # 避免纯数字任务ID前缀被误判为越界序号。
     if normalized.isdigit():
         position = int(normalized)
         if 1 <= position <= len(tasks):
             return tasks[position - 1], ""
-        return None, f"序号 {position} 超出范围；当前共 {len(tasks)} 个任务"
-    if len(normalized) >= _MIN_REF_PREFIX_LENGTH:
         candidates = [
             runtime
             for runtime in tasks
@@ -67,11 +80,22 @@ def _resolve_task_ref(
         ]
         if len(candidates) == 1:
             return candidates[0], ""
-        if len(candidates) > 1:
-            ids = "、".join(runtime.state.task_id[:8] for runtime in candidates)
-            return None, f"ID 前缀匹配到多个任务：{ids}，请使用更长的前缀"
-        return None, "没有任务匹配该 ID 前缀"
-    return None, f"ID 前缀至少 {_MIN_REF_PREFIX_LENGTH} 位，或直接使用序号"
+        return None, (
+            f"序号 {position} 超出范围（当前共 {len(tasks)} 个任务），"
+            "也没有任务匹配该 ID 前缀"
+        )
+
+    candidates = [
+        runtime
+        for runtime in tasks
+        if runtime.state.task_id.startswith(normalized)
+    ]
+    if len(candidates) == 1:
+        return candidates[0], ""
+    if len(candidates) > 1:
+        ids = "、".join(runtime.state.task_id[:8] for runtime in candidates)
+        return None, f"ID 前缀匹配到多个任务：{ids}，请使用更长的前缀"
+    return None, "没有任务匹配该 ID 前缀"
 
 
 class ManageTasksTool(BaseTool):

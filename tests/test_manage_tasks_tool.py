@@ -83,14 +83,16 @@ async def test_status_requires_ref() -> None:
 async def test_status_ambiguous_prefix() -> None:
     tasks = [_make_task("stream-a", "任务一"), _make_task("stream-a", "任务二")]
     manager = get_task_runtime_manager()
+    # 构造同前缀。task_id 来自随机 uuid4().hex，前 6 位有约 15% 概率全为数字，
+    # 那样该前缀会被当作序号而非 ID 前缀。改用固定含字母的前缀，
+    # 让本用例稳定地覆盖「前缀命中多个任务」这一分支。
+    shared_prefix = "abcdef"
+    tasks[0].state.task_id = shared_prefix + "0123456789abcdef"
+    tasks[1].state.task_id = shared_prefix + "fedcba9876543210"
     for runtime in tasks:
         manager._tasks[runtime.state.task_id] = runtime
-    # 构造同前缀：把第二个的 ID 换成第一个的 6 位前缀 + 不同后缀
-    manager._tasks.pop(tasks[1].state.task_id)
-    tasks[1].state.task_id = tasks[0].state.task_id[:6] + "ffffff"
-    manager._tasks[tasks[1].state.task_id] = tasks[1]
 
-    ok, message = await _make_tool("stream-a").execute("status", tasks[0].state.task_id[:6])
+    ok, message = await _make_tool("stream-a").execute("status", shared_prefix)
     assert ok is False
     assert "多个任务" in message
 
@@ -122,7 +124,55 @@ def test_resolve_task_ref_out_of_range() -> None:
 
 
 def test_resolve_task_ref_short_prefix_rejected() -> None:
+    """短于 ID 前缀下限的非数字输入应被拒绝并提示长度要求。"""
     tasks = [_make_task("s", "唯一")]
-    target, error = _resolve_task_ref(tasks[0].state.task_id[:3], tasks)
+    # 前缀取自随机 uuid4().hex，若恰好为纯数字会被正确地当作序号解释，
+    # 从而得到「超出范围」而非长度提示。此处固定一个非数字短前缀，
+    # 断言的才是本用例真正要验证的分支。
+    target, error = _resolve_task_ref("abc", tasks)
     assert target is None
     assert "至少" in error
+
+
+def test_resolve_task_ref_short_numeric_prefix_is_ordinal() -> None:
+    """短纯数字输入只能按序号解释，越界时给出序号范围提示。"""
+    tasks = [_make_task("s", "唯一")]
+
+    # 范围内：命中第一个任务
+    target, _ = _resolve_task_ref("1", tasks)
+    assert target is tasks[0]
+
+    # 越界：报序号范围，而不是 ID 前缀长度
+    target, error = _resolve_task_ref("999", tasks)
+    assert target is None
+    assert "超出范围" in error
+
+
+def test_resolve_task_ref_numeric_id_prefix_not_mistaken_for_ordinal() -> None:
+    """纯数字任务ID前缀不应被当作序号。
+
+    task_id 来自 uuid4().hex，可能以纯数字开头；若只按序号解释，
+    用户粘贴纯数字 ID 前缀时会被误报「序号超出范围」。
+    """
+    runtime = _make_task("s", "唯一")
+    runtime.state.task_id = "12345678" + runtime.state.task_id[8:]
+    tasks = [runtime]
+
+    # 序号仍在范围内时优先按序号解释
+    target, _ = _resolve_task_ref("1", tasks)
+    assert target is runtime
+
+    # 越界的纯数字前缀应回退到 ID 前缀匹配并命中
+    target, error = _resolve_task_ref("12345678", tasks)
+    assert target is runtime
+    assert error == ""
+
+
+def test_resolve_task_ref_numeric_out_of_range_reports_both() -> None:
+    """既不是有效序号也不匹配任何 ID 时，错误信息同时提示两种可能。"""
+    tasks = [_make_task("s", "唯一")]
+
+    target, error = _resolve_task_ref("999999", tasks)
+
+    assert target is None
+    assert "超出范围" in error
