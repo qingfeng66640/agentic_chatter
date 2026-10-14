@@ -20,6 +20,7 @@ class DecisionSource(StrEnum):
     HARD_RULE = "hard_rule"
     LOCAL = "local"
     SUB_ACTOR = "sub_actor"
+    JEV = "jev"
     FALLBACK = "fallback"
 
 
@@ -71,6 +72,7 @@ _SOURCE_TEXT = {
     DecisionSource.HARD_RULE: "直接唤醒",
     DecisionSource.LOCAL: "本地判断",
     DecisionSource.SUB_ACTOR: "子决策模型",
+    DecisionSource.JEV: "Jev 决策",
     DecisionSource.FALLBACK: "故障回退",
 }
 _REASON_TEXT = {
@@ -100,6 +102,10 @@ _REASON_TEXT = {
     "strong_contextual_followup": "高连续性且内容具有可贡献信息",
     "local_score_reply": "本地评分达到回复边界",
     "local_score_silent": "本地评分达到静默边界",
+    "jev_decided": "Jev 裁决",
+    "jev_disabled": "Jev 未启用",
+    "jev_api_key_missing": "Jev 未配置 API Key",
+    "jev_error": "Jev 调用失败",
 }
 
 

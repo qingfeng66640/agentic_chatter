@@ -60,6 +60,17 @@ from .decision import (
     interval_summary,
     score_features,
 )
+from .decision.jev import (
+    JevError,
+    JevSettings,
+    _MessageView,
+    _clip,
+    build_decision,
+    build_fallback_decision,
+    build_state,
+    get_shared_client,
+    request_decision,
+)
 from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
@@ -1205,6 +1216,33 @@ class _AgenticChatterBase(BaseChatter):
             f"直接称呼={features.direct_address:.0f}，"
             f"本地原因={features.reasons}"
         )
+        signal_summary = {
+            "question_or_request": features.question_or_request,
+            "directed_elsewhere": features.directed_elsewhere,
+            "interruption_cost": features.interruption_cost,
+            "topic_closure": features.topic_closure,
+            "semantic_continuity": features.semantic_continuity,
+            "bot_history_continuity": features.bot_history_continuity,
+            "consecutive_participation": participation.consecutive_participation,
+            "consecutive_silence": participation.consecutive_silence,
+        }
+        jev_decision = await self._decide_gray_zone_with_jev(
+            config,
+            chat_stream=chat_stream,
+            decision_config=decision_config,
+            history_messages=recent_history,
+            unread_msgs=unread_msgs,
+            signal_summary=signal_summary,
+            score=score,
+            lower=lower,
+            upper=upper,
+            reasons=features.reasons,
+        )
+        if jev_decision is not None:
+            state.decision = jev_decision
+            self._log_reply_decision(state.decision)
+            return
+
         template = get_prompt_manager().get_template(
             "agentic_chatter_reply_decision"
         )
@@ -1219,16 +1257,7 @@ class _AgenticChatterBase(BaseChatter):
             system_prompt=system_prompt,
             unread_text=unread_text,
             history_text=history_text,
-            signal_summary={
-                "question_or_request": features.question_or_request,
-                "directed_elsewhere": features.directed_elsewhere,
-                "interruption_cost": features.interruption_cost,
-                "topic_closure": features.topic_closure,
-                "semantic_continuity": features.semantic_continuity,
-                "bot_history_continuity": features.bot_history_continuity,
-                "consecutive_participation": participation.consecutive_participation,
-                "consecutive_silence": participation.consecutive_silence,
-            },
+            signal_summary=signal_summary,
             local_score=score,
             lower_bound=lower,
             upper_bound=upper,
@@ -1236,6 +1265,224 @@ class _AgenticChatterBase(BaseChatter):
             suppress_contextual_fallback=suppress_contextual_fallback,
         )
         self._log_reply_decision(state.decision)
+
+    def _jev_unavailable(
+        self,
+        jev_config: Any,
+        detail: str,
+        *,
+        local_score: float,
+        lower_bound: float,
+        upper_bound: float,
+        reasons: list[str],
+    ) -> ReplyDecision | None:
+        """处理 Jev 不可用：按 ``fallback_decider`` 回退或直接静默。
+
+        Args:
+            jev_config: ``[jev]`` 配置段；为 None 时按 sub_actor 回退。
+            detail: 失败原因码，用于日志与决策原因。
+            local_score: 本地评分标量。
+            lower_bound: 本地评分区间下界。
+            upper_bound: 本地评分区间上界。
+            reasons: 本地信号原因码。
+
+        Returns:
+            ReplyDecision | None: 需要静默时返回静默决策，否则返回 None 交由
+                调用方回退 sub_actor。
+        """
+        mode = str(
+            getattr(jev_config, "fallback_decider", "sub_actor") or "sub_actor"
+        ).strip().lower()
+        if mode != "silent":
+            logger.debug(
+                f"[{self.stream_id[:8]}] Jev 不可用（{detail}），灰区回退 sub_actor"
+            )
+            return None
+        logger.warning(
+            f"[{self.stream_id[:8]}] Jev 不可用（{detail}）且回退策略为 silent，"
+            "本轮灰区静默，不调用 sub_actor"
+        )
+        return build_fallback_decision(
+            local_score=local_score,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+            reasons=list(reasons),
+            detail=detail,
+        )
+
+    async def _decide_gray_zone_with_jev(
+        self,
+        config: AgenticChatterConfig | None,
+        *,
+        chat_stream: "ChatStream",
+        decision_config: Any,
+        history_messages: list["Message"],
+        unread_msgs: list["Message"],
+        signal_summary: dict[str, Any],
+        score: float,
+        lower: float,
+        upper: float,
+        reasons: list[str],
+    ) -> ReplyDecision | None:
+        """尝试用 Jev 裁决灰区消息。
+
+        仅当 ``[decision].gray_zone_decider`` 为 ``jev``、Jev 已启用且配置了
+        API Key 时才会真正发起请求。Jev 不可用时按
+        ``[jev].fallback_decider`` 处理：为 ``sub_actor`` 时返回 ``None`` 交由
+        调用方走 sub_actor；为 ``silent`` 时直接返回静默决策，保证该模式下
+        灰区不会混入 sub_actor。
+
+        Args:
+            config: 插件配置。
+            chat_stream: 当前聊天流，用于取 bot 账号标识以标注 bot 发言。
+            decision_config: 回复决策配置段。
+            history_messages: 近期群聊历史消息。
+            unread_msgs: 本轮待判断的新消息。
+            signal_summary: 本地信号摘要。
+            score: 本地评分标量。
+            lower: 本地评分区间下界。
+            upper: 本地评分区间上界。
+            reasons: 本地信号原因码。
+
+        Returns:
+            ReplyDecision | None: Jev 裁决结果；调用方应回退 sub_actor 时为 None。
+        """
+        if config is None:
+            return None
+        if str(getattr(decision_config, "gray_zone_decider", "sub_actor") or "").strip().lower() != "jev":
+            return None
+        jev_config = getattr(config, "jev", None)
+        if jev_config is None or not bool(getattr(jev_config, "enabled", False)):
+            return self._jev_unavailable(
+                jev_config,
+                "jev_disabled",
+                local_score=score,
+                lower_bound=lower,
+                upper_bound=upper,
+                reasons=reasons,
+            )
+        api_key = str(getattr(jev_config, "api_key", "") or "").strip()
+        if not api_key:
+            return self._jev_unavailable(
+                jev_config,
+                "jev_api_key_missing",
+                local_score=score,
+                lower_bound=lower,
+                upper_bound=upper,
+                reasons=reasons,
+            )
+
+        settings = JevSettings(
+            api_key=api_key,
+            model=str(getattr(jev_config, "model", "jev-latest") or "jev-latest"),
+            timeout_seconds=float(
+                getattr(jev_config, "timeout_seconds", 8.0) or 8.0
+            ),
+            total_budget_seconds=float(
+                getattr(jev_config, "total_budget_seconds", 12.0) or 12.0
+            ),
+            max_history_messages=max(
+                0, int(getattr(jev_config, "max_history_messages", 8))
+            ),
+            max_chars_per_message=max(
+                20, int(getattr(jev_config, "max_chars_per_message", 200))
+            ),
+            max_retries=max(0, int(getattr(jev_config, "max_retries", 2))),
+            retry_backoff_seconds=float(
+                getattr(jev_config, "retry_backoff_seconds", 0.5) or 0.0
+            ),
+            min_confidence=float(getattr(jev_config, "min_confidence", 0.0) or 0.0),
+        )
+
+        max_chars = settings.max_chars_per_message
+        bot_id = str(getattr(chat_stream, "bot_id", "") or "")
+
+        def _view(message: "Message") -> _MessageView:
+            """构造送往 Jev 的消息视图，bot 发言据 bot_id 标注。"""
+            text = _clip(
+                str(
+                    getattr(message, "processed_plain_text", None)
+                    or getattr(message, "content", "")
+                    or ""
+                ),
+                max_chars,
+            )
+            return _MessageView(
+                sender=str(getattr(message, "sender_name", "") or "")
+                or str(getattr(message, "sender_id", "") or ""),
+                text=text,
+                is_bot=(
+                    str(getattr(message, "sender_role", "") or "").lower() == "bot"
+                    or str(getattr(message, "sender_id", "") or "") == bot_id
+                ),
+            )
+
+        history_views = [_view(message) for message in history_messages]
+        incoming_views = [_view(message) for message in unread_msgs]
+
+        jev_state = build_state(
+            incoming=incoming_views,
+            history=history_views,
+            signals=signal_summary,
+            max_history_messages=settings.max_history_messages,
+        )
+        try:
+            # 复用共享客户端以保留连接池；单次请求的超时由 request_decision
+            # 依据剩余总预算逐次设置，这里不再重复构造客户端。
+            answer = await request_decision(
+                get_shared_client(),
+                settings=settings,
+                state=jev_state,
+            )
+        except JevError as exc:
+            return self._jev_unavailable(
+                jev_config,
+                f"jev_error:{type(exc).__name__}",
+                local_score=score,
+                lower_bound=lower,
+                upper_bound=upper,
+                reasons=reasons,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - Jev 不可用不应中断回合
+            return self._jev_unavailable(
+                jev_config,
+                f"jev_exception:{type(exc).__name__}",
+                local_score=score,
+                lower_bound=lower,
+                upper_bound=upper,
+                reasons=reasons,
+            )
+
+        if bool(getattr(jev_config, "log_answers", False)):
+            # 观测模式：INFO 行保持不变（按来源筛选灰度对比依赖它），
+            # 额外在 DEBUG 输出概率分布与 token 用量以观测置信度分布。
+            logger.info(
+                f"[{self.stream_id[:8]}] Jev 裁决灰区 event=jev_decided "
+                f"动作={answer.action.value} 置信度={answer.confidence:.3f}"
+            )
+            logger.debug(
+                f"[{self.stream_id[:8]}] Jev 应答明细 event=jev_answer "
+                f"动作={answer.action.value} 置信度={answer.confidence:.3f} "
+                f"P(respond)={answer.respond_probability:.3f} "
+                f"P(silent)={answer.silent_probability:.3f} "
+                f"输入tokens={answer.input_tokens} 输出tokens={answer.output_tokens} "
+                f"本地评分={score:.3f} 区间=[{lower:.3f}, {upper:.3f}]"
+            )
+        else:
+            logger.info(
+                f"[{self.stream_id[:8]}] Jev 裁决灰区 event=jev_decided "
+                f"动作={answer.action.value} 置信度={answer.confidence:.3f}"
+            )
+        return build_decision(
+            answer.action,
+            answer.confidence,
+            local_score=score,
+            lower_bound=lower,
+            upper_bound=upper,
+            reasons=list(reasons),
+        )
 
     def _log_reply_decision(self, decision: ReplyDecision | None) -> None:
         """以中文记录本轮回复判断与诊断信息。"""

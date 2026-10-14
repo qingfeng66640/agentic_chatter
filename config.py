@@ -176,13 +176,24 @@ class AgenticChatterConfig(BaseConfig):
             default=True,
             description=(
                 "回复决策阶段的总开关。开启后，stage_order 中的 decide 会执行硬规则、"
-                "本地评分和置信区间初判，灰区才调用 sub_actor；若 stage_order 未包含 decide，"
-                "会在 act 前自动补入。关闭后，无论 stage_order 是否包含 decide，都会将其从实际"
-                "执行顺序中移除；local_gate_enabled、评分边界和 sub_actor 均不生效，"
-                "其余阶段仍按各自开关过滤后执行。"
+                "本地评分和置信区间初判，灰区才交给 gray_zone_decider 指定的裁决者；"
+                "若 stage_order 未包含 decide，会在 act 前自动补入。关闭后，无论 stage_order "
+                "是否包含 decide，都会将其从实际执行顺序中移除；local_gate_enabled、"
+                "评分边界和灰区裁决者均不生效，其余阶段仍按各自开关过滤后执行。"
             ),
             label="启用回复决策",
             tag="ai",
+        )
+        gray_zone_decider: str = Field(
+            default="sub_actor",
+            description=(
+                "本地评分落入灰区时由谁裁决：sub_actor 用 sub_actor 模型（默认，"
+                "与既有行为完全一致）；jev 改用 Jev 灰区裁决（见 [jev] 配置节）。"
+                "无论选哪个，硬规则与本地评分直通都仍然生效，不受此项影响。"
+            ),
+            label="灰区裁决者",
+            tag="ai",
+            hint="可选 sub_actor 或 jev；填非法值时回退 sub_actor",
         )
         local_gate_enabled: bool = Field(
             default=True,
@@ -610,6 +621,139 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
 
+    @config_section("jev", title="Jev 决策", tag="ai")
+    class JevSection(SectionBase):
+        """Jev（TypeSafe System One）灰区裁决配置。
+
+        仅当 ``[decision].gray_zone_decider`` 为 ``jev`` 时本节才生效。
+        Jev 返回 typed answer 和概率，不生成文本，因此不涉及提示词模板与
+        JSON 解析。
+
+        未配置 ``api_key`` 时不会发起请求，灰区按 ``fallback_decider`` 处理。
+        """
+
+        enabled: bool = Field(
+            default=False,
+            description=(
+                "是否启用 Jev 集成。只有当 gray_zone_decider = jev 且本项为真、"
+                "api_key 非空时才会真正调用 Jev。关闭或未填 API Key 时，灰区按 "
+                "fallback_decider 处理，行为与未启用本节时一致。"
+            ),
+            label="启用 Jev",
+            tag="ai",
+        )
+        api_key: str = Field(
+            default="",
+            description=(
+                "TypeSafe API Key，形如 ts_xxx。仅用于向 api.typesafe.ai "
+                "发起灰区裁决请求；留空表示未启用。请在部署环境中限制本配置"
+                "文件的读取权限，不要提交到版本库。"
+            ),
+            label="TypeSafe API Key",
+            input_type="password",
+            tag="security",
+        )
+        fallback_decider: str = Field(
+            default="sub_actor",
+            description=(
+                "Jev 不可用时（未启用、未填 Key、超时、限流、鉴权失败、"
+                "响应非法或置信度低于门限）灰区改由谁裁决：sub_actor 回退到 "
+                "sub_actor 模型；silent 直接静默本轮，保证不会混入 LLM 裁决，"
+                "适合需要纯净 Jev 行为的灰度实验。"
+            ),
+            label="Jev 失败回退",
+            tag="ai",
+            hint="可选 sub_actor 或 silent；填非法值时回退 sub_actor",
+        )
+        model: str = Field(
+            default="jev-latest",
+            description="Jev 模型别名；一般使用 jev-latest 跟随官方最新版本。",
+            label="Jev 模型",
+            tag="ai",
+        )
+        timeout_seconds: float = Field(
+            default=8.0,
+            description=(
+                "单次 Jev 请求超时（秒）。重试会叠加尝试次数，真正的硬上限是"
+                " total_budget_seconds。"
+            ),
+            label="单次请求超时（秒）",
+            ge=1.0,
+            le=60.0,
+            tag="performance",
+        )
+        total_budget_seconds: float = Field(
+            default=12.0,
+            description=(
+                "一次灰区裁决的总耗时硬上限（秒）。群聊回合在此期间被阻塞，"
+                "因此不应设得过大；单次尝试会取 timeout_seconds 与剩余预算的较小值，"
+                "预算耗尽后放弃剩余重试并按 fallback_decider 处理。"
+            ),
+            label="总预算（秒）",
+            ge=1.0,
+            le=60.0,
+            tag="performance",
+        )
+        max_history_messages: int = Field(
+            default=8,
+            description=(
+                "送给 Jev 的最近群聊消息条数。Jev 对无关上下文敏感，"
+                "只保留判断所需的最近消息；调大会增加 token 消耗与干扰。"
+            ),
+            label="历史消息条数",
+            ge=0,
+            le=50,
+            tag="performance",
+        )
+        max_chars_per_message: int = Field(
+            default=200,
+            description="送给 Jev 的单条消息字符上限，超长会被截断。",
+            label="单条消息字数",
+            ge=20,
+            le=4000,
+            tag="performance",
+        )
+        max_retries: int = Field(
+            default=2,
+            description=(
+                "遇到限流(429)或服务过载(529)时的额外重试次数，使用递增退避；"
+                "鉴权失败(401)与参数错误(422)不重试。"
+            ),
+            label="重试次数",
+            ge=0,
+            le=5,
+            tag="performance",
+        )
+        retry_backoff_seconds: float = Field(
+            default=0.5,
+            description="重试基础退避秒数，实际等待按次数递增。",
+            label="重试退避（秒）",
+            ge=0.0,
+            le=10.0,
+            tag="performance",
+        )
+        min_confidence: float = Field(
+            default=0.0,
+            description=(
+                "Jev 置信度门限，低于该值视为不确定并走故障回退。"
+                "0 表示接受任何置信度。置信度只反映概率分布的集中程度，"
+                "不等于判断正确率，调高前请先用真实群聊数据观测分布。"
+            ),
+            label="最低置信度",
+            ge=0.0,
+            le=1.0,
+            tag="ai",
+        )
+        log_answers: bool = Field(
+            default=False,
+            description=(
+                "是否记录 Jev 返回的动作、概率分布与 token 用量到 DEBUG 日志，"
+                "便于观测置信度分布；不记录群聊原文。"
+            ),
+            label="记录 Jev 应答",
+            tag="debug",
+        )
+
     @config_section("humanize", title="拟人化", tag="ai")
     class HumanizeSection(SectionBase):
         """拟人化行为配置。"""
@@ -1017,6 +1161,7 @@ class AgenticChatterConfig(BaseConfig):
     plugin: PluginSection = Field(default_factory=PluginSection)
     pipeline: PipelineSection = Field(default_factory=PipelineSection)
     decision: DecisionSection = Field(default_factory=DecisionSection)
+    jev: JevSection = Field(default_factory=JevSection)
     tools: ToolsSection = Field(default_factory=ToolsSection)
     humanize: HumanizeSection = Field(default_factory=HumanizeSection)
     tasks: TaskSection = Field(default_factory=TaskSection)

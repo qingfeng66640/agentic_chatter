@@ -159,6 +159,9 @@ class AgenticChatterPlugin(BasePlugin):
     async def on_plugin_unloaded(self) -> None:
         """插件卸载前的清理。"""
         clear_skills()
+        from .decision.jev import close_shared_client
+
+        await close_shared_client()
         logger.info("agentic_chatter 插件已卸载")
 
     def get_components(self) -> list[type]:
