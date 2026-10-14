@@ -665,6 +665,16 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
             hint="可选 sub_actor 或 silent；填非法值时回退 sub_actor",
         )
+        base_url: str = Field(
+            default="https://api.typesafe.ai",
+            description=(
+                "Jev 服务地址。默认指向 TypeSafe 官方；使用自建代理、镜像或"
+                " 本地网关时改这里。路径 /v1/systemone 会自动补全，"
+                "无需自行填写结尾斜杠。"
+            ),
+            label="服务地址",
+            tag="network",
+        )
         model: str = Field(
             default="jev-latest",
             description="Jev 模型别名；一般使用 jev-latest 跟随官方最新版本。",

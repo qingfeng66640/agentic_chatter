@@ -61,6 +61,7 @@ from .decision import (
     score_features,
 )
 from .decision.jev import (
+    DEFAULT_JEV_BASE_URL,
     JevError,
     JevSettings,
     _MessageView,
@@ -1374,6 +1375,9 @@ class _AgenticChatterBase(BaseChatter):
 
         settings = JevSettings(
             api_key=api_key,
+            base_url=str(
+                getattr(jev_config, "base_url", "") or DEFAULT_JEV_BASE_URL
+            ),
             model=str(getattr(jev_config, "model", "jev-latest") or "jev-latest"),
             timeout_seconds=float(
                 getattr(jev_config, "timeout_seconds", 8.0) or 8.0

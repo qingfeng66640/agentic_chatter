@@ -37,8 +37,11 @@ from .models import DecisionAction, DecisionSource, ReplyDecision
 
 logger = get_logger("agentic_chatter.decision")
 
-# TypeSafe System One 评估端点
-JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+# TypeSafe System One 评估端点路径，拼接在可配置的 base_url 之后。
+JEV_ENDPOINT_PATH = "/v1/systemone"
+
+# 默认服务地址；自建代理或本地网关可在 [jev].base_url 覆盖。
+DEFAULT_JEV_BASE_URL = "https://api.typesafe.ai"
 
 # 默认可重试的状态码：限流与服务过载
 _RETRYABLE_STATUS = frozenset({429, 529})
@@ -104,6 +107,7 @@ class JevSettings:
     """
 
     api_key: str
+    base_url: str = DEFAULT_JEV_BASE_URL
     model: str = "jev-latest"
     timeout_seconds: float = 8.0
     total_budget_seconds: float = 12.0
@@ -112,6 +116,21 @@ class JevSettings:
     max_retries: int = 2
     retry_backoff_seconds: float = 0.5
     min_confidence: float = 0.0
+
+    @property
+    def endpoint(self) -> str:
+        """返回完整评估端点。
+
+        允许 ``base_url`` 直接写到 ``/v1/systemone``，也允许只填到域名或
+        某个网关前缀，路径会按需补全，避免用户重复填写路径导致拼成
+        ``.../v1/systemone/v1/systemone``。
+        """
+        base = str(self.base_url or "").strip().rstrip("/")
+        if not base:
+            return f"{DEFAULT_JEV_BASE_URL}{JEV_ENDPOINT_PATH}"
+        if base.endswith(JEV_ENDPOINT_PATH):
+            return base
+        return f"{base}{JEV_ENDPOINT_PATH}"
 
 
 class JevError(RuntimeError):
@@ -350,7 +369,7 @@ async def request_decision(
         attempt_timeout = max(0.5, min(float(settings.timeout_seconds), remaining))
         try:
             response = await client.post(
-                JEV_ENDPOINT,
+                settings.endpoint,
                 json=payload,
                 headers=headers,
                 timeout=httpx.Timeout(attempt_timeout),

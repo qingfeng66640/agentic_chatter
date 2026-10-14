@@ -68,9 +68,19 @@ gray_zone_decider = "sub_actor"   # sub_actor（默认）| jev
 
 [jev]                            # 仅 decider = jev 时本节才生效
 enabled = true
-api_key = "ts_xxx"
+api_key = "ts_xxx"               # 请限制配置文件读取权限，不要提交到版本库
+base_url = "https://api.typesafe.ai"   # 自建代理/镜像/本地网关改这里
 fallback_decider = "sub_actor"    # sub_actor（默认）| silent
 ```
+
+`base_url` 支持几种写法，路径 `/v1/systemone` 会自动补全，结尾有无斜杠均可：
+
+| 填写 | 实际请求地址 |
+| --- | --- |
+| 留空 | `https://api.typesafe.ai/v1/systemone` |
+| `https://api.typesafe.ai` | 同上 |
+| `https://api.typesafe.ai/v1/systemone` | 同上（不会重复拼接） |
+| `http://127.0.0.1:8080/jev-proxy` | `http://127.0.0.1:8080/jev-proxy/v1/systemone` |
 
 | `gray_zone_decider` | 硬规则后 | 说明 |
 | --- | --- | --- |

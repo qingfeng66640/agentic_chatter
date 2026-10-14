@@ -19,7 +19,6 @@ import httpx
 import pytest
 
 from ..decision.jev import (
-    JEV_ENDPOINT,
     JevError,
     JevSettings,
     _MessageView,
@@ -231,7 +230,7 @@ async def test_request_decision_success_sends_expected_payload() -> None:
     assert result.confidence == pytest.approx(0.88)
     assert result.input_tokens == 100
     assert result.output_tokens == 10
-    assert captured["url"] == JEV_ENDPOINT
+    assert captured["url"] == _settings().endpoint
     assert captured["auth"] == "Bearer ts_test_key"
     # 选项顺序固定：respond 在前
     criteria = captured["body"]["questions"]["action"]["criteria"]
@@ -470,6 +469,7 @@ def _patch_http(monkeypatch, handler, captured: dict | None = None):
 
     def wrapped(request: httpx.Request) -> httpx.Response:
         if captured is not None:
+            captured["url"] = str(request.url)
             captured["body"] = json.loads(request.content.decode("utf-8"))
         return handler(request)
 
@@ -828,3 +828,77 @@ async def test_request_decision_exposes_usage_tokens() -> None:
 
     assert result.input_tokens == 100
     assert result.output_tokens == 10
+
+
+# --- base_url 可配置（不得硬编码）---------------------------------------
+
+
+def test_endpoint_defaults_to_official_url() -> None:
+    assert (
+        JevSettings(api_key="k").endpoint
+        == "https://api.typesafe.ai/v1/systemone"
+    )
+
+
+def test_endpoint_accepts_custom_gateway() -> None:
+    settings = JevSettings(api_key="k", base_url="https://my-proxy.internal")
+
+    assert settings.endpoint == "https://my-proxy.internal/v1/systemone"
+
+
+def test_endpoint_tolerates_trailing_slash() -> None:
+    settings = JevSettings(api_key="k", base_url="https://my-proxy.internal/")
+
+    assert settings.endpoint == "https://my-proxy.internal/v1/systemone"
+
+
+def test_endpoint_does_not_double_path() -> None:
+    """用户直接填到完整路径时不应拼成 .../v1/systemone/v1/systemone。"""
+    settings = JevSettings(
+        api_key="k", base_url="https://api.typesafe.ai/v1/systemone"
+    )
+
+    assert settings.endpoint == "https://api.typesafe.ai/v1/systemone"
+
+
+def test_endpoint_supports_local_proxy_with_path_prefix() -> None:
+    settings = JevSettings(
+        api_key="k", base_url="http://127.0.0.1:8080/jev-proxy"
+    )
+
+    assert settings.endpoint == "http://127.0.0.1:8080/jev-proxy/v1/systemone"
+
+
+def test_endpoint_falls_back_when_base_url_blank() -> None:
+    settings = JevSettings(api_key="k", base_url="   ")
+
+    assert settings.endpoint == "https://api.typesafe.ai/v1/systemone"
+
+
+async def test_custom_base_url_is_actually_used(monkeypatch) -> None:
+    """端到端确认请求真的发往自定义地址，而不是硬编码域名。"""
+    captured: dict = {}
+
+    _patch_http(
+        monkeypatch,
+        _ok_handler,
+        captured,
+    )
+    chatter = _JevChatter()
+    config = _config(True, "ts_key")
+    config.jev.base_url = "https://my-proxy.internal"
+
+    await chatter._decide_gray_zone_with_jev(
+        config,
+        chat_stream=_chat_stream(),
+        decision_config=_decision_config("jev"),
+        history_messages=[],
+        unread_msgs=_messages(),
+        signal_summary={},
+        score=0.0,
+        lower=0.0,
+        upper=0.0,
+        reasons=[],
+    )
+
+    assert captured["url"] == "https://my-proxy.internal/v1/systemone"
