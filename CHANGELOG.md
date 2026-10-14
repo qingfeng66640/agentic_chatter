@@ -1,5 +1,43 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- 新增 `[decision].gray_zone_decider`：显式指定灰区裁决者，可选 `sub_actor`（默认，
+  与既有行为完全一致）或 `jev`。硬规则与本地评分直通不受影响，Jev 只占灰区一格。
+- 新增 `[jev]` 配置节与 Jev（TypeSafe System One）灰区裁决：把「近段消息、历史和
+  本地信号」交给 Jev 判断是否该回复，替代原本的 sub_actor 调用。Jev 返回 typed
+  answer 与概率，无需提示词模板与 JSON 解析。提问语料是「是否该回复」本身，
+  embedding 连续性仍由本地评分算好后作为事实传入。
+- 新增 `[jev].fallback_decider`：Jev 不可用（未启用、未填 Key、超时、限流、鉴权或
+  参数错误、响应非法、置信度低于 `min_confidence`）时，`sub_actor`（默认）回退到
+  sub_actor 并沿用 `fallback_mode`；`silent` 则直接静默本轮、绝不混入 sub_actor，
+  便于进行纯净 Jev 行为的灰度实验。
+
+### Changed
+
+- `DecisionSource` 新增 `jev` 取值，日志措辞「Jev 决策」与「子决策模型」分开，
+  便于按裁决来源筛选日志做对比。Jev 裁决不再标记 `sub_actor_used`。
+- 新增 `[jev].total_budget_seconds`（默认 12 秒）作为一次灰区裁决的总耗时硬上限。
+  此前只有单次尝试超时，重试次数叠加后最坏可阻塞 decide 阶段数分钟。
+- 发送给 Jev 的本地信号字段附带中文说明与取值范围：System One 模型不是推理模型，
+  无图例的英文键名会让其猜测字段含义。
+- `api_key` 标记为 `input_type="password"`，管理界面不再明文渲染。
+- Jev 裁决复用进程内共享 HTTP 客户端，保留连接池，避免每次裁决重建 TCP+TLS 连接。
+
+### Fixed
+
+- 修复 `chatter -> pipeline -> actions -> chatter` 循环导入：`pipeline.loop` 依赖的
+  `clamp_stop_minutes` 与冷却常量移入中立的 `pipeline.control_constants`，
+  `actions.control` 改为重新导出保留既有导入路径。此前直接导入 `chatter` 或
+  `pipeline.loop` 会抛 ImportError（先导入 `plugin` 则不受影响）。
+- 修复 `manage_tasks` 工具的任务引用解析缺陷：任何纯数字输入都被无条件当作序号，
+  导致纯数字任务ID前缀无法定位任务（用户粘贴此类 ID 前缀时会得到「序号超出范围」）。
+  现改为纯数字先按序号解释、序号越界再回退按 ID 前缀匹配。
+  同时修复 `test_manage_tasks_tool` 的随机失败：该缺陷使短前缀测试有约 25% 概率
+  因 `uuid4().hex` 前 3 位全为数字而误入序号分支。
+
 ## [0.7.1] - 2026-09-28
 
 ### Fixed
@@ -170,17 +208,6 @@
 - 完善输入合并、中断释放、回合确认和连续中断计数的诊断日志。
 
 ## [0.3.1] - 2026-08-19
-
-### Added
-
-- 新增供应商异常正文检测：识别 Google/Gemini 审核拦截被错误包装为正常模型文本的情况。
-- 命中明显审核拦截文本时，在完整分段发送前阻止消息外发，并记录不包含原文的结构化日志。
-
-### Fixed
-
-- 修复上游返回 `The prompt could not be submitted...` 等审核说明时，被 Agentic Chatter 当作正常回复发送的问题。
-
-## [0.3.0] - 2026-08-14
 
 ### Added
 
