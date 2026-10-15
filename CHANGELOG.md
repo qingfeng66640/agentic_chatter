@@ -37,6 +37,18 @@
   达到上限后跳过装不下的图片继续往后选，单张另有 12MB 硬上限；设为 0 表示不按体积
   限制。注意首张图片豁免累计预算，因此实际总量上界为
   `min(max_input_images × 12MB, max(max_input_image_bytes, 12MB))`。
+- **[行为变更]** DECIDE 阶段默认值重配，只改默认值，不改评分公式与硬规则：
+  - 上下文预算放宽——`max_input_tokens` 1500→2500、`max_unread_tokens` 700→2000、
+    `history_message_limit` 10→20、`semantic_candidate_limit` 4→20、
+    `semantic_candidate_max_chars` 360→2000；
+  - 本地直通边界调整——`local_reply_lower_bound` 0.30→0.35（更谨慎）、
+    `local_silent_upper_bound` -0.25→0.2；两者同时变化会明显收窄交给灰区裁决的范围；
+  - 评分权重重配（9 升 1 降）——正向侧 `weight_question_or_request` 0.08→0.4、
+    `weight_semantic_continuity` 0.26→0.4、`weight_bot_history_continuity` 0.18→0.3、
+    `weight_contribution_value` 0.10→0.20、`weight_silence_momentum` 0.04→0.1；
+    惩罚侧 `weight_directed_elsewhere` 0.34→0.45、`weight_interruption_cost` 0.24→0.45、
+    `weight_topic_closure` 0.24→0.40、`weight_rhythm_cooldown` 0.20→0.35；
+    `weight_participation_momentum` 由 0.08 下调至 0.05。
 
 ### Fixed
 

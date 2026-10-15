@@ -243,7 +243,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         max_input_tokens: int = Field(
-            default=1500,
+            default=2500,
             description=(
                 "决策模型总输入 token 的软上限，包含未读消息、历史和本地信号。"
                 "调大可保留更多上下文，但会增加模型成本和延迟；不改变评分公式。"
@@ -252,7 +252,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="performance",
         )
         max_unread_tokens: int = Field(
-            default=700,
+            default=2000,
             description=(
                 "决策输入中未读消息部分的 token 软上限。调大更利于理解长消息批次，"
                 "调小可限制成本；其余上下文预算仍由总输入上限约束。"
@@ -261,7 +261,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="performance",
         )
         history_message_limit: int = Field(
-            default=10,
+            default=20,
             description=(
                 "决策最多读取的近期历史消息条数，用于判断话题和 Bot 发言连续性。"
                 "调大可参考更长上下文，但会增加输入量和延迟。"
@@ -270,7 +270,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="performance",
         )
         semantic_candidate_limit: int = Field(
-            default=4,
+            default=20,
             description=(
                 "每类 embedding 语义候选的最大数量，分别从近期话题和 Bot 历史中选取。"
                 "调大可扩大语义参考范围，但会增加 embedding 输入量。"
@@ -279,7 +279,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="performance",
         )
         semantic_candidate_max_chars: int = Field(
-            default=360,
+            default=2000,
             description=(
                 "单个 embedding 语义候选的字符上限。调大可保留更完整的长消息，"
                 "调小可减少 embedding 成本；不会改变候选数量。"
@@ -288,7 +288,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="performance",
         )
         local_reply_lower_bound: float = Field(
-            default=0.30,
+            default=0.35,
             description=(
                 "本地直接回复边界。实际比较的是 lower_bound = score - uncertainty，"
                 "而非原始 score；当下界大于等于此值时直接回复，不调用 sub_actor。"
@@ -298,7 +298,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         local_silent_upper_bound: float = Field(
-            default=-0.25,
+            default=0.2,
             description=(
                 "本地直接静默边界。实际比较的是 upper_bound = score + uncertainty，"
                 "当上界小于等于此值时直接暂不回复。两条直通边界之间属于灰区，"
@@ -399,7 +399,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_semantic_continuity: float = Field(
-            default=0.26,
+            default=0.4,
             description=(
                 "当前消息与近期话题 embedding 连续性的正向加分权重。权重越大，"
                 "承接当前话题越容易回复；语义相关本身不能单独保证回复。"
@@ -408,7 +408,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_bot_history_continuity: float = Field(
-            default=0.18,
+            default=0.3,
             description=(
                 "当前消息与 Bot 近期发言 embedding 连续性的正向加分权重。调大可"
                 "增强对 Bot 话题后续追问的响应；仍会受他人定向、冷却和打断成本保护。"
@@ -417,7 +417,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_participation_momentum: float = Field(
-            default=0.08,
+            default=0.05,
             description=(
                 "Bot 近期已参与当前流的正向加分权重。调大更倾向延续已参与对话，"
                 "调小则降低刷存在感风险。"
@@ -426,7 +426,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_question_or_request: float = Field(
-            default=0.08,
+            default=0.4,
             description=(
                 "消息呈现问题或请求形态时的正向加分权重。调大更愿意响应提问；"
                 "泛问题、面向其他成员的问题仍可能进入灰区或静默。"
@@ -435,7 +435,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_contribution_value: float = Field(
-            default=0.10,
+            default=0.20,
             description=(
                 "消息信息量及 Bot 可提供有效贡献时的正向加分权重。调大更偏好有内容的"
                 "后续讨论；它需要与连续性等信号结合，不能单独触发回复。"
@@ -444,7 +444,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_directed_elsewhere: float = Field(
-            default=0.34,
+            default=0.45,
             description=(
                 "消息明确面向其他成员时的惩罚强度。配置填写正数，代码会自动取负加入评分；"
                 "调大更不易打断他人对话。"
@@ -453,7 +453,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_interruption_cost: float = Field(
-            default=0.24,
+            default=0.45,
             description=(
                 "多人快速交谈时的打断代价惩罚强度。配置填写正数，代码会自动取负；"
                 "调大后 Bot 会更少插入节奏紧密、没有明确入口的对话。"
@@ -462,7 +462,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_topic_closure: float = Field(
-            default=0.24,
+            default=0.40,
             description=(
                 "话题已收尾时的惩罚强度。配置填写正数，代码会自动取负；调大后"
                 "更倾向让已结束的话题自然结束，减少无意义补话。"
@@ -471,7 +471,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_rhythm_cooldown: float = Field(
-            default=0.20,
+            default=0.35,
             description=(
                 "刚回复后的节奏冷却惩罚强度。配置填写正数，代码会自动取负；调大后"
                 "冷却期内更克制，调小则更容易连续回复。"
@@ -480,7 +480,7 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
         weight_silence_momentum: float = Field(
-            default=0.04,
+            default=0.1,
             description=(
                 "连续静默后的轻微惩罚强度。配置填写正数，代码会自动取负；调大后"
                 "更保持沉默惯性，调小则更容易重新参与。"
