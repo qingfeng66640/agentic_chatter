@@ -55,7 +55,7 @@ class AgenticChatterConfig(BaseConfig):
         native_multimodal: bool = Field(
             default=False,
             description=(
-                "是否在主 Agent 的 ACT 阶段以原生图片内容传入本轮新消息。"
+                "是否在主 Agent 的 ACT 阶段以原生图片内容传入图片。"
                 "DECIDE、感知、规划和后台任务仍使用文本上下文；需要模型支持视觉输入。"
             ),
             label="主 Agent 原生多模态",
@@ -63,10 +63,27 @@ class AgenticChatterConfig(BaseConfig):
         )
         max_input_images: int = Field(
             default=3,
-            description="原生多模态模式下单次新输入最多传入的图片数量",
+            description=(
+                "原生多模态模式下单次请求最多传入的图片总数。"
+                "本轮新输入图片与历史图片共享此预算；按「本轮优先、统一新→旧」选取，"
+                "同一张图只内联一次。设为 0 表示不传入任何图片。"
+            ),
             label="单次最大图片数",
             ge=0,
             le=32,
+            tag="performance",
+        )
+        max_input_image_bytes: int = Field(
+            default=8 * 1024 * 1024,
+            description=(
+                "原生多模态模式下单次请求图片体积上限，单位字节。"
+                "达到上限后跳过装不下的图片继续往后选；单张另有 12MB 硬上限。"
+                "首张图片豁免累计预算，因此单次请求的实际总量上界为 "
+                "min(单次最大图片数 × 12MB, (体积上限>0 ? 体积上限 : ∞) + 12MB)。"
+                "设为 0 表示不按体积限制，此时单次最大图片数取 32 时最坏可达 384MB。"
+            ),
+            label="单次图片体积上限",
+            ge=0,
             tag="performance",
         )
 

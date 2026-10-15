@@ -76,7 +76,7 @@ from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
 from .humanize.qqbot_streaming import create_streaming_session
-from .multimodal import image_count, inline_message_images
+from .multimodal import inline_message_images, summarize_budget
 from .humanize.segmenter import (
     CleanReplyResult,
     clean_reply_text_with_metadata,
@@ -1604,17 +1604,28 @@ class _AgenticChatterBase(BaseChatter):
             history_messages = list(chat_stream.context.history_messages)
             multimodal_messages = history_messages + list(unread_msgs)
             max_images = max(0, int(getattr(config.plugin, "max_input_images", 3)))
+            max_bytes = max(
+                0, int(getattr(config.plugin, "max_input_image_bytes", 8 * 1024 * 1024))
+            )
             user_content = inline_message_images(
                 user_text,
                 multimodal_messages,
                 preferred_messages=unread_msgs,
                 max_images=max_images,
+                max_bytes=max_bytes,
             )
-            total_images = image_count(multimodal_messages)
-            if total_images > max_images:
+            budget = summarize_budget(
+                user_content,
+                multimodal_messages,
+                max_bytes=max_bytes,
+            )
+            if budget["should_warn"]:
                 logger.warning(
-                    f"[{self.stream_id[:8]}] 本轮图片达到上限，跳过多余图片 "
-                    f"event=multimodal_image_limit total={total_images} limit={max_images}"
+                    f"[{self.stream_id[:8]}] 多模态图片预算生效 "
+                    f"event=multimodal_image_limit 引用={budget['ref_count']} "
+                    f"去重={budget['distinct_count']} 实际内联={budget['emitted']} "
+                    f"上限={max_images} 体积={budget['emitted_bytes']}B "
+                    f"体积上限={max_bytes}B reason={budget['reason']}"
                 )
 
         request = self._create_act_request(config)
