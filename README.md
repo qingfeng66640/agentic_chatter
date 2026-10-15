@@ -6,6 +6,7 @@
 - **仓库**：`qingfeng66640/agentic_chatter`
 - **最低核心版本**：`1.3.0-alpha.1`
 - **许可证**：GPL-3.0，详见 [LICENSE](LICENSE)
+- **升级文档**：从 0.7.x 升级请先读 [docs/upgrade-0.8.0.md](docs/upgrade-0.8.0.md)
 
 ## 安装与启用
 
@@ -58,8 +59,8 @@
 硬规则 → 本地评分 + 置信区间 → 灰区裁决者 → 故障回退
 ```
 
-**灰区**指的是本地评分区间既未越过 `local_reply_lower_bound`(0.30)、
-也未越过 `local_silent_upper_bound`(-0.25) 的那段区间，也就是「本地拿不准、
+**灰区**指的是本地评分区间既未越过 `local_reply_lower_bound`(0.35)、
+也未越过 `local_silent_upper_bound`(0.2) 的那段区间，也就是「本地拿不准、
 需要外部判断」的消息。灰区由谁裁决，由 `[decision].gray_zone_decider` 显式指定：
 
 ```toml
