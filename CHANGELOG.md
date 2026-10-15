@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-15
+
+最低核心版本由 `1.2.0-alpha` 提升至 `1.3.0-alpha.1`。
+
 ### Added
 
 - 新增 `[decision].gray_zone_decider`：显式指定灰区裁决者，可选 `sub_actor`（默认，
