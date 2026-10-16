@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
+from ..humanize.grapheme import find_units, reconstruct, split_into_atoms
 from ..humanize.segmenter import (
+    _assert_units_intact,
     clean_reply_text,
     clean_reply_text_with_metadata,
     detect_provider_error_text,
@@ -242,3 +246,148 @@ def test_hard_split_when_no_punctuation() -> None:
 
     assert len(segments) > 1
     assert all(segment.text for segment in segments)
+
+
+# --- 不可拆单元（颜文字与表情） -------------------------------------------------
+
+# 覆盖各类书写风格：半角/全角/尖角/方括号/花括号/波浪号、网络缩写、尾巴外挂。
+INDIVISIBLE_UNITS = (
+    "(´･ω･`)",
+    "（＾▽＾）",
+    "<(=･ω･=)>",
+    "[･ω･]",
+    "{・ω・}",
+    "~(´ω｀)~",
+    "〜(´ω｀〜)",
+    "(´;ω;`)",
+    "(:﹏﹏:)",
+    "(๑•̀ㅂ•́)و✧",
+    "(((((*´ω`*) ))))",
+    "QAQ",
+    "\U0001f600",
+    "\U0001f44b\U0001f3fd",
+    "\U0001f468‍\U0001f469‍\U0001f467",
+    "1️⃣",
+    "\U0001f469‍\U0001f4bb",
+)
+
+# 带尾部填充，供裸颜文字用例复用
+FILLER_TAIL = "今天我们讨论了很多关于项目排期和技术选型的问题整体进展还算顺利甲甲甲甲甲"
+
+
+@pytest.mark.parametrize("unit", INDIVISIBLE_UNITS)
+def test_units_survive_every_split_position(unit: str) -> None:
+    """切点落在单元任意位置时，单元都必须完整落在同一段。
+
+    修复前硬切与标点两条路径都会把单元切碎，因此这里逐一扫描
+    单元前后每个可能的切点。
+    """
+    text = FILLER_TAIL + unit + "乙" * 25
+    base = len(FILLER_TAIL)
+
+    for cut in range(base, base + len(unit) + 1):
+        segments = segment_reply(
+            text, max_segment_chars=cut, max_segments=2, typing_cps=0
+        )
+        if len(segments) < 2:
+            continue
+        assert any(unit in segment.text for segment in segments), (
+            f"单元 {unit!r} 在切点 {cut} 处被拆散"
+        )
+
+
+def test_kaomoji_with_chinese_punctuation_is_not_split() -> None:
+    """颜文字内的中文标点不得被当作语义边界。"""
+    text = "好的 (，´ω`)，我这就去办，你看行吗？今天应该能搞定 (¯τωτ)"
+    segments = segment_reply(text, max_segment_chars=16, max_segments=4, typing_cps=0)
+
+    for unit in ("(，´ω`)", "(¯τωτ)"):
+        assert any(unit in segment.text for segment in segments)
+
+
+def test_segments_join_back_to_original() -> None:
+    """分段拼接必须与原文完全一致。"""
+    text = "今天天气不错 (´･ω･`) 。我们去爬山吧！👨‍👩‍👧 你觉得怎么样？"
+    segments = segment_reply(text, max_segment_chars=10, max_segments=4, typing_cps=0)
+
+    assert "".join(segment.text for segment in segments) == text
+
+
+def test_single_unit_longer_than_limit_is_not_broken() -> None:
+    """单个单元超过上限时宁可整条发出，也不拆散它。"""
+    unit = "(((((*´ω`*) ))))"
+    text = "甲" * 30 + unit + "乙" * 30
+    segments = segment_reply(text, max_segment_chars=10, max_segments=4, typing_cps=0)
+
+    assert any(unit in segment.text for segment in segments)
+    assert "".join(segment.text for segment in segments) == text
+
+
+def test_plain_bracketed_text_is_not_treated_as_unit() -> None:
+    """普通括号内容不应被误判为颜文字而改变切分行为。"""
+    text = "这个方案（重要）需要（注意）评审，大家（abc）先看一下"
+    segments = segment_reply(text, max_segment_chars=12, max_segments=4, typing_cps=0)
+
+    assert "".join(segment.text for segment in segments) == text
+
+
+def test_find_units_reports_kind_and_span() -> None:
+    text = "开心 \U0001f600 呀 (´･ω･`) 真的"
+    units = find_units(text)
+
+    assert [(unit.text, unit.kind) for unit in units] == [
+        ("\U0001f600", "emoji"),
+        ("(´･ω･`)", "kaomoji"),
+    ]
+    for unit in units:
+        assert text[unit.start : unit.end] == unit.text
+
+
+def test_split_into_atoms_round_trips() -> None:
+    text = "你好 \U0001f600 (´･ω･`) 结束"
+    atoms = split_into_atoms(text, find_units(text))
+
+    assert reconstruct(atoms) == text
+    assert any(is_unit for _, is_unit in atoms)
+
+
+def test_grapheme_backend_fallback_keeps_emoji_whole() -> None:
+    """regex 缺席的降级路径下，ZWJ 序列仍需完整保留。"""
+    text = "今天 \U0001f468‍\U0001f469‍\U0001f467 很好"
+
+    assert [unit.text for unit in find_units(text)] == [
+        "\U0001f468‍\U0001f469‍\U0001f467"
+    ]
+
+
+def test_bare_kaomoji_without_brackets_is_recognized() -> None:
+    """中点包裹的裸颜文字同样不可拆。"""
+    text = "今天真开心 、´ω´、 明天继续"
+
+    assert [unit.text for unit in find_units(text)] == ["、´ω´、"]
+
+
+def test_bare_kaomoji_survives_split() -> None:
+    text = FILLER_TAIL + "、´ω´、" + "乙" * 20
+    base = len(FILLER_TAIL)
+
+    for cut in range(base, base + 6):
+        segments = segment_reply(
+            text, max_segment_chars=cut, max_segments=2, typing_cps=0
+        )
+        if len(segments) < 2:
+            continue
+        assert any("、´ω´、" in segment.text for segment in segments)
+
+
+def test_integrity_check_rejects_split_units() -> None:
+    """自检必须在单元被拆散时报警，防止损坏的消息被静默发出。"""
+    # 拼接结果与原文一致，但颜文字被拆到两段：仍属损坏
+    with pytest.raises(AssertionError, match="单元"):
+        _assert_units_intact("甲乙(´･ω･`)丙", ["甲乙(´･", "ω･`)丙"])
+
+
+def test_integrity_check_rejects_content_loss() -> None:
+    """自检必须在内容丢失时报警。"""
+    with pytest.raises(AssertionError, match="不一致"):
+        _assert_units_intact("甲乙丙", ["甲乙"])

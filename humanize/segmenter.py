@@ -12,6 +12,8 @@ import math
 import re
 from dataclasses import dataclass
 
+from .grapheme import find_units, split_into_atoms
+
 # 优先在这些标点处切分，它们通常是自然的语义边界
 SENTENCE_ENDINGS = "。！？!?…\n"
 # 次选切分点，语义边界较弱
@@ -211,6 +213,9 @@ def _split_once(text: str, limit: int) -> tuple[str, str]:
     优先在句末标点处切分；找不到则退而求其次在弱标点处切分；
     再找不到就硬切。
 
+    颜文字与表情序列不参与切分：它们先被识别成单个原子，因此切分器
+    既不会在它们内部寻找标点，也不会把切点落在它们中间。
+
     Args:
         text: 待切分文本。
         limit: 首段的目标最大长度。
@@ -221,17 +226,73 @@ def _split_once(text: str, limit: int) -> tuple[str, str]:
     if len(text) <= limit:
         return text, ""
 
-    window = text[: limit + 1]
+    atoms = _atoms_with_flags(text)
+    if len(atoms) <= limit:
+        # 原子数不超过上限：整段作为一个单元送出，不切开
+        return text, ""
 
-    for index in range(len(window) - 1, 0, -1):
-        if window[index] in SENTENCE_ENDINGS:
-            return text[: index + 1].strip(), text[index + 1 :].strip()
+    for endings in (SENTENCE_ENDINGS, SOFT_BREAKS):
+        index = _last_free_index(atoms, endings, limit)
+        if index > 0:
+            return _join_atoms(atoms[:index]), _join_atoms(atoms[index:])
 
-    for index in range(len(window) - 1, 0, -1):
-        if window[index] in SOFT_BREAKS:
-            return text[: index + 1].strip(), text[index + 1 :].strip()
+    # 无标点可切：退到不超过上限的最后一个原子边界
+    index = limit
+    while index > 1 and len(atoms[index - 1][0]) > 1:
+        index -= 1
+    if index <= 1:
+        index = 1
+    return _join_atoms(atoms[:index]), _join_atoms(atoms[index:])
 
-    return text[:limit].strip(), text[limit:].strip()
+
+def _atoms_with_flags(text: str) -> list[tuple[str, bool]]:
+    """把文本切成原子，并标记哪些是不可拆单元。
+
+    Args:
+        text: 待切分文本。
+
+    Returns:
+        list[tuple[str, bool]]: ``(文本, 是否为不可拆单元)`` 序列。
+    """
+    units = find_units(text)
+    if not units:
+        return [(char, False) for char in text]
+    return split_into_atoms(text, units)
+
+
+def _last_free_index(
+    atoms: list[tuple[str, bool]], endings: str, limit: int
+) -> int:
+    """在上限内找到最后一个可安全切分的原子边界。
+
+    标点必须落在普通字符原子上；落在不可拆单元上说明该标点属于颜文字
+    内部（如 ``(´;ω;`)`` 的分号），此时不可切。
+
+    Args:
+        atoms: 原子序列。
+        endings: 可作为切点的标点集合。
+        limit: 长度上限。
+
+    Returns:
+        int: 原子下标；无可用切点时为 0。
+    """
+    for index in range(min(limit, len(atoms) - 1), 0, -1):
+        text, is_unit = atoms[index - 1]
+        if not is_unit and len(text) == 1 and text in endings:
+            return index
+    return 0
+
+
+def _join_atoms(atoms: list[tuple[str, bool]]) -> str:
+    """把原子序列拼回文本。
+
+    Args:
+        atoms: 原子序列。
+
+    Returns:
+        str: 拼接结果。
+    """
+    return "".join(text for text, _ in atoms)
 
 
 def segment_reply(
@@ -255,6 +316,9 @@ def segment_reply(
 
     Returns:
         list[Segment]: 分段列表；输入为空时返回空列表。
+
+    Raises:
+        AssertionError: 分段结果与原文不一致，或某个不可拆单元被拆散。
     """
     cleaned = clean_reply_text(text)
     if not cleaned:
@@ -286,4 +350,24 @@ def segment_reply(
             delay = min(max(0.0, max_typing_delay), len(piece) / typing_cps)
         segments.append(Segment(text=piece, delay=delay))
 
+    _assert_units_intact(cleaned, pieces)
     return segments
+
+
+def _assert_units_intact(original: str, pieces: list[str]) -> None:
+    """校验切分结果没有丢失内容，也没有拆散不可拆单元。
+
+    这是一条可回归的不变量：任何改动切分逻辑的提交都应保持它成立。
+    违反时抛出 :class:`AssertionError`，避免静默发出损坏的消息。
+
+    Args:
+        original: 切分前的完整文本。
+        pieces: 切分后的各段。
+
+    Raises:
+        AssertionError: 拼接结果与原文不一致，或某个单元被拆散。
+    """
+    rebuilt = "".join(pieces)
+    assert rebuilt == original, "分段结果与原文不一致"
+    for unit in find_units(original):
+        assert any(unit.text in piece for piece in pieces), "不可拆单元被拆散"
