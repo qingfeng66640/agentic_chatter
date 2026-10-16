@@ -48,6 +48,7 @@ from src.kernel.llm import (
 
 from .config import AgenticChatterConfig
 from .decision import (
+    action_text,
     DecisionAction,
     DecisionSource,
     ReplyDecision,
@@ -58,6 +59,7 @@ from .decision import (
     get_participation_store,
     hard_rule_decision,
     interval_summary,
+    reason_text,
     score_features,
 )
 from .decision.jev import (
@@ -69,6 +71,8 @@ from .decision.jev import (
     build_decision,
     build_fallback_decision,
     build_state,
+    classify_failure,
+    format_failure_fields,
     get_shared_client,
     request_decision,
 )
@@ -141,6 +145,7 @@ from .task_runtime import (
     build_task_report_prompt,
     get_task_runtime_manager,
     get_task_templates,
+    task_type_text,
 )
 from .task_runtime.control import (
     TaskMessageKind,
@@ -326,6 +331,15 @@ DEFAULT_TURN_RETRY_SECONDS = 5.0
 DEFAULT_REPLY_SIMILARITY_THRESHOLD = 0.88
 DEFAULT_REPLY_CONTAINMENT_THRESHOLD = 0.90
 
+# 图片预算收紧原因的中文说明。键与 multimodal.summarize_budget 返回的
+# reason 取值一一对应；空串表示两项上限都没触及，属于兜底情况。
+_BUDGET_REASON_TEXT = {
+    "both": "张数与体积双超",
+    "count": "张数超限",
+    "bytes": "体积超限",
+    "": "未触及任何上限",
+}
+
 
 def _thought_log_line(stream_id: str, source: str, content: str) -> str:
     """构建单行、限长的主 Agent 思考日志。"""
@@ -462,13 +476,13 @@ class _AgenticChatterBase(BaseChatter):
                 pending_count, wait_seconds = await mailbox.pending_state(merge_window)
                 if merged_count:
                     logger.info(
-                        f"[{self.stream_id[:8]}] 输入已合并 event=input_merged "
+                        f"[{self.stream_id[:8]}] 输入已合并 事件=输入已合并 "
                         f"代次={generation} 新增={merged_count} 未读数={pending_count} "
                         f"窗口秒数={merge_window:.3f}"
                     )
                 if pending_count and wait_seconds > 0:
                     logger.info(
-                        f"[{self.stream_id[:8]}] 等待合并输入 event=turn_delayed_for_input_merge "
+                        f"[{self.stream_id[:8]}] 等待合并输入 事件=等待合并输入 "
                         f"未读数={pending_count} 等待秒数={wait_seconds:.3f} "
                         f"窗口秒数={merge_window:.3f}"
                     )
@@ -633,8 +647,8 @@ class _AgenticChatterBase(BaseChatter):
         released = await mailbox.release_claim(claim)
         if not released:
             logger.error(
-                f"[{self.stream_id[:8]}] {context} claim 释放失败 "
-                f"event=claim_release_failed 代次={generation}"
+                f"[{self.stream_id[:8]}] {context}认领释放失败 "
+                f"事件=认领释放失败 代次={generation}"
             )
 
     async def _release_owner_safely(
@@ -648,8 +662,8 @@ class _AgenticChatterBase(BaseChatter):
         released = await mailbox.release_owner(owner, generation)
         if not released:
             logger.error(
-                f"[{self.stream_id[:8]}] {context} owner 释放失败 "
-                f"event=owner_release_failed 代次={generation}"
+                f"[{self.stream_id[:8]}] {context}持有者释放失败 "
+                f"事件=持有者释放失败 代次={generation}"
             )
 
     async def _route_task_message(
@@ -744,8 +758,8 @@ class _AgenticChatterBase(BaseChatter):
             return None
         task_runtime.start()
         logger.info(
-            f"[{self.stream_id[:8]}] 已创建复杂任务 event=task_created "
-            f"任务ID={task_runtime.state.task_id} 任务类型={task_type.value}"
+            f"[{self.stream_id[:8]}] 已创建复杂任务 事件=已创建复杂任务 "
+            f"任务ID={task_runtime.state.task_id} 任务类型={task_type_text(task_type)}"
         )
         return task_runtime
 
@@ -805,21 +819,21 @@ class _AgenticChatterBase(BaseChatter):
         is_committed = await mailbox.commit_claim(claim)
         if not is_committed:
             logger.error(
-                f"[{self.stream_id[:8]}] 任务 claim 提交失败 "
-                f"event=task_claim_commit_failed 代次={generation}"
+                f"[{self.stream_id[:8]}] 任务认领提交失败 "
+                f"事件=任务认领提交失败 代次={generation}"
             )
-            raise RuntimeError("任务 claim 提交失败")
+            raise RuntimeError("任务认领提交失败")
         if task_request is not None and task_runtime is not None:
             start_task(self, task_runtime, task_request, task_store)
             logger.info(
-                f"[{self.stream_id[:8]}] 任务已转入后台 event=task_background_started "
+                f"[{self.stream_id[:8]}] 任务已转入后台 事件=任务已转入后台 "
                 f"任务ID={task_runtime.state.task_id}"
             )
         task_label = (
             task_runtime.state.task_id if task_runtime is not None else "无（控制消息）"
         )
         logger.info(
-            f"[{self.stream_id[:8]}] 任务消息已确认 event=task_turn_committed "
+            f"[{self.stream_id[:8]}] 任务消息已确认 事件=任务消息已确认 "
             f"代次={generation} 消息数={len(unread_msgs)} "
             f"任务ID={task_label}"
         )
@@ -854,7 +868,7 @@ class _AgenticChatterBase(BaseChatter):
             pending_after_release = await mailbox.pending_count()
             await self._release_claim_safely(mailbox, claim, generation, "回合")
             logger.warning(
-                f"[{self.stream_id[:8]}] 回合已释放 event=turn_released "
+                f"[{self.stream_id[:8]}] 回合已释放 事件=回合已释放 "
                 f"代次={generation} 消息数={len(unread_msgs)} "
                 f"已发言={state.spoke} 原因=输入中断 "
                 f"说明={state.error} 剩余未读={pending_after_release} "
@@ -890,14 +904,14 @@ class _AgenticChatterBase(BaseChatter):
         if not is_committed:
             self._restore_claim_unread_match(match)
             logger.error(
-                f"[{self.stream_id[:8]}] mailbox claim 提交失败 "
-                f"event=claim_commit_failed generation={generation} "
-                f"messages={len(unread_msgs)}"
+                f"[{self.stream_id[:8]}] 消息认领提交失败 "
+                f"事件=消息认领提交失败 认领代数={generation} "
+                f"消息数={len(unread_msgs)}"
             )
-            raise RuntimeError("mailbox claim 提交失败")
+            raise RuntimeError("消息认领提交失败")
         state.input_confirmed = True
         logger.info(
-            f"[{self.stream_id[:8]}] 回合已确认 event=turn_committed "
+            f"[{self.stream_id[:8]}] 回合已确认 事件=回合已确认 "
             f"代次={generation} 消息数={len(unread_msgs)} "
             f"未读匹配={len(match.matched)} "
             f"已在历史={len(match.history_matched)} "
@@ -1285,6 +1299,7 @@ class _AgenticChatterBase(BaseChatter):
         lower_bound: float,
         upper_bound: float,
         reasons: list[str],
+        error: BaseException | None = None,
     ) -> ReplyDecision | None:
         """处理 Jev 不可用：按 ``fallback_decider`` 回退或直接静默。
 
@@ -1295,6 +1310,9 @@ class _AgenticChatterBase(BaseChatter):
             lower_bound: 本地评分区间下界。
             upper_bound: 本地评分区间上界。
             reasons: 本地信号原因码。
+            error: 捕获到的异常对象。真实调用失败时必须传入——它带着原因码
+                与诊断字段，是判断 Jev 究竟死于状态码、限流还是网络问题的
+                唯一来源；配置前置检查（未启用、未配 Key）没有异常，传 None。
 
         Returns:
             ReplyDecision | None: 需要静默时返回静默决策，否则返回 None 交由
@@ -1303,15 +1321,25 @@ class _AgenticChatterBase(BaseChatter):
         mode = str(
             getattr(jev_config, "fallback_decider", "sub_actor") or "sub_actor"
         ).strip().lower()
-        if mode != "silent":
-            logger.debug(
-                f"[{self.stream_id[:8]}] Jev 不可用（{detail}），灰区回退 sub_actor"
-            )
-            return None
-        logger.warning(
-            f"[{self.stream_id[:8]}] Jev 不可用（{detail}）且回退策略为 silent，"
-            "本轮灰区静默，不调用 sub_actor"
+        silent = mode == "silent"
+        action = (
+            "回退策略为静默，本轮灰区静默，不调用子决策模型"
+            if silent
+            else "灰区回退子决策模型"
         )
+        # 日志里只写中文死因：原因码是给程序看的，这里是给人看的
+        cause = f"{reason_text(detail)}{format_failure_fields(error) if error is not None else ''}"
+        if error is not None:
+            # 真实调用失败一律以 WARNING 留痕。默认的子决策模型回退此前只写
+            # DEBUG，等于让 Jev 在默认部署下静默失效而无人察觉；WARNING
+            # 同时覆盖两种回退策略，避免"回退成功"掩盖"Jev 已经死了"这件事。
+            logger.warning(f"[{self.stream_id[:8]}] Jev 不可用：{cause}，{action}")
+        elif silent:
+            logger.warning(f"[{self.stream_id[:8]}] Jev 不可用：{cause}，{action}")
+        else:
+            logger.debug(f"[{self.stream_id[:8]}] Jev 不可用：{cause}，{action}")
+        if not silent:
+            return None
         return build_fallback_decision(
             local_score=local_score,
             lower_bound=lower_bound,
@@ -1396,7 +1424,9 @@ class _AgenticChatterBase(BaseChatter):
                 getattr(jev_config, "timeout_seconds", 8.0) or 8.0
             ),
             total_budget_seconds=float(
-                getattr(jev_config, "total_budget_seconds", 12.0) or 12.0
+                # 兜底值与 config.py 的 JevSection.total_budget_seconds 保持一致：
+                # 正常运行时该属性必然存在，此处只是替身对象缺属性时的保底。
+                getattr(jev_config, "total_budget_seconds", 4.0) or 4.0
             ),
             max_history_messages=max(
                 0, int(getattr(jev_config, "max_history_messages", 8))
@@ -1457,45 +1487,50 @@ class _AgenticChatterBase(BaseChatter):
                 state=jev_state,
             )
         except JevError as exc:
+            # 取 exc.code 而不是 type(exc).__name__：JevError 没有子类，
+            # 全部失败都是同一个类名，写出来恒等于 "jev_error:JevError"，
+            # 等于把真实死因（状态码、限流、超时、结构非法）全抹掉。
             return self._jev_unavailable(
                 jev_config,
-                f"jev_error:{type(exc).__name__}",
+                exc.code,
                 local_score=score,
                 lower_bound=lower,
                 upper_bound=upper,
                 reasons=reasons,
+                error=exc,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - Jev 不可用不应中断回合
             return self._jev_unavailable(
                 jev_config,
-                f"jev_exception:{type(exc).__name__}",
+                classify_failure(exc),
                 local_score=score,
                 lower_bound=lower,
                 upper_bound=upper,
                 reasons=reasons,
+                error=exc,
             )
 
         if bool(getattr(jev_config, "log_answers", False)):
             # 观测模式：INFO 行保持不变（按来源筛选灰度对比依赖它），
             # 额外在 DEBUG 输出概率分布与 token 用量以观测置信度分布。
             logger.info(
-                f"[{self.stream_id[:8]}] Jev 裁决灰区 event=jev_decided "
-                f"动作={answer.action.value} 置信度={answer.confidence:.3f}"
+                f"[{self.stream_id[:8]}] Jev 裁决灰区 事件=Jev裁决灰区 "
+                f"动作={action_text(answer.action)} 置信度={answer.confidence:.3f}"
             )
             logger.debug(
-                f"[{self.stream_id[:8]}] Jev 应答明细 event=jev_answer "
-                f"动作={answer.action.value} 置信度={answer.confidence:.3f} "
-                f"P(respond)={answer.respond_probability:.3f} "
-                f"P(silent)={answer.silent_probability:.3f} "
-                f"输入tokens={answer.input_tokens} 输出tokens={answer.output_tokens} "
+                f"[{self.stream_id[:8]}] Jev 应答明细 事件=Jev应答 "
+                f"动作={action_text(answer.action)} 置信度={answer.confidence:.3f} "
+                f"接话概率={answer.respond_probability:.3f} "
+                f"沉默概率={answer.silent_probability:.3f} "
+                f"输入词元={answer.input_tokens} 输出词元={answer.output_tokens} "
                 f"本地评分={score:.3f} 区间=[{lower:.3f}, {upper:.3f}]"
             )
         else:
             logger.info(
-                f"[{self.stream_id[:8]}] Jev 裁决灰区 event=jev_decided "
-                f"动作={answer.action.value} 置信度={answer.confidence:.3f}"
+                f"[{self.stream_id[:8]}] Jev 裁决灰区 事件=Jev裁决灰区 "
+                f"动作={action_text(answer.action)} 置信度={answer.confidence:.3f}"
             )
         return build_decision(
             answer.action,
@@ -1518,7 +1553,8 @@ class _AgenticChatterBase(BaseChatter):
         logger.debug(
             f"[{self.stream_id[:8]}] 决策诊断：评分={decision.score:.3f}，"
             f"区间=[{decision.lower_bound:.3f}, {decision.upper_bound:.3f}]，"
-            f"置信度={decision.confidence:.3f}，内部原因={decision.reasons}"
+            f"置信度={decision.confidence:.3f}，"
+            f"内部原因={'、'.join(reason_text(reason) for reason in decision.reasons)}"
         )
 
     async def _stage_plan(
@@ -1622,10 +1658,11 @@ class _AgenticChatterBase(BaseChatter):
             if budget["should_warn"]:
                 logger.warning(
                     f"[{self.stream_id[:8]}] 多模态图片预算生效 "
-                    f"event=multimodal_image_limit 引用={budget['ref_count']} "
+                    f"事件=多模态图片超限 引用={budget['ref_count']} "
                     f"去重={budget['distinct_count']} 实际内联={budget['emitted']} "
                     f"上限={max_images} 体积={budget['emitted_bytes']}B "
-                    f"体积上限={max_bytes}B reason={budget['reason']}"
+                    f"体积上限={max_bytes}B "
+                    f"原因={_BUDGET_REASON_TEXT.get(budget['reason'], '未触及任何上限')}"
                 )
 
         request = self._create_act_request(config)
@@ -1763,18 +1800,16 @@ class _AgenticChatterBase(BaseChatter):
             )
             control_call_count = len(calls) - len(normal_calls)
             logger.info(
-                f"[{self.stream_id[:8]}] 行动迭代 event=act_iteration "
+                f"[{self.stream_id[:8]}] 行动迭代 事件=行动迭代 "
                 f"迭代={state.iterations} 普通调用={len(normal_calls)} "
                 f"控制调用={control_call_count} 工具成功数={tool_progress} "
                 f"已发言={spoke_now} 文本重复={duplicate_text} "
-                f"终止原因={iteration_decision.reason or 'continue'} "
                 f"终止说明={_label(_TERMINATION_LABELS, iteration_decision.reason or 'continue', '继续')}"
             )
             if not iteration_decision.should_continue:
                 state.termination = iteration_decision
                 logger.info(
-                    f"[{self.stream_id[:8]}] 行动自动结束 event=act_auto_end "
-                    f"终止原因={iteration_decision.reason} "
+                    f"[{self.stream_id[:8]}] 行动自动结束 事件=行动自动结束 "
                     f"终止说明={_label(_TERMINATION_LABELS, iteration_decision.reason)}"
                 )
                 clear_stream_catalog(self.stream_id)
@@ -1786,8 +1821,7 @@ class _AgenticChatterBase(BaseChatter):
 
         if state.termination is not None:
             logger.info(
-                f"[{self.stream_id[:8]}] 行动自动结束 event=act_auto_end "
-                f"终止原因={state.termination.reason} "
+                f"[{self.stream_id[:8]}] 行动自动结束 事件=行动自动结束 "
                 f"终止说明={_label(_TERMINATION_LABELS, state.termination.reason)}"
             )
         clear_stream_catalog(self.stream_id)
@@ -1878,7 +1912,7 @@ class _AgenticChatterBase(BaseChatter):
         )
         logger.info(
             f"[{self.stream_id[:8]}] 私聊主 Agent 使用指定模型 "
-            f"model_name={private_model_name}"
+            f"模型={private_model_name}"
         )
         return LLMRequest(
             model_set=model_set,
@@ -1966,12 +2000,12 @@ class _AgenticChatterBase(BaseChatter):
         """记录结构化推理和正文中被清洗的明确思考块。"""
         reasoning = str(getattr(response, "reasoning_content", "") or "").strip()
         if reasoning:
-            logger.info(_thought_log_line(self.stream_id, "reasoning_content", reasoning))
+            logger.info(_thought_log_line(self.stream_id, "推理内容", reasoning))
         if cleaned_result.removed_thoughts:
             logger.info(
                 _thought_log_line(
                     self.stream_id,
-                    "removed_message_block",
+                    "移除的消息块",
                     " | ".join(cleaned_result.removed_thoughts),
                 )
             )
@@ -2027,7 +2061,7 @@ class _AgenticChatterBase(BaseChatter):
         if self._is_reply_duplicate(config, message, state):
             state.duplicate_text_streak += 1
             logger.warning(
-                f"[{self.stream_id[:8]}] event=stream_duplicate_already_emitted "
+                f"[{self.stream_id[:8]}] 事件=流式输出重复已跳过 "
                 f"本条已被流式输出过，跳过重复记录 字符数={len(message)} "
                 f"连续重复次数={state.duplicate_text_streak}"
             )
@@ -2067,7 +2101,7 @@ class _AgenticChatterBase(BaseChatter):
         provider_error_rule = detect_provider_error_text(message)
         if provider_error_rule is not None:
             logger.warning(
-                f"[{self.stream_id[:8]}] event=provider_error_text_intercepted "
+                f"[{self.stream_id[:8]}] 事件=已拦截供应商异常文本 "
                 f"已拦截供应商异常文本 规则={provider_error_rule} 字符数={len(message)}"
             )
             if bool(
@@ -2088,28 +2122,28 @@ class _AgenticChatterBase(BaseChatter):
                     record_path = await append_provider_error_request_record(record)
                     logger.info(
                         f"[{self.stream_id[:8]}] 供应商异常请求体已记录 "
-                        "event=provider_error_request_recorded "
+                        "事件=供应商异常请求体已记录 "
                         f"规则={provider_error_rule} 载荷数={record['payload_count']} "
                         f"已截断={record['truncated']} 路径={record_path}"
                     )
                 except Exception as exc:
                     logger.warning(
                         f"[{self.stream_id[:8]}] 供应商异常请求体记录失败 "
-                        f"event=provider_error_request_record_failed 错误类型={type(exc).__name__}"
+                        f"事件=供应商异常请求体记录失败 错误类型={type(exc).__name__}"
                     )
             return False, False
         decision_json_action = detect_reply_decision_json_text(message)
         if decision_json_action is not None:
             logger.warning(
                 f"[{self.stream_id[:8]}] 已拦截主 Agent 输出的子决策 JSON "
-                f"event=reply_decision_json_intercepted "
-                f"动作={decision_json_action} 字符数={len(message)}"
+                f"事件=已拦截子决策JSON "
+                f"动作={action_text(decision_json_action)} 字符数={len(message)}"
             )
             return False, False
         if is_framework_message_line(message):
             logger.warning(
                 f"[{self.stream_id[:8]}] "
-                "event=framework_message_line_intercepted "
+                "事件=已拦截框架消息行 "
                 "已拦截完整框架消息行 "
                 f"字符数={len(message)}"
             )
@@ -2231,7 +2265,7 @@ class _AgenticChatterBase(BaseChatter):
                     name = str(getattr(call, "name", "") or "")
                     args = getattr(call, "args", None)
                     logger.info(
-                        f"[{self.stream_id[:8]}] 调用工具 event=tool_call "
+                        f"[{self.stream_id[:8]}] 调用工具 事件=调用工具 "
                         f"迭代={state.iterations} 工具={name} "
                         f"参数={build_log_args(args if isinstance(args, dict) else {})}"
                     )
@@ -2257,11 +2291,9 @@ class _AgenticChatterBase(BaseChatter):
                 if record.counts_as_progress:
                     success_count += 1
                 logger.info(
-                    f"[{self.stream_id[:8]}] 工具结果 event=tool_result "
+                    f"[{self.stream_id[:8]}] 工具结果 事件=工具结果 "
                     f"迭代={record.iteration} 工具={record.name} "
-                    f"结果={record.outcome} "
                     f"结果说明={_label(_TOOL_OUTCOME_LABELS, record.outcome)} "
-                    f"捕获={record.result_capture} "
                     f"捕获说明={_label(_RESULT_CAPTURE_LABELS, record.result_capture)} "
                     f"预览字符数={len(record.result_preview)}"
                 )
@@ -2326,7 +2358,7 @@ class _AgenticChatterBase(BaseChatter):
         if not chat_stream:
             logger.error(
                 f"[{self.stream_id[:8]}] 消息确认匹配失败 "
-                "event=claim_match_failed 原因=聊天流缺失 "
+                "事件=消息确认匹配失败 原因=聊天流缺失 "
                 f"预期={len(unread_messages)} 实际=0"
             )
             return None
@@ -2381,7 +2413,7 @@ class _AgenticChatterBase(BaseChatter):
             reason = "歧义匹配" if ambiguous else "消息缺失"
             logger.error(
                 f"[{self.stream_id[:8]}] 消息确认匹配失败 "
-                f"event=claim_match_failed 原因={reason} "
+                f"事件=消息确认匹配失败 原因={reason} "
                 f"预期={len(unread_messages)} "
                 f"实际={len(matched) + len(history_matched)} "
                 f"未读匹配={len(matched)} 已在历史={len(history_matched)} "
@@ -2511,7 +2543,7 @@ class _AgenticChatterBase(BaseChatter):
                 return False
             if merge_wait > 0:
                 logger.info(
-                    f"[{self.stream_id[:8]}] event=input_interrupt_suppressed "
+                    f"[{self.stream_id[:8]}] 事件=输入打断已抑制 "
                     f"原因=合并窗口 未读数={pending_count} "
                     f"等待秒数={merge_wait:.3f}"
                 )
@@ -2529,7 +2561,7 @@ class _AgenticChatterBase(BaseChatter):
             streak = await mailbox.interruption_state()
             if max_interruptions and streak >= max_interruptions:
                 logger.info(
-                    f"[{self.stream_id[:8]}] event=input_interrupt_suppressed "
+                    f"[{self.stream_id[:8]}] 事件=输入打断已抑制 "
                     f"原因=连续中断上限 未读数={pending_count} "
                     f"连续中断次数={streak} "
                     f"连续中断上限={max_interruptions}"
@@ -2537,7 +2569,7 @@ class _AgenticChatterBase(BaseChatter):
                 return False
             new_streak = await mailbox.record_interruption()
             logger.info(
-                f"[{self.stream_id[:8]}] event=input_interrupt_triggered "
+                f"[{self.stream_id[:8]}] 事件=输入打断已触发 "
                 f"未读数={pending_count} 连续中断次数={new_streak} "
                 f"连续中断上限={max_interruptions}"
             )

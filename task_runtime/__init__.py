@@ -14,7 +14,16 @@ from .coordinator import (
 )
 from .executor import TaskCommand, TaskExecutor, TaskRequest, run_task
 from .messages import TaskEnvelope, TaskMessageMailbox
-from .models import TaskBudget, TaskCheckpoint, TaskResult, TaskState, TaskStatus, TaskType
+from .models import (
+    TaskBudget,
+    TaskCheckpoint,
+    TaskResult,
+    TaskState,
+    TaskStatus,
+    TaskType,
+    task_status_text,
+    task_type_text,
+)
 from .persistence import TaskStateStore
 from .policy import ToolPermission, ToolPolicy
 from .runtime import TaskRuntime, TaskRuntimeManager, get_task_runtime_manager
@@ -35,5 +44,5 @@ __all__ = [
     "classify_task_message", "control_task", "TaskBudget", "TaskCheckpoint", "TaskResult",
     "TaskStatus", "TaskType", "TaskState", "ToolPolicy", "ToolPermission", "TaskRuntime",
     "TaskRuntimeManager", "get_task_runtime_manager", "TaskTemplate", "TaskTemplateRegistry",
-    "get_task_templates", "build_task_report_prompt",
+    "get_task_templates", "build_task_report_prompt", "task_type_text", "task_status_text",
 ]

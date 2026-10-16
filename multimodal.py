@@ -246,7 +246,7 @@ def _safe_image(
     if not body or len(body) % 4 != 0 or not _BASE64_PATTERN.match(body):
         logger.warning(
             "多模态图片载荷不是 base64，已省略 "
-            f"event=multimodal_image_invalid image_id={image_id}"
+            f"事件=多模态图片载荷非法 图片标识={image_id}"
         )
         return None
     try:
@@ -254,7 +254,7 @@ def _safe_image(
     except (TypeError, ValueError, binascii.Error) as exc:
         logger.warning(
             "多模态图片载荷非法，已省略 "
-            f"event=multimodal_image_invalid image_id={image_id} 原因={type(exc).__name__}"
+            f"事件=多模态图片载荷非法 图片标识={image_id} 异常类型={type(exc).__name__}"
         )
         return None
 

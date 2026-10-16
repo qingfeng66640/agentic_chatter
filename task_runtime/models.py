@@ -32,6 +32,38 @@ class TaskType(StrEnum):
     CONTENT_EDIT = "content_edit"
 
 
+# 任务类型与状态的中文说明，供运行日志呈现。键为枚举取值，因此可直接
+# 用 .value 查表；未收录的取值会落到兜底文案而不是漏出英文码。
+TASK_TYPE_TEXT = {
+    "general": "通用任务",
+    "research": "资料调研",
+    "code_analysis": "代码分析",
+    "code_change": "代码改动",
+    "content_edit": "内容编辑",
+}
+
+TASK_STATUS_TEXT = {
+    "created": "已创建",
+    "planning": "规划中",
+    "running": "执行中",
+    "waiting_user": "等待用户",
+    "paused": "已暂停",
+    "succeeded": "已成功",
+    "failed": "已失败",
+    "cancelled": "已取消",
+}
+
+
+def task_type_text(value: object) -> str:
+    """返回任务类型的中文说明。"""
+    return TASK_TYPE_TEXT.get(str(value), "未知类型")
+
+
+def task_status_text(value: object) -> str:
+    """返回任务状态的中文说明。"""
+    return TASK_STATUS_TEXT.get(str(value), "未知状态")
+
+
 @dataclass(frozen=True, slots=True)
 class TaskBudget:
     """单个任务的有限资源预算。"""

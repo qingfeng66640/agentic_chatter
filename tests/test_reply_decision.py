@@ -358,8 +358,28 @@ def test_response_diagnostics_describes_empty_text_without_leaking_content() -> 
     )
 
     assert _response_diagnostics(response) == (
-        "正文长度=0，推理内容长度=6，工具调用数=1，结束原因=stop"
+        "正文长度=0，推理内容长度=6，工具调用数=1，结束原因=正常结束"
     )
+
+
+def test_response_diagnostics_keeps_unknown_stop_reason() -> None:
+    """未收录的 stop_reason 原样输出：供应商自定义值猜错反而误导。"""
+    response = SimpleNamespace(
+        message="",
+        reasoning_content="",
+        call_list=[],
+        stop_reason="vendor_custom_reason",
+    )
+
+    assert "结束原因=vendor_custom_reason" in _response_diagnostics(response)
+
+
+def test_response_diagnostics_handles_missing_stop_reason() -> None:
+    response = SimpleNamespace(
+        message="", reasoning_content="", call_list=[], stop_reason=""
+    )
+
+    assert "结束原因=未提供" in _response_diagnostics(response)
 
 
 def test_parse_decision_result_accepts_common_wrappers() -> None:
@@ -379,7 +399,7 @@ def test_parse_decision_result_rejects_non_object() -> None:
     try:
         _parse_decision_result("true")
     except ValueError as exc:
-        assert "parsed_type=bool" in str(exc)
+        assert "解析后类型=bool" in str(exc)
     else:
         raise AssertionError("布尔结果不应被接受")
 

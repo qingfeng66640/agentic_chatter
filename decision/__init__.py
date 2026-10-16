@@ -6,7 +6,9 @@ from .models import (
     DecisionFeatures,
     DecisionSource,
     ReplyDecision,
+    action_text,
     describe_decision,
+    reason_text,
 )
 from .scoring import interval_summary, score_features
 from .semantic import compute_semantic_relevance, cosine_similarity
@@ -30,4 +32,6 @@ __all__ = [
     "interval_summary",
     "message_text",
     "score_features",
+    "action_text",
+    "reason_text",
 ]

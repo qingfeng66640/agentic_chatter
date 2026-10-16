@@ -75,7 +75,18 @@ def _parse_decision_result(raw: str) -> dict[str, Any]:
             result = json_repair.loads(result)
             continue
         break
-    raise ValueError(f"决策结果不是对象: parsed_type={type(result).__name__}")
+    raise ValueError(f"决策结果不是对象：解析后类型={type(result).__name__}")
+
+
+# 供应商 stop_reason 的中文说明。取值为 OpenAI 兼容协议的常见枚举，
+# 未收录的取值原样输出——它通常是供应商自定义值，猜错反而误导。
+_STOP_REASON_TEXT = {
+    "stop": "正常结束",
+    "length": "达到长度上限",
+    "tool_calls": "要求调用工具",
+    "function_call": "要求调用函数",
+    "content_filter": "被内容策略拦截",
+}
 
 
 def _safe_raw_preview(raw: str, limit: int = 240) -> str:
@@ -92,7 +103,8 @@ def _response_diagnostics(response: Any) -> str:
     stop_reason = str(getattr(response, "stop_reason", "") or "")
     return (
         f"正文长度={len(message)}，推理内容长度={len(reasoning)}，"
-        f"工具调用数={len(calls)}，结束原因={stop_reason or '未提供'}"
+        f"工具调用数={len(calls)}，"
+        f"结束原因={_STOP_REASON_TEXT.get(stop_reason, stop_reason) or '未提供'}"
     )
 
 

@@ -12,12 +12,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from ..decision import action_text
 from ..decision.jev import (
     JevError,
     JevSettings,
@@ -25,10 +28,19 @@ from ..decision.jev import (
     build_decision,
     build_fallback_decision,
     build_state,
+    classify_failure,
+    format_failure_fields,
     parse_choice_answer,
+    redact_url,
     request_decision,
+    status_failure_code,
 )
-from ..decision.models import DecisionAction, DecisionSource
+from ..decision.models import DecisionAction, DecisionSource, describe_decision
+
+# 占位符直接写死而不从实现里导入：这样"占位符被改名"会立刻让测试失败，
+# 而从实现导入只会跟着一起变、永远测不出问题。取值须与
+# tooling.dedupe 的日志脱敏保持一致，运维才能用一个串扫全插件日志。
+REDACTED = "[REDACTED]"
 
 
 def _settings(**overrides) -> JevSettings:
@@ -965,3 +977,568 @@ def test_instructions_mention_calling_bot_by_name() -> None:
     text = jev_module._INSTRUCTIONS
     assert "names" in text
     assert "@" in text
+
+
+# ---------------------------------------------------------------------------
+# 失败原因码
+#
+# 回归背景：此前 chatter 用 f"jev_error:{type(exc).__name__}" 记录失败，而
+# JevError 没有子类、全部失败都是同一个类名，日志里恒为
+# "jev_error:JevError"，HTTP 状态码、限流、超时、结构非法全部无法区分。
+# 下面这组用例逐点锁死"码必须随死因变化"。
+# ---------------------------------------------------------------------------
+
+
+def test_status_failure_code_maps_known_statuses() -> None:
+    assert status_failure_code(401) == "jev_error:auth:401"
+    assert status_failure_code(403) == "jev_error:auth:403"
+    assert status_failure_code(402) == "jev_error:payment:402"
+    assert status_failure_code(404) == "jev_error:not_found:404"
+    assert status_failure_code(400) == "jev_error:bad_request:400"
+    assert status_failure_code(422) == "jev_error:bad_request:422"
+    assert status_failure_code(429) == "jev_error:rate_limited:429"
+    assert status_failure_code(529) == "jev_error:overloaded:529"
+
+
+def test_status_failure_code_keeps_unmapped_status_verbatim() -> None:
+    """上游新增状态码时不丢原始码，只是不细分类别。"""
+    assert status_failure_code(503) == "jev_error:http:503"
+    assert status_failure_code(418) == "jev_error:http:418"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (401, "jev_error:auth:401"),
+        (402, "jev_error:payment:402"),
+        (404, "jev_error:not_found:404"),
+        (422, "jev_error:bad_request:422"),
+        (500, "jev_error:http:500"),
+    ],
+)
+async def test_request_decision_non_retryable_status_carries_code(status, expected) -> None:
+    async with _client(lambda _r: httpx.Response(status, json={"error": "x"})) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(client, settings=_settings(), state={})
+
+    assert excinfo.value.code == expected
+    assert excinfo.value.status == status
+    assert excinfo.value.attempts == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (429, "jev_error:rate_limited:429"),
+        (529, "jev_error:overloaded:529"),
+    ],
+)
+async def test_request_decision_exhausted_retries_keep_retryable_code(
+    status, expected
+) -> None:
+    """重试用尽后仍要保留限流/过载类别，而不是退化成 unknown。"""
+    async with _client(lambda _r: httpx.Response(status, json={"error": "x"})) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(
+                client, settings=_settings(max_retries=1), state={}
+            )
+
+    assert excinfo.value.code == expected
+    assert excinfo.value.status == status
+    assert excinfo.value.attempts == 2
+
+
+async def test_request_decision_transport_error_is_network() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    async with _client(handler) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(client, settings=_settings(), state={})
+
+    assert excinfo.value.code == "jev_error:network"
+    assert excinfo.value.status is None
+
+
+async def test_request_decision_timeout_carries_timeout_code() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("too slow", request=request)
+
+    async with _client(handler) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(client, settings=_settings(), state={})
+
+    assert excinfo.value.code == "jev_error:timeout"
+
+
+async def test_request_decision_budget_exhaustion_keeps_overload_code() -> None:
+    """预算先耗尽时，真实死因（529 过载）必须保住，预算只作附加说明。"""
+    async with _client(lambda _r: httpx.Response(529, json={})) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(
+                client,
+                settings=_settings(
+                    max_retries=5,
+                    total_budget_seconds=1.0,
+                    retry_backoff_seconds=5.0,
+                ),
+                state={},
+            )
+
+    assert excinfo.value.code == "jev_error:overloaded:529"
+    assert excinfo.value.status == 529
+    assert "已达总预算" in str(excinfo.value)
+    # attempts 必须记"实际消耗次数"（1），不是配置上限 max_retries+1（6）。
+    # 写成上限会让日志宣称"试了 6 次"，与真实请求次数不符。
+    assert excinfo.value.attempts == 1
+
+
+async def test_parse_stage_attempts_counts_real_requests() -> None:
+    """解析阶段若发生在第 2 次尝试，attempts 应记 2 而非恒为 1。"""
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"error": "slow down"})
+        return httpx.Response(200, json=_choice_payload("respond", 0.2))
+
+    async with _client(handler) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(
+                client,
+                settings=_settings(max_retries=2, min_confidence=0.7),
+                state={},
+            )
+
+    assert excinfo.value.code == "jev_error:low_confidence"
+    assert calls["n"] == 2
+    assert excinfo.value.attempts == 2
+
+
+def test_action_text_labels_and_fallback() -> None:
+    """动作文案与兜底都会被直接写进日志，必须锁住。"""
+    assert action_text(DecisionAction.RESPOND) == "回复"
+    assert action_text(DecisionAction.SILENT) == "暂不回复"
+    assert action_text("respond") == "回复"
+    assert action_text("silent") == "暂不回复"
+    # 未收录的值与 None 落到同一个中文兜底，不漏出英文
+    assert action_text("bogus") == "未知"
+    assert action_text(None) == "未知"
+
+
+def test_total_budget_default_matches_config() -> None:
+    """``config.py`` 是默认值的唯一来源，兜底常量与文档都必须与它一致。
+
+    曾出现过的错：``JevSettings`` 的兜底是 12.0，而 ``config.py`` 的默认值
+    是 4.0——按 12.0 调参的用户会被误导到错误的耗时预期。
+    """
+    from ..config import AgenticChatterConfig
+
+    section = AgenticChatterConfig.JevSection()
+    assert section.total_budget_seconds == 4.0
+    assert section.timeout_seconds == 8.0
+
+
+async def test_request_decision_bad_json_code() -> None:
+    async with _client(lambda _r: httpx.Response(200, text="not json")) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(client, settings=_settings(), state={})
+
+    assert excinfo.value.code == "jev_error:bad_json"
+
+
+async def test_request_decision_missing_answer_is_bad_schema() -> None:
+    async with _client(
+        lambda _r: httpx.Response(200, json={"answers": {"other": {}}})
+    ) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(client, settings=_settings(), state={})
+
+    assert excinfo.value.code == "jev_error:bad_schema"
+
+
+def test_parse_choice_answer_bad_answer_code() -> None:
+    with pytest.raises(JevError) as excinfo:
+        parse_choice_answer("not-a-dict", min_confidence=0.0)
+    assert excinfo.value.code == "jev_error:bad_answer"
+
+    with pytest.raises(JevError) as excinfo:
+        parse_choice_answer({"choice": "maybe", "confidence": 0.9}, min_confidence=0.0)
+    assert excinfo.value.code == "jev_error:bad_answer"
+
+
+def test_low_confidence_is_not_classified_as_failure() -> None:
+    """置信度低于门限是可调配置，不是调用故障，必须单独成码。"""
+    answer = _choice_payload("respond", 0.4)["answers"]["action"]
+
+    with pytest.raises(JevError) as excinfo:
+        parse_choice_answer(answer, min_confidence=0.8)
+
+    assert excinfo.value.code == "jev_error:low_confidence"
+
+
+# --- 端点脱敏 -------------------------------------------------------------
+#
+# base_url 来自用户配置，自建网关常写成 https://svc:token@gw.internal/...，
+# 原样记进日志等于把密码抄给所有能读日志的人。
+
+
+def test_redact_url_leaves_plain_endpoint_untouched() -> None:
+    assert redact_url("https://api.typesafe.ai/v1/systemone") == (
+        "https://api.typesafe.ai/v1/systemone"
+    )
+
+
+def test_redact_url_masks_userinfo() -> None:
+    assert redact_url("https://svc:secret@gw.internal/v1/systemone") == (
+        f"https://{REDACTED}@gw.internal/v1/systemone"
+    )
+
+
+def test_redact_url_masks_user_without_password() -> None:
+    assert redact_url("https://svc@gw.internal/v1/systemone") == (
+        f"https://{REDACTED}@gw.internal/v1/systemone"
+    )
+
+
+def test_redact_url_masks_userinfo_without_scheme() -> None:
+    """省略协议的写法也要能脱敏，否则等于留了个后门。"""
+    assert redact_url("svc:secret@gw.internal:8080/v1/systemone") == (
+        f"{REDACTED}@gw.internal:8080/v1/systemone"
+    )
+
+
+def test_redact_url_keeps_host_when_password_contains_at_sign() -> None:
+    """密码里带 @ 时必须按最后一个 @ 切分，不能把 host 一起吃掉。"""
+    assert redact_url("https://svc:p@ss@gw.internal/v1/systemone") == (
+        f"https://{REDACTED}@gw.internal/v1/systemone"
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "secret"),
+    [
+        ("api_key=sk-live-1", "sk-live-1"),
+        ("token=abc", "abc"),
+        ("access_token=abc", "abc"),
+        ("password=abc", "abc"),
+    ],
+)
+def test_redact_url_masks_sensitive_query_params(query, secret) -> None:
+    text = redact_url(f"https://gw.internal/v1/systemone?{query}&model=jev-latest")
+
+    assert secret not in text
+    assert REDACTED in text
+    # 非敏感参数保留，否则运维看不出打的是哪个模型
+    assert "model=jev-latest" in text
+
+
+def test_redact_url_collapses_newline_to_stop_log_forging() -> None:
+    """配置里的换行不能把一行日志劈成两行伪造事件。"""
+    text = redact_url("https://gw.internal/v1\n[INFO] 伪造的日志行")
+
+    assert "\n" not in text
+    assert text.count(" ") <= 4
+
+
+def test_redact_url_caps_length() -> None:
+    text = redact_url("https://gw.internal/" + "a" * 500)
+
+    assert len(text) <= 200
+    assert text.endswith("…")
+
+
+def test_redact_url_masks_sensitive_param_in_fragment() -> None:
+    """凭据塞在 fragment 里也要脱敏——只认 ?/& 会漏掉。"""
+    text = redact_url("https://gw.internal/v1?a=1#access_token=zzz")
+
+    assert "zzz" not in text
+    assert REDACTED in text
+    assert "a=1" in text
+
+
+def test_redact_url_is_idempotent() -> None:
+    once = redact_url("https://svc:secret@gw.internal/v1?api_key=sk-live")
+
+    assert redact_url(once) == once
+
+
+def test_redact_url_handles_blank() -> None:
+    assert redact_url("") == ""
+    assert redact_url("   ") == ""
+
+
+def test_jev_error_never_retains_plaintext_credentials() -> None:
+    """异常对象本身不能持有明文，否则直接打印异常就会泄漏。"""
+    error = JevError(
+        "x",
+        code="jev_error:network",
+        endpoint="https://svc:supersecret@gw.internal/v1/systemone",
+    )
+
+    assert "supersecret" not in error.endpoint
+    assert error.endpoint == f"https://{REDACTED}@gw.internal/v1/systemone"
+
+
+def test_format_failure_fields_never_prints_credentials() -> None:
+    text = format_failure_fields(
+        JevError(
+            "x",
+            code="jev_error:auth:401",
+            attempts=2,
+            endpoint="https://svc:supersecret@gw.internal/v1/systemone",
+        )
+    )
+
+    assert "supersecret" not in text
+    assert f"端点 https://{REDACTED}@gw.internal/v1/systemone" in text
+
+
+async def test_parse_stage_failures_keep_diagnostic_context() -> None:
+    """解析阶段的失败也必须带 attempts/status/端点，不能比其它失败类信息更少。"""
+
+    async with _client(
+        lambda _r: httpx.Response(200, json=_choice_payload("respond", 0.2))
+    ) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(
+                client, settings=_settings(min_confidence=0.7), state={}
+            )
+
+    assert excinfo.value.code == "jev_error:low_confidence"
+    assert excinfo.value.attempts == 1
+    assert excinfo.value.status == 200
+    assert excinfo.value.endpoint.endswith("/v1/systemone")
+    # 原始解析消息不能丢
+    assert "置信度低于门限" in str(excinfo.value)
+
+
+async def test_budget_exhaustion_keeps_upstream_cause() -> None:
+    """预算提前收手不能顶替上游的真实死因。
+
+    默认配置（单次 8 秒、总预算 12 秒、重试 2 次）下上游宕机必然先耗尽预算。
+    若此时报成 jev_error:budget，运维会被引导去调大预算而不是查上游——
+    这正是本次改动要消灭的"日志查不出死因"。
+    """
+
+    async def slow_429(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.30)
+        return httpx.Response(429, json={"error": "slow down"})
+
+    async with _client(slow_429) as client:
+        with pytest.raises(JevError) as excinfo:
+            await request_decision(
+                client,
+                settings=_settings(
+                    max_retries=2,
+                    total_budget_seconds=0.5,
+                    retry_backoff_seconds=0.0,
+                ),
+                state={},
+            )
+
+    # 真实死因是限流，状态码也必须保住
+    assert excinfo.value.code == "jev_error:rate_limited:429"
+    assert excinfo.value.status == 429
+    # 预算作为"提前收手"附加在消息里，不取代死因
+    assert "已达总预算" in str(excinfo.value)
+
+
+def test_format_failure_fields_hides_success_status() -> None:
+    """2xx 不是失败信号，写进诊断字段只会让人误以为上游报错。"""
+    text = format_failure_fields(
+        JevError("x", code="jev_error:bad_schema", status=200, attempts=1)
+    )
+
+    assert "HTTP" not in text
+    # 其它诊断字段不受影响
+    assert "尝试 1 次" in text
+
+
+def test_endpoint_keeps_query_string_after_path() -> None:
+    """带查询串的 base_url 不能把路径补到参数后面。"""
+    settings = JevSettings(
+        api_key="k", base_url="https://api.typesafe.ai/v1/systemone?key=v"
+    )
+
+    assert settings.endpoint == "https://api.typesafe.ai/v1/systemone?key=v"
+
+    settings = JevSettings(api_key="k", base_url="https://gw.internal?key=v")
+
+    assert settings.endpoint == "https://gw.internal/v1/systemone?key=v"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://g/v1?a=1;api_key=LEAK",
+        "https://g/v1?a=1&api%5Fkey=LEAK",
+    ],
+)
+def test_redact_url_covers_odd_parameter_separators(url: str) -> None:
+    """分号分隔与百分号编码的键名也要脱敏，否则与工具参数脱敏行为不一致。"""
+    assert "LEAK" not in redact_url(url)
+
+
+def test_reason_text_keeps_unclassified_exception_class() -> None:
+    """无法判定类别的异常要保留类名——它往往是定位根因的唯一线索。"""
+    from ..decision.models import reason_text
+
+    text = reason_text(classify_failure(ValueError("boom")))
+
+    assert "ValueError" in text
+    assert "其他判断信号" not in text
+
+
+def test_reason_text_still_falls_back_for_unknown_prefix() -> None:
+    from ..decision.models import reason_text
+
+    assert reason_text("some_unmapped:ValueError") == "其他判断信号"
+
+
+def test_classify_failure_passes_through_jev_error_code() -> None:
+    error = JevError("x", code="jev_error:auth:401")
+    assert classify_failure(error) == "jev_error:auth:401"
+
+
+def test_classify_failure_keeps_unclassifiable_exception_verbose() -> None:
+    """连故障类别都判不出的异常应保留类名，不伪装成已知类别。"""
+    assert classify_failure(ValueError("boom")) == "jev_exception:ValueError"
+
+
+def test_format_failure_fields_omits_empty_diagnostics() -> None:
+    assert format_failure_fields(None) == ""
+    assert format_failure_fields(JevError("x")) == ""
+
+
+def test_format_failure_fields_reports_attempts_and_endpoint() -> None:
+    text = format_failure_fields(
+        JevError(
+            "x",
+            code="jev_error:auth:401",
+            status=401,
+            attempts=3,
+            elapsed=1.5,
+            endpoint="https://api.typesafe.ai/v1/systemone",
+        )
+    )
+
+    assert "尝试 3 次" in text
+    assert "耗时 1.50 秒" in text
+    assert "端点 https://api.typesafe.ai/v1/systemone" in text
+    # 状态码只出现一次，不因"原因里已含"而重复罗列
+    assert text.count("HTTP 401") == 1
+
+
+# --- 原因码在决策日志里的呈现 --------------------------------------------
+
+
+def test_describe_decision_renders_jev_failure_code() -> None:
+    """带状态码后缀的原因码必须查到中文，不能落成「其他判断信号」。"""
+    decision = build_fallback_decision(
+        local_score=0.0,
+        lower_bound=-0.2,
+        upper_bound=0.2,
+        reasons=["question_or_request"],
+        detail="jev_error:auth:401",
+    )
+
+    _action, _source, reasons = describe_decision(decision)
+
+    assert "鉴权失败" in reasons
+    assert "其他判断信号" not in reasons
+
+
+def test_describe_decision_renders_plain_code_without_suffix() -> None:
+    decision = build_fallback_decision(
+        local_score=0.0,
+        lower_bound=-0.2,
+        upper_bound=0.2,
+        reasons=[],
+        detail="jev_disabled",
+    )
+
+    _action, _source, reasons = describe_decision(decision)
+
+    assert "Jev 未启用" in reasons
+
+
+def test_describe_decision_still_falls_back_for_unknown_code() -> None:
+    """前缀也匹配不上时才是「其他判断信号」，README 对该症状的说明仍成立。"""
+    decision = build_fallback_decision(
+        local_score=0.0,
+        lower_bound=-0.2,
+        upper_bound=0.2,
+        reasons=[],
+        detail="some_unmapped_reason",
+    )
+
+    _action, _source, reasons = describe_decision(decision)
+
+    assert reasons == "其他判断信号"
+
+
+# --- 失败留痕 -------------------------------------------------------------
+
+
+@contextmanager
+def _capture_chatter_logs(monkeypatch):
+    """把 chatter 的日志调用收进列表。
+
+    框架的 ``Logger``（``src/kernel/logger``）是自定义类，既不是标准库
+    ``logging.Logger``，也不向 root 传播，因此 ``caplog`` 与 ``addHandler``
+    都抓不到记录。这里直接替换实例上的 ``warning`` / ``debug`` 方法，
+    只观察调用事实，不依赖日志器的内部实现。
+    """
+    from .. import chatter as chatter_module
+
+    captured: list[tuple[str, str]] = []
+    for level in ("warning", "debug", "info"):
+        monkeypatch.setattr(
+            chatter_module.logger,
+            level,
+            lambda message, _level=level: captured.append((_level, message)),
+        )
+    yield captured
+
+
+async def test_jev_failure_is_warned_even_when_falling_back(monkeypatch) -> None:
+    """默认 sub_actor 回退下也必须 WARNING——否则 Jev 静默失效无人察觉。"""
+    with _capture_chatter_logs(monkeypatch) as captured:
+        await _run_jev(
+            monkeypatch,
+            _config(True, "ts_key"),
+            handler=lambda _r: httpx.Response(401, json={"error": "unauthorized"}),
+        )
+
+    warnings = [text for level, text in captured if level == "warning"]
+    assert all("jev_error" not in text for text in warnings), captured
+    # 诊断字段随失败一起落盘，运维不必再去翻 traceback
+    assert any("尝试 1 次" in text for text in warnings), captured
+    assert any("端点 " in text for text in warnings), captured
+    # 死因必须是中文，不能把内部原因码原样吐给人看
+    assert any("鉴权失败" in text for text in warnings), captured
+
+
+async def test_jev_disabled_stays_debug_to_avoid_warn_spam(monkeypatch) -> None:
+    """未启用不是"请求失败"，按灰区频率打 WARNING 会变成常态噪音。"""
+    with _capture_chatter_logs(monkeypatch) as captured:
+        await _run_jev(monkeypatch, _config(False, "ts_key"))
+
+    assert not [text for level, text in captured if level == "warning"], captured
+    assert any(
+        level == "debug" and "Jev 未启用" in text for level, text in captured
+    ), captured
+
+
+async def test_silent_fallback_reason_carries_specific_code(monkeypatch) -> None:
+    """silent 模式下决策原因必须是细分后的码，而不是 JevError 类名。"""
+    decision = await _run_jev(
+        monkeypatch,
+        _config(True, "ts_key", fallback_decider="silent"),
+        handler=lambda _r: httpx.Response(401, json={"error": "unauthorized"}),
+    )
+
+    assert decision is not None
+    assert decision.reasons[-1] == "jev_error:auth:401"

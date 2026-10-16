@@ -24,6 +24,7 @@ JSON，并校验 action/confidence 字段；Jev 的 answer 自带类型保证，
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
 from collections.abc import Sequence
@@ -32,11 +33,7 @@ from typing import Any
 
 import httpx
 
-from src.app.plugin_system.api.log_api import get_logger
-
 from .models import DecisionAction, DecisionSource, ReplyDecision
-
-logger = get_logger("agentic_chatter.decision")
 
 # TypeSafe System One 评估端点路径，拼接在可配置的 base_url 之后。
 JEV_ENDPOINT_PATH = "/v1/systemone"
@@ -46,6 +43,49 @@ DEFAULT_JEV_BASE_URL = "https://api.typesafe.ai"
 
 # 默认可重试的状态码：限流与服务过载
 _RETRYABLE_STATUS = frozenset({429, 529})
+
+# 上游 HTTP 状态码到故障类别的映射。未列出的状态码归入 ``jev_error:http``，
+# 原始码仍由 :func:`status_failure_code` 拼在码尾，因此上游新增状态码既不会
+# 被误归类，也不会丢失原始响应信息。
+_HTTP_STATUS_CLASS: dict[int, str] = {
+    400: "jev_error:bad_request",
+    401: "jev_error:auth",
+    402: "jev_error:payment",
+    403: "jev_error:auth",
+    404: "jev_error:not_found",
+    422: "jev_error:bad_request",
+    429: "jev_error:rate_limited",
+    529: "jev_error:overloaded",
+}
+
+# 未细分状态码的兜底类别。
+_HTTP_STATUS_FALLBACK_CLASS = "jev_error:http"
+
+# 无法进一步细分的失败类别。
+_UNKNOWN_CLASS = "jev_error:unknown"
+
+# 脱敏后统一使用的占位符，与 tooling.dedupe 的日志脱敏保持一致，
+# 便于运维用同一个 [REDACTED] 串扫全插件日志。
+_REDACTED = "[REDACTED]"
+
+# URL 查询串里可能出现的凭据参数名。刻意与 tooling.dedupe 的敏感键模式
+# 保持同一套词表，但就地复制而非跨包导入：decision/ 目前对 tooling/ 零依赖，
+# 不值得为一条正则引入新的包间耦合边。日后扩词表时两处必须同步。
+# 前导字符含 '#' 与 ';'：凭据既可能塞在 fragment 里，也可能用分号分隔
+# （后者非 RFC3986 合法分隔符，但真实网关里见过）。
+# 键名允许百分号编码（api%5Fkey）——部分网关会先解码再匹配参数名。
+_SENSITIVE_QUERY_PATTERN = re.compile(
+    r"([?#&;][^=&#;]*(?:token|secret|password|authorization|cookie"
+    r"|api(?:[_-]|%5[fF])?key)[^=&#;]*=)"
+    r"[^&#;]*",
+    re.IGNORECASE,
+)
+
+# 换行等控制字符会把一行日志劈成两行，让后续行看起来像是独立事件。
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\s]+")
+
+# 端点地址的长度上限：超出部分对定位问题没有帮助，只会淹没日志。
+_MAX_URL_CHARS = 200
 
 # Jev 对"是否该说话"这一问题的两个选项。
 # 顺序固定：Jev 偏向靠前的选项，不得为了平衡概率而动态重排。
@@ -148,17 +188,190 @@ class JevSettings:
         允许 ``base_url`` 直接写到 ``/v1/systemone``，也允许只填到域名或
         某个网关前缀，路径会按需补全，避免用户重复填写路径导致拼成
         ``.../v1/systemone/v1/systemone``。
+
+        查询串与片段会先摘下再补路径：否则 ``base_url`` 带参数时
+        （``https://host/v1/systemone?key=v``）会因为整串不以路径结尾而
+        重新拼路径，最终打成 ``.../v1/systemone?key=v/v1/systemone``。
         """
         base = str(self.base_url or "").strip().rstrip("/")
         if not base:
             return f"{DEFAULT_JEV_BASE_URL}{JEV_ENDPOINT_PATH}"
-        if base.endswith(JEV_ENDPOINT_PATH):
-            return base
-        return f"{base}{JEV_ENDPOINT_PATH}"
+        path_part = base
+        tail = ""
+        for separator in ("?", "#"):
+            head, found, rest = path_part.partition(separator)
+            if found:
+                path_part = head.rstrip("/")
+                tail = f"{separator}{rest}"
+                break
+        if path_part.endswith(JEV_ENDPOINT_PATH):
+            return f"{path_part}{tail}"
+        return f"{path_part}{JEV_ENDPOINT_PATH}{tail}"
+
+
+def _authority_span(text: str) -> tuple[int, int]:
+    """返回 authority 段在文本中的 ``[start, end)`` 区间。
+
+    authority 指 userinfo 之后的 ``host[:port]``。有协议前缀时以 ``://``
+    之后为起点；省略协议时从 0 开始，好让 ``user:pass@host:port/v1``
+    这种写法同样能被识别。
+
+    Args:
+        text: 已折叠空白的 URL 文本。
+
+    Returns:
+        tuple[int, int]: authority 段的起止下标。
+    """
+    marker = text.find("://")
+    start = marker + 3 if marker != -1 else 0
+    end = len(text)
+    for char in "/?#":
+        position = text.find(char, start)
+        if position != -1:
+            end = min(end, position)
+    return start, end
+
+
+def redact_url(url: str) -> str:
+    """把 URL 中的凭据替换为 ``[REDACTED]``，供日志使用。
+
+    只抹凭据，保留协议、主机、端口与路径——那正是排查时要看的东西。
+    脱敏点有三处：
+
+    - **userinfo**：``https://user:pass@host/...``。自建网关与代理常把账号
+      密码直接写进 ``base_url``，原样记进日志等于把凭据抄给所有能读日志的人。
+    - **敏感查询参数**：``?api_key=...``、``?token=...`` 等。
+    - **控制字符**：`base_url` 来自用户配置，其中的换行会被日志后端渲染成
+      伪造的第二行，破坏"一行即一件事"的日志可信度。
+
+    Args:
+        url: 待脱敏的 URL。
+
+    Returns:
+        str: 脱敏且折叠为单行、限长的 URL。重复调用是幂等的。
+    """
+    text = _CONTROL_CHARS.sub(" ", str(url or "")).strip()
+    if not text:
+        return ""
+    text = _SENSITIVE_QUERY_PATTERN.sub(rf"\1{_REDACTED}", text)
+    start, end = _authority_span(text)
+    authority = text[start:end]
+    if "@" in authority:
+        # 密码本身可能含 @，因此按最后一个 @ 切分，保留真正的 host
+        _userinfo, _, host = authority.rpartition("@")
+        text = f"{text[:start]}{_REDACTED}@{host}{text[end:]}"
+    if len(text) > _MAX_URL_CHARS:
+        text = text[: _MAX_URL_CHARS - 1] + "…"
+    return text
+
+
+def status_failure_code(status: int) -> str:
+    """把 HTTP 状态码映射为带原始码的原因码。
+
+    Args:
+        status: 上游返回的 HTTP 状态码。
+
+    Returns:
+        str: 形如 ``jev_error:auth:401`` 的原因码。类别部分用于按故障类型
+            聚合，尾部的原始码保留了上游的精确响应。
+    """
+    code = int(status)
+    category = _HTTP_STATUS_CLASS.get(code, _HTTP_STATUS_FALLBACK_CLASS)
+    return f"{category}:{code}"
+
+
+def classify_failure(exc: BaseException) -> str:
+    """把异常归类为原因码。
+
+    :func:`request_decision` 的失败出口全部抛 :class:`JevError`，本函数
+    兜住直接逃逸到调用方的传输层异常，避免它们退化成
+    ``jev_exception:ConnectError`` 这种无法按故障类别聚合的类名码。
+
+    Args:
+        exc: 捕获到的异常。
+
+    Returns:
+        str: 原因码；非传输层异常仍返回 ``jev_exception:<类名>``，因为那类
+            异常连故障类别都无法判定，不应伪装成已知类别。
+    """
+    if isinstance(exc, JevError):
+        return exc.code or _UNKNOWN_CLASS
+    if isinstance(exc, httpx.TimeoutException):
+        return "jev_error:timeout"
+    if isinstance(exc, httpx.TransportError):
+        return "jev_error:network"
+    return f"jev_exception:{type(exc).__name__}"
+
+
+def format_failure_fields(exc: BaseException | None) -> str:
+    """把失败诊断拼成中文日志后缀。
+
+    只在状态码为错误码时输出它：2xx 说明请求已经成功到达上游，写一个
+    "HTTP 200" 既无排查价值，又会让人误以为上游报错了。
+
+    Args:
+        exc: 捕获到的异常；为 None 或无结构化字段时返回空串。
+
+    Returns:
+        str: 形如 ``（HTTP 401，尝试 3 次，耗时 2.41 秒，端点 https://...）``
+            的后缀，供日志直接拼接。
+    """
+    if exc is None:
+        return ""
+    fields: list[str] = []
+    status = getattr(exc, "status", None)
+    if status is not None and int(status) >= 400:
+        fields.append(f"HTTP {status}")
+    attempts = int(getattr(exc, "attempts", 0) or 0)
+    if attempts:
+        fields.append(f"尝试 {attempts} 次")
+    elapsed = float(getattr(exc, "elapsed", 0.0) or 0.0)
+    if elapsed > 0:
+        fields.append(f"耗时 {elapsed:.2f} 秒")
+    endpoint = str(getattr(exc, "endpoint", "") or "")
+    if endpoint:
+        fields.append(f"端点 {endpoint}")
+    return f"（{'，'.join(fields)}）" if fields else ""
 
 
 class JevError(RuntimeError):
-    """Jev 调用失败，调用方应走既有故障回退策略。"""
+    """Jev 调用失败，调用方应走既有故障回退策略。
+
+    ``code`` 是稳定的机器可读原因码，形如 ``jev_error:<类别>[:<状态码>]``。
+    保留 ``jev_error`` 前缀是为了不破坏既有的 ``grep jev_error`` 检索习惯，
+    类别部分承载真实死因，状态码部分保留上游的精确响应。调用方应优先读
+    ``code`` 而不是异常类名——本类没有子类，全部失败都是 ``JevError``，
+    类名不携带任何信息。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = _UNKNOWN_CLASS,
+        status: int | None = None,
+        attempts: int = 0,
+        elapsed: float = 0.0,
+        endpoint: str = "",
+    ) -> None:
+        """记录失败原因与诊断上下文。
+
+        Args:
+            message: 面向人的中文描述。
+            code: 稳定原因码，默认归入未分类。
+            status: 上游 HTTP 状态码；没有得到响应时为 None。
+            attempts: 已消耗的尝试次数。
+            elapsed: 本次裁决的累计耗时（秒）。
+            endpoint: 实际请求的完整端点。写入前会经 :func:`redact_url`
+                脱敏，因此本属性永远不含明文凭据——任何直接打印本异常的
+                代码也不会泄漏密码。
+        """
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.attempts = attempts
+        self.elapsed = elapsed
+        self.endpoint = redact_url(endpoint)
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,23 +537,40 @@ def parse_choice_answer(
         JevError: answer 结构非法或置信度低于门限时抛出。
     """
     if not isinstance(answer, dict):
-        raise JevError(f"Jev answer 结构非法：{type(answer).__name__}")
+        raise JevError(
+            f"Jev answer 结构非法：{type(answer).__name__}",
+            code="jev_error:bad_answer",
+        )
 
     choice = str(answer.get("choice", "") or "")
     if choice not in (_ACTION_RESPOND, _ACTION_SILENT):
-        raise JevError(f"Jev 返回未知选项：{choice!r}")
+        raise JevError(
+            f"Jev 返回未知选项：{choice!r}",
+            code="jev_error:bad_answer",
+        )
 
     try:
         confidence = float(answer.get("confidence", 0.0))
     except (TypeError, ValueError) as exc:
-        raise JevError("Jev 置信度不是数值") from exc
+        raise JevError(
+            "Jev 置信度不是数值",
+            code="jev_error:bad_answer",
+        ) from exc
 
     if not 0.0 <= confidence <= 1.0:
-        raise JevError(f"Jev 置信度越界：{confidence}")
+        raise JevError(
+            f"Jev 置信度越界：{confidence}",
+            code="jev_error:bad_answer",
+        )
 
     threshold = max(0.0, min(1.0, float(min_confidence)))
     if threshold and confidence < threshold:
-        raise JevError(f"Jev 置信度低于门限：{confidence:.3f} < {threshold:.3f}")
+        # 单独分类：这不是调用失败，而是门限把一次有效裁决挡了回去，
+        # 该做的是调小 min_confidence，而不是排查网络或状态码。
+        raise JevError(
+            f"Jev 置信度低于门限：{confidence:.3f} < {threshold:.3f}",
+            code="jev_error:low_confidence",
+        )
 
     probabilities = answer.get("probabilities")
     respond_probability = 0.0
@@ -400,58 +630,120 @@ async def request_decision(
 
     attempts = max(1, int(settings.max_retries) + 1)
     budget = max(0.5, float(settings.total_budget_seconds))
-    deadline = time.monotonic() + budget
+    endpoint = settings.endpoint
+    started = time.monotonic()
+    deadline = started + budget
     last_error: Exception | None = None
 
+    def _fail(
+        message: str,
+        code: str,
+        *,
+        used: int,
+        status: int | None = None,
+    ) -> JevError:
+        """构造带诊断上下文的失败对象，供调用方直接记日志。"""
+        return JevError(
+            message,
+            code=code,
+            status=status,
+            attempts=used,
+            elapsed=time.monotonic() - started,
+            endpoint=endpoint,
+        )
+
+    budget_cut = False
     for attempt in range(attempts):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            last_error = JevError(
-                f"Jev 裁决超出总预算 {budget:.1f} 秒，已放弃剩余重试"
-            )
+            # 预算耗尽只说明"提前收手"，不是失败原因。若在此覆盖 last_error，
+            # 同一个 429 在预算恰好先耗尽时会报成 jev_error:budget——真实死因与
+            # 上游状态码一起丢掉，恰好抹掉本模块存在的理由。改为只置标记，
+            # 由收尾处把真实死因与预算信息合并输出。
+            budget_cut = True
             break
         # 单次尝试不得超过剩余预算，避免重试把总耗时叠加放大
         attempt_timeout = max(0.5, min(float(settings.timeout_seconds), remaining))
         try:
             response = await client.post(
-                settings.endpoint,
+                endpoint,
                 json=payload,
                 headers=headers,
                 timeout=httpx.Timeout(attempt_timeout),
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            last_error = exc
+            last_error = _fail(
+                f"Jev 请求失败：{type(exc).__name__}",
+                classify_failure(exc),
+                used=attempt + 1,
+            )
             if attempt + 1 >= attempts:
                 break
             await _backoff(settings, attempt, deadline)
             continue
 
         if response.status_code in _RETRYABLE_STATUS:
-            last_error = JevError(f"Jev 暂时不可用：HTTP {response.status_code}")
+            last_error = _fail(
+                f"Jev 暂时不可用：HTTP {response.status_code}",
+                status_failure_code(response.status_code),
+                used=attempt + 1,
+                status=response.status_code,
+            )
             if attempt + 1 >= attempts:
                 break
             await _backoff(settings, attempt, deadline)
             continue
 
         if response.status_code >= 400:
-            raise JevError(f"Jev 请求失败：HTTP {response.status_code}")
+            raise _fail(
+                f"Jev 请求失败：HTTP {response.status_code}",
+                status_failure_code(response.status_code),
+                used=attempt + 1,
+                status=response.status_code,
+            )
 
         try:
             body = response.json()
         except ValueError as exc:
-            raise JevError("Jev 响应不是合法 JSON") from exc
+            raise _fail(
+                "Jev 响应不是合法 JSON",
+                "jev_error:bad_json",
+                used=attempt + 1,
+                status=response.status_code,
+            ) from exc
 
         if not isinstance(body, dict):
-            raise JevError(f"Jev 响应结构非法：{type(body).__name__}")
+            raise _fail(
+                f"Jev 响应结构非法：{type(body).__name__}",
+                "jev_error:bad_schema",
+                used=attempt + 1,
+                status=response.status_code,
+            )
 
         answers = body.get("answers")
         if not isinstance(answers, dict) or "action" not in answers:
-            raise JevError("Jev 响应缺少 answers.action")
+            raise _fail(
+                "Jev 响应缺少 answers.action",
+                "jev_error:bad_schema",
+                used=attempt + 1,
+                status=response.status_code,
+            )
 
-        parsed = parse_choice_answer(
-            answers["action"],
-            min_confidence=settings.min_confidence,
-        )
+        try:
+            parsed = parse_choice_answer(
+                answers["action"],
+                min_confidence=settings.min_confidence,
+            )
+        except JevError as exc:
+            # 解析阶段的失败也要补上诊断上下文。否则 bad_answer 与
+            # low_confidence 两类的 attempts/elapsed/endpoint 会全空，
+            # 这条路径在日志里会比其它失败类少掉一半信息。
+            raise _fail(
+                str(exc),
+                exc.code,
+                used=attempt + 1,
+                status=response.status_code,
+            ) from exc
         usage = body.get("usage")
         if isinstance(usage, dict):
             parsed = JevAnswer(
@@ -464,7 +756,30 @@ async def request_decision(
             )
         return parsed
 
-    raise JevError(f"Jev 调用失败：{last_error}") from last_error
+    # 收尾：优先保留真实死因。预算耗尽只是"提前收手"的原因，附加在消息里
+    # 供排查参考，但不取代上游报出来的那一类失败。
+    if last_error is None:
+        # 一次请求都没能发出去：此时没有比"预算耗尽"更具体的原因可说。
+        # 该状态靠配置不可达（预算有下限，且首次尝试前不消耗时间），只有
+        # 事件循环被长时间阻塞才可能发生；保留分支是为了将来重构时不至于
+        # 把 last_error 为空直接抛成 AttributeError。
+        raise _fail(
+            f"Jev 裁决超出总预算 {budget:.1f} 秒，未能发起任何请求",
+            "jev_error:budget",
+            used=0,
+        )
+    suffix = (
+        f"；已达总预算 {budget:.1f} 秒，放弃剩余重试"
+        if budget_cut
+        else "；重试已用尽"
+    )
+    raise _fail(
+        f"Jev 调用失败：{last_error}{suffix}",
+        last_error.code or _UNKNOWN_CLASS,
+        used=last_error.attempts,
+        status=last_error.status,
+    ) from last_error
+
 
 
 async def _backoff(settings: JevSettings, attempt: int, deadline: float) -> None:

@@ -98,9 +98,9 @@ async def test_deliver_message_logs_structured_and_removed_thoughts(monkeypatch)
     assert sent == ["最终回复"]
     logs = [str(call.args[0]) for call in info.call_args_list]
     assert len(logs) == 2
-    assert any("来源=reasoning_content" in line and "结构化 推理" in line for line in logs)
+    assert any("来源=推理内容" in line and "结构化 推理" in line for line in logs)
     assert any(
-        "来源=removed_message_block" in line and "正文里的思考" in line
+        "来源=移除的消息块" in line and "正文里的思考" in line
         for line in logs
     )
     assert all("\n" not in line and len(line) <= 300 for line in logs)
@@ -152,7 +152,7 @@ async def test_deliver_message_intercepts_provider_error_text(monkeypatch) -> No
     send_text.assert_not_awaited()
     warning.assert_called_once()
     log_line = str(warning.call_args.args[0])
-    assert "event=provider_error_text_intercepted" in log_line
+    assert "事件=已拦截供应商异常文本" in log_line
     assert "规则=google_prompt_policy_block" in log_line
     assert f"字符数={len(visible_text)}" in log_line
     assert visible_text not in log_line
@@ -236,7 +236,7 @@ async def test_deliver_message_records_provider_error_request_body(monkeypatch) 
     assert build_record.call_args.kwargs["rule"] == "google_prompt_policy_block"
     assert build_record.call_args.kwargs["stream_id"] == "provider-error-on"
     append_record.assert_awaited_once_with(build_record.return_value)
-    assert any("event=provider_error_request_recorded" in str(call.args[0]) for call in info.call_args_list)
+    assert any("事件=供应商异常请求体已记录" in str(call.args[0]) for call in info.call_args_list)
 
 
 async def test_deliver_message_provider_error_recording_failure_still_intercepts(
@@ -268,7 +268,7 @@ async def test_deliver_message_provider_error_recording_failure_still_intercepts
 
     assert result == (False, False)
     send_text.assert_not_awaited()
-    assert any("event=provider_error_request_record_failed" in str(call.args[0]) for call in warning.call_args_list)
+    assert any("事件=供应商异常请求体记录失败" in str(call.args[0]) for call in warning.call_args_list)
 
 
 async def test_deliver_message_allows_provider_error_discussion(monkeypatch) -> None:
@@ -315,8 +315,8 @@ async def test_deliver_message_intercepts_reply_decision_json(monkeypatch) -> No
     send_text.assert_not_awaited()
     warning.assert_called_once()
     log_line = str(warning.call_args.args[0])
-    assert "event=reply_decision_json_intercepted" in log_line
-    assert "动作=silent" in log_line
+    assert "事件=已拦截子决策JSON" in log_line
+    assert "动作=暂不回复" in log_line
     assert f"字符数={len(text)}" in log_line
     assert text not in log_line
     assert not state.spoke
@@ -364,7 +364,7 @@ async def test_deliver_message_intercepts_complete_framework_message_line(monkey
     send_text.assert_not_awaited()
     warning.assert_called_once()
     log_line = str(warning.call_args.args[0])
-    assert "framework_message_line_intercepted" in log_line
+    assert "事件=已拦截框架消息行" in log_line
     assert f"字符数={len(text)}" in log_line
     assert text not in log_line
     assert not state.spoke
@@ -1036,7 +1036,7 @@ async def test_execute_calls_logs_tool_name_and_safe_args(monkeypatch) -> None:
     )
 
     logs = [str(call.args[0]) for call in info.call_args_list]
-    tool_logs = [line for line in logs if "event=tool_call" in line]
+    tool_logs = [line for line in logs if "事件=调用工具" in line]
     assert len(tool_logs) == 1
     assert "调用工具" in tool_logs[0]
     assert "工具=tool-search" in tool_logs[0]
@@ -1057,7 +1057,7 @@ async def test_execute_calls_does_not_log_when_disabled(monkeypatch) -> None:
         [call], response, TurnState(stream_id="tool-log-off"), SimpleNamespace(), [],
     )
 
-    assert not any("event=tool_call" in str(call.args[0]) for call in info.call_args_list)
+    assert not any("事件=调用工具" in str(call.args[0]) for call in info.call_args_list)
 
 
 def test_decide_iteration_preserves_control_and_text_priority() -> None:

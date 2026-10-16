@@ -11,7 +11,7 @@ from src.kernel.concurrency import get_task_manager
 
 from .control import TaskMessageKind, classify_task_message
 from .executor import TaskCommand, TaskExecutor, TaskRequest
-from .models import TaskResult, TaskStatus
+from .models import TaskResult, TaskStatus, task_status_text
 from .persistence import TaskStateStore
 from .runtime import TaskRuntime, get_task_runtime_manager
 
@@ -180,8 +180,8 @@ async def _notify_completion(
 
     await get_chatter_manager().resume_chatter(stream_id, source="sub_agent")
     logger.info(
-        f"[{stream_id[:8]}] 任务完成已回灌主 Agent event=task_completion_reported "
-        f"任务ID={runtime.state.task_id} 状态={runtime.state.status.value}"
+        f"[{stream_id[:8]}] 任务完成已回灌主 Agent 事件=任务完成已回灌主Agent "
+        f"任务ID={runtime.state.task_id} 状态={task_status_text(runtime.state.status)}"
     )
 
 
