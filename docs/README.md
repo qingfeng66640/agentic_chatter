@@ -10,6 +10,12 @@
 | --- | --- | --- |
 | [upgrade-0.8.0.md](upgrade-0.8.0.md) | 0.7.x → 0.8.0 | 最低核心版本提升、`max_input_images` 语义变更、新增 `max_input_image_bytes`、DECIDE 默认值重配 |
 
+## 排查
+
+| 文档 | 主题 |
+| --- | --- |
+| [jev-troubleshooting.md](jev-troubleshooting.md) | Jev 灰区裁决失败时如何从日志看出死因：原因码对照表、诊断字段、按现象反查 |
+
 ## 约定
 
 - 升级类文档只记录**会改变运行时行为**或**会阻止加载**的内容，不重复 CHANGELOG

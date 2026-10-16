@@ -121,10 +121,11 @@ Jev 是 TypeSafe 的 System One 模型，返回 typed answer 与概率而非自�
   鉴权(401)、参数错误(422)、网络错误、响应结构非法、置信度低于 `min_confidence`
   均视为不可用，按 `fallback_decider` 处理：
   - `sub_actor`（默认）：回退 sub_actor，沿用 `fallback_mode` 的既有故障回退策略。
-    此时该轮裁决者并非 Jev，DEBUG 日志会记录一次回退原因。
   - `silent`：**直接静默本轮，绝不调用 sub_actor**。灰度实验需要纯净的 Jev
     行为、不希望混入 LLM 裁决时使用此项。
-- **总耗时受 `total_budget_seconds` 硬约束**（默认 12 秒）。单次尝试超时取 `timeout_seconds` 与剩余预算的较小值，预算耗尽后放弃剩余重试；群聊回合在此期间被阻塞，不应把该值设得过大。
+  - 无论哪种策略，**真实调用失败都会以 WARNING 记录细分原因码**，不会因为回退
+    成功而被淹没。码表见 [docs/jev-troubleshooting.md](docs/jev-troubleshooting.md)。
+- **总耗时受 `total_budget_seconds` 硬约束**（默认 4 秒）。单次尝试超时取 `timeout_seconds` 与剩余预算的较小值，预算耗尽后放弃剩余重试；群聊回合在此期间被阻塞，不应把该值设得过大。
 - **置信度门限谨慎设置**。Jev 的 `confidence` 反映概率分布的集中程度，不等于判断
   正确率。建议先保持 `0`（全部接受）并开启 `log_answers` 观察真实分布后再调整。
 - **日志可区分来源**：Jev 裁决的 `DecisionSource` 为 `jev`（日志措辞「Jev 决策」），
@@ -310,7 +311,22 @@ python -X utf8 "$SKILL_DIR/scripts/verify_plugin.py" plugins/agentic_chatter
 | `Jev 决策`   | 本地处于灰区，由 Jev 完成最终裁决。              |
 | `故障回退`   | `sub_actor` 异常后按 `fallback_mode` 得出的结果。 |
 
-DEBUG 日志还会输出评分、置信区间、当前话题相关度、Bot 历史相关度、是否命中直接称呼以及内部原因码。若 INFO 日志显示“其他判断信号”，通常表示 `sub_actor` 返回了尚未被中文映射表收录的原因码；可在同轮 DEBUG 的“内部原因”中查看原始码。
+DEBUG 日志还会输出评分、置信区间、当前话题相关度、Bot 历史相关度、是否命中直接称呼
+以及内部原因的中文说明。
+
+INFO 日志显示“其他判断信号”，说明该原因码尚未被中文映射表收录，多半是 `sub_actor`
+返回了自定义码。Jev 的死因对照表见 [docs/jev-troubleshooting.md](docs/jev-troubleshooting.md)。
+
+Jev 不可用时（无论 `fallback_decider` 是 `sub_actor` 还是 `silent`）都会以 WARNING
+输出一行，带细分死因与诊断字段：
+
+```text
+[1a2b3c4d] Jev 不可用：Jev 鉴权失败（HTTP 401，尝试 1 次，端点 https://api.typesafe.ai/v1/systemone），灰区回退子决策模型
+```
+
+失败原因共 15 类，覆盖限流、过载、鉴权、额度、超时、网络、预算耗尽、响应结构异常等，
+日志中一律以中文呈现。完整对照表与按现象反查见
+[docs/jev-troubleshooting.md](docs/jev-troubleshooting.md)。
 
 ## 许可证与维护者
 

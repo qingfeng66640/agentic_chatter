@@ -93,12 +93,11 @@ min(max_input_images × 12MB, (max_input_image_bytes > 0 ? max_input_image_bytes
 
 ## 五、日志字段变化
 
-`event=multimodal_image_limit` **名称保持不变**，既有日志检索不会失效，但字段
-含义变了：
+预算收紧时会记录 `事件=多模态图片超限`：
 
 ```
-[pid] 多模态图片预算生效 event=multimodal_image_limit 引用=21 去重=16 实际内联=3 \
-      上限=3 体积=1804728B 体积上限=8388608B reason=count
+[pid] 多模态图片预算生效 事件=多模态图片超限 引用=21 去重=16 实际内联=3 \
+      上限=3 体积=1804728B 体积上限=8388608B 原因=张数超限
 ```
 
 | 字段 | 含义 |
@@ -107,13 +106,14 @@ min(max_input_images × 12MB, (max_input_image_bytes > 0 ? max_input_image_bytes
 | `去重` | 按 `image_id` 去重后的不同图片数 |
 | `实际内联` | 真正进入请求体的图片数 |
 | `体积` | 实际内联图片的 base64 总字节 |
-| `reason` | `count` 仅张数触顶 / `bytes` 仅体积触顶 / `both` 两者都有 |
+| `体积上限` | `max_input_image_bytes` 的实际取值 |
+| `原因` | 触顶的是张数、体积，还是两者都有 |
 
-另有 `event=multimodal_image_invalid`：图片载荷非法（不是合法 base64）时记录，
+另有 `事件=多模态图片载荷非法`：图片载荷非法（不是合法 base64）时记录，
 该图按 `[图片已省略]` 降级，**不会**再让整个 ACT 回合崩溃。
 
 排查建议：`引用` 与 `去重` 差距大说明同一张图被反复提及；`实际内联` 远小于
-`去重` 时调大预算；`reason=bytes` 说明该调体积而非张数。
+`去重` 时调大预算；`原因` 为「体积超限」说明该调体积而非张数。
 
 ## 六、DECIDE 阶段默认值重配
 
