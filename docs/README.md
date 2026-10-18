@@ -16,6 +16,7 @@
 | --- | --- |
 | [jev-troubleshooting.md](jev-troubleshooting.md) | Jev 灰区裁决失败时如何从日志看出死因：原因码对照表、诊断字段、按现象反查 |
 | [segmentation.md](segmentation.md) | 分句如何保护颜文字与表情不被拆开：不可拆单元的识别范围、超长单元的处理、完整性自检 |
+| [image-budget.md](image-budget.md) | 图片预算如何计量与归因：原始字节口径、丢弃原因码、告警字段含义与排查路径 |
 
 ## 约定
 
