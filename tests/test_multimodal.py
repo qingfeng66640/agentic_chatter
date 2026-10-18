@@ -9,10 +9,16 @@ from src.kernel.llm import Image, Text
 
 from ..config import AgenticChatterConfig
 from ..multimodal import (
+    DEFAULT_MAX_IMAGE_BYTES,
     MAX_SINGLE_IMAGE_BYTES,
+    _payload_body,
+    _raw_bytes,
+    _safe_image,
+    build_image_content,
     image_count,
     inline_message_images,
     summarize_budget,
+    unusable_media_summary,
 )
 
 
@@ -403,7 +409,7 @@ def test_empty_unread_falls_back_to_history_ordering() -> None:
         for i in range(4)
     ]
 
-    content = inline_message_images(_joined(history), history, max_images=2)
+    content = inline_message_images(_joined(history), history)
 
     text = "".join(_texts(content))
     assert "[图片(a03)]" in text
@@ -416,10 +422,14 @@ def test_empty_unread_falls_back_to_history_ordering() -> None:
 
 
 def test_byte_budget_boundary_is_exact() -> None:
+    """边界必须精确到**原始字节**，不能用 base64 长度凑。
+
+    预算口径是原始图片字节，故 ``both`` 取 96×2；``tight`` 少 1 字节即容不下第二张。
+    """
     first = _msg("[图片(b101)]", mid="m1", iid="b101", data=_b64(96))
     second = _msg("[图片(b202)]", mid="m2", iid="b202", data=_b64(96))
     messages = [first, second]
-    both = len(_b64(96)) * 2
+    both = 96 * 2
 
     loose = inline_message_images(_joined(messages), messages, max_images=3, max_bytes=both)
     tight = inline_message_images(
@@ -496,7 +506,7 @@ def test_trimmed_history_placeholder_is_marked_omitted() -> None:
         for i in range(4)
     ]
 
-    content = inline_message_images(_joined(history), history, max_images=2)
+    content = inline_message_images(_joined(history), history)
 
     text = "".join(_texts(content))
     assert "[图片已省略]" in text
@@ -558,7 +568,8 @@ def test_bare_placeholder_claims_an_unreferenced_image() -> None:
     content = inline_message_images(_joined([message]), [message], max_images=3)
 
     assert len(_emitted(content)) == 1
-    assert "[图片已省略]" not in _texts(content)
+    # 用拼接串而非 list：否则产出 "[图片已省略] (第2张)" 这类前缀化文本会漏判
+    assert "[图片已省略]" not in "".join(_texts(content))
 
 
 def test_no_placeholder_in_text_emits_nothing() -> None:
@@ -603,18 +614,22 @@ def test_summarize_budget_reports_all_counters() -> None:
         _msg(f"[图片(8{i:02x})]", mid=f"h{i}", iid=f"8{i:02x}", data=_b64(96))
         for i in range(4)
     ]
-    content = inline_message_images(_joined(messages), messages, max_images=2)
+    # 走 build_image_content 才有丢弃归因证据
+    content, summary = build_image_content(
+        _joined(messages), messages, max_images=2, max_bytes=1024 * 1024
+    )
 
-    summary = summarize_budget(content, messages, max_bytes=1024 * 1024)
-
+    assert len(_emitted(content)) == 2
     assert summary["ref_count"] == 4
     assert summary["distinct_count"] == 4
     assert summary["emitted"] == 2
-    assert summary["emitted_bytes"] == 2 * len(_b64(96))
+    # emitted_bytes 是**原始图片字节**，不再是 base64 文本长度
+    assert summary["emitted_bytes"] == 96 * 2
     assert summary["trimmed"] is True
     assert summary["over_bytes"] is False
     assert summary["should_warn"] is True
     assert summary["reason"] == "count"
+    assert summary["dropped"] == {"count": 2, "bytes": 0, "oversize": 0, "placeholder_slots": 0}
 
 
 def test_summarize_budget_zero_byte_budget_has_no_bytes_reason() -> None:
@@ -643,22 +658,50 @@ def test_summarize_budget_silent_when_nothing_trimmed() -> None:
     assert summary["reason"] == ""
 
 
-def test_summarize_budget_reports_both_reasons() -> None:
+def test_count_and_bytes_buckets_can_both_be_positive() -> None:
+    """``count`` 与 ``bytes`` **不是互斥的**——它们约束不同候选。
+
+    一次遍历中：大图因累计体积被跳过后，后续小图把剩余张数名额占满，
+    再后面的候选就因张数满被丢。于是两个桶同时为正，`reason=both`。
+
+    这个用例同时钉住"``both`` 可达"这一事实——早期误以为两桶互斥、
+    ``both`` 不可达而删掉该分支，会让此场景退化为只报 ``count``，
+    掩盖掉"体积也拒过图"这一事实。
+    """
     messages = [
-        _msg(f"[图片(b{i:03x})]", mid=f"h{i}", iid=f"b{i:03x}", data=_b64(96))
-        for i in range(4)
+        _msg("[图片(0000)]", mid="h0", iid="0000", data=_b64(96)),
+        _msg("[图片(0001)]", mid="h1", iid="0001", data=_b64(96)),
+        _msg("[图片(0002)]", mid="h2", iid="0002", data=_b64(MAX_SINGLE_IMAGE_BYTES // 2)),
+        _msg("[图片(0003)]", mid="h3", iid="0003", data="这不是base64"),
     ]
-    # 预算比单张还小：首张仍豁免累计，故实际发出 1 张且体积超限
-    tight = len(_b64(96)) - 1
-    content = inline_message_images(
-        _joined(messages), messages, max_images=2, max_bytes=tight
+
+    _, summary = build_image_content(
+        _joined(messages), messages, max_images=2, max_bytes=1024 * 1024
     )
 
-    summary = summarize_budget(content, messages, max_bytes=tight)
-
-    assert summary["trimmed"] is True
-    assert summary["over_bytes"] is True
+    dropped = summary["dropped"]
+    assert dropped["count"] > 0
+    assert dropped["bytes"] > 0
     assert summary["reason"] == "both"
+
+
+def test_both_reason_requires_both_evidence() -> None:
+    """只有一类证据时不得报 ``both``（对抗审查补的盲区）。
+
+    旧实现只要"体积超标 + 任意省略"就报双超，于是一行日志里同时出现
+    ``丢弃(张数)=0`` 与 ``原因=张数与体积双超`` 自相矛盾。
+    """
+    messages = [
+        _msg("[图片(1a01)]", mid="m1", iid="1a01", data=_b64(96)),
+        _msg("[图片(2b02)]", mid="m2", iid="2b02", data=_b64(96)),
+    ]
+
+    _, summary = build_image_content(
+        _joined(messages), messages, max_images=5, max_bytes=1
+    )
+
+    assert summary["dropped"]["count"] == 0
+    assert summary["reason"] == "bytes"
 
 
 # --------------------------------------------------------------------------
@@ -676,7 +719,7 @@ def test_cumulative_budget_accumulates_across_images() -> None:
         _msg(f"[图片(1{i:03x})]", mid=f"m{i}", iid=f"1{i:03x}", data=_b64(600))
         for i in range(3)
     ]
-    budget = int(len(_b64(600)) * 2.5)
+    budget = 600 * 2 + 300  # 2.5 张的原始字节预算
 
     content = inline_message_images(
         _joined(messages), messages, max_images=3, max_bytes=budget
@@ -684,7 +727,7 @@ def test_cumulative_budget_accumulates_across_images() -> None:
 
     # 2.5 张的预算只装得下 2 张；第三张会把累计推过上限
     assert _sizes(content) == [600, 600]
-    assert sum(len(item.value) for item in _emitted(content)) <= budget
+    assert sum(_sizes(content)) <= budget
 
 
 def test_candidate_dedup_prevents_double_counted_budget() -> None:
@@ -697,15 +740,15 @@ def test_candidate_dedup_prevents_double_counted_budget() -> None:
     dup2 = _msg("[图片(2a01)]", mid="m2", iid="2a01", data=_b64(600))
     other = _msg("[图片(2b02)]", mid="m3", iid="2b02", data=_b64(600))
     messages = [dup, dup2, other]
-    budget = int(len(_b64(600)) * 2.5)
+    budget = 600 * 2 + 300  # 2.5 张的原始字节预算
 
     content = inline_message_images(
         _joined(messages), messages, max_images=3, max_bytes=budget
     )
 
-    # 去重后占用 600，剩 2.5-1 = 1.5 张额度，other 装得下 → 发 2 张
+    # 去重后占用 600，剩 1.5 张额度，other 装得下 → 发 2 张
     assert _sizes(content) == [600, 600]
-    assert sum(len(item.value) for item in _emitted(content)) <= budget
+    assert sum(_sizes(content)) <= budget
 
 
 def test_bare_placeholders_are_assigned_in_reverse_document_order() -> None:
@@ -765,17 +808,19 @@ def test_production_shape_summarize_budget_counts_distinct_separately() -> None:
         for index, iid in enumerate(reversed(order[:3]))
     ]
     messages = history + current
-    content = inline_message_images(
-        _joined(messages), messages, preferred_messages=current, max_images=3
+    # 走 build_image_content 才有丢弃归因：只拿 content 时 reason 会是 unknown
+    _, summary = build_image_content(
+        _joined(messages), messages, preferred_messages=current,
+        max_images=3, max_bytes=8 * 1024 * 1024,
     )
-
-    summary = summarize_budget(content, messages, max_bytes=8 * 1024 * 1024)
 
     assert summary["ref_count"] == 21
     assert summary["distinct_count"] == 16
     assert summary["emitted"] == 3
     assert summary["trimmed"] is True
+    # 张数上限真的触顶且确有图因张数被丢，才允许报 count
     assert summary["reason"] == "count"
+    assert summary["dropped"]["count"] > 0
 
 
 def test_payload_lookalike_path_is_not_read_from_disk() -> None:
@@ -803,3 +848,574 @@ def test_bracket_in_description_does_not_swallow_next_placeholder() -> None:
 
     # 第二张仍必须能内联，不能被第一张的描述吞掉
     assert 30 in _sizes(content)
+
+
+# --------------------------------------------------------------------------
+# 计量口径：原始图片字节（而非 base64 文本长度）
+# --------------------------------------------------------------------------
+
+
+def test_raw_bytes_is_exact_not_floor_approximation() -> None:
+    """折算必须**精确**，不能用 ``len*3//4`` 近似。
+
+    ``b64encode`` 会补位，``len*3//4`` 对 3,500,000 B 的图会算出 3,500,001。
+    多算的 1~2 字节会让"刚好等于预算"的图被误判超限。
+    """
+    for size in (1, 2, 3, 5, 7, 11, 96, 600, 180_000, 3_500_000, 9_000_000):
+        assert _raw_bytes(_b64(size)) == size, f"size={size}"
+        assert _raw_bytes(f"base64|{_b64(size)}") == size, f"size={size}"
+
+
+def test_raw_bytes_ignores_prefix_and_whitespace() -> None:
+    """``data:`` / ``base64|`` 前缀与空白都不应计入原始体积。"""
+    raw = _b64(120)
+    assert _raw_bytes(raw) == 120
+    assert _raw_bytes(f"base64|{raw}") == 120
+    assert _raw_bytes(f"data:image/png;base64,{raw}") == 120
+    assert _raw_bytes("\n".join(raw[i:i + 64] for i in range(0, len(raw), 64))) == 120
+
+
+def test_raw_bytes_empty_payload_is_zero() -> None:
+    assert _raw_bytes("") == 0
+    assert _raw_bytes("base64|") == 0
+
+
+def test_two_phone_photos_fit_default_budget() -> None:
+    """回归事故：两张 3.5MB 手机照（原始 7MB）必须都能内联。
+
+    旧实现按 base64 长度计量时是 9.33MB > 8MB，第二张被无声丢掉。
+    """
+    messages = [
+        _msg(f"[图片({iid:04x})]", mid=f"m{i}", iid=f"{iid:04x}",
+             data="base64|" + _b64(3_500_000))
+        for i, iid in enumerate((0x1111, 0x2222))
+    ]
+
+    content = inline_message_images(
+        _joined(messages), messages, max_images=3, max_bytes=DEFAULT_MAX_IMAGE_BYTES
+    )
+
+    assert len(_emitted(content)) == 2
+    # 用拼接串而非 list：否则产出 "[图片已省略] (第2张)" 这类前缀化文本会漏判
+    assert "[图片已省略]" not in "".join(_texts(content))
+
+
+def test_nine_mib_image_is_not_rejected_by_single_ceiling() -> None:
+    """单张硬上限按**原始字节**计：原始 9 MiB 的图不该被 base64 膨胀顶掉。
+
+    旧实现按 base64 长度比 12 MiB，等效原始上限被压到 9 MiB：
+    ``12 MiB * 3/4 = 9 MiB``。原始体积一旦超过 9 MiB（约 9.44MB 十进制），
+    base64 化后就越过 12 MiB 而被丢弃——尽管原始图并未超过配置宣称的 12MB。
+
+    用 10 MiB 原始体积构造，是旧实现必杀、新实现必放行的区间。
+    """
+    raw_size = 10 * 1024 * 1024
+    # 旧口径下它必然越界，新口径下必须放行
+    assert len(_b64(raw_size)) > MAX_SINGLE_IMAGE_BYTES
+
+    message = _msg("[图片(3333)]", mid="m", iid="3333",
+                   data="base64|" + _b64(raw_size))
+
+    content = inline_message_images(
+        _joined([message]), [message], max_images=3,
+        max_bytes=64 * 1024 * 1024,
+    )
+
+    assert len(_emitted(content)) == 1
+    assert _sizes(content) == [raw_size]
+
+
+def test_single_ceiling_still_rejects_oversized_raw_image() -> None:
+    """原始体积真的超 12MB 时仍必须被单张上限挡下。"""
+    message = _msg("[图片(4444)]", mid="m", iid="4444",
+                   data=_b64(MAX_SINGLE_IMAGE_BYTES + 1))
+
+    content = inline_message_images(
+        _joined([message]), [message], max_images=3,
+        max_bytes=256 * 1024 * 1024,
+    )
+
+    assert not _emitted(content)
+
+
+# --------------------------------------------------------------------------
+# 归因如实化
+# --------------------------------------------------------------------------
+
+
+def test_byte_budget_does_not_report_count_reason() -> None:
+    """因**字节**丢图时 reason 必须是 ``bytes``，不能谎报 ``count``。
+
+    这是旧实现最误导的地方：张数远未触顶，日志却写"张数超限"。
+    """
+    messages = [
+        _msg(f"[图片({iid:04x})]", mid=f"m{i}", iid=f"{iid:04x}",
+             data="base64|" + _b64(3_500_000))
+        for i, iid in enumerate((0x5555, 0x6666, 0x7777))
+    ]
+
+    _, summary = build_image_content(
+        _joined(messages), messages, max_images=3, max_bytes=8 * 1024 * 1024
+    )
+
+    assert summary["emitted"] == 2
+    assert summary["dropped"] == {
+        "count": 0, "bytes": 1, "oversize": 0, "placeholder_slots": 0,
+    }
+    assert summary["reason"] == "bytes"
+
+
+def test_count_reason_requires_evidence_of_count_cap() -> None:
+    """只有"张数确实触顶且确有图因张数被丢"才允许报 ``count``。"""
+    messages = [
+        _msg(f"[图片({iid:04x})]", mid=f"m{i}", iid=f"{iid:04x}", data=_b64(64))
+        for i, iid in enumerate((0x8111, 0x8222, 0x8333, 0x8444, 0x8555))
+    ]
+
+    _, summary = build_image_content(
+        _joined(messages), messages, max_images=2, max_bytes=1024 * 1024
+    )
+
+    assert summary["emitted"] == 2
+    assert summary["dropped"]["count"] == 3
+    assert summary["reason"] == "count"
+
+
+def test_single_ceiling_boundary_accepts_exactly_at_limit() -> None:
+    """恰好等于单张上限的图必须**放行**（变异测试补的盲区）。
+
+    既有用例只测了 ``MAX+1``（应拦）与 10 MiB（应放行），没有任何用例钉住
+    ``== MAX`` 这一侧。把 ``>`` 改成 ``>=`` 时全部测试仍然全绿，而实际行为
+    已经改变：12 MiB 的图会被错误丢弃。
+    """
+    message = _msg("[图片(cc01)]", mid="m", iid="cc01",
+                   data=_b64(MAX_SINGLE_IMAGE_BYTES))
+
+    content = inline_message_images(
+        _joined([message]), [message], max_images=1,
+        max_bytes=MAX_SINGLE_IMAGE_BYTES + 1,
+    )
+
+    assert len(_emitted(content)) == 1
+    assert _sizes(content) == [MAX_SINGLE_IMAGE_BYTES]
+
+
+def test_single_ceiling_boundary_rejects_one_byte_over() -> None:
+    """超过上限 1 字节的图必须被拦，与 :func:`test_single_ceiling_boundary_accepts_exactly_at_limit` 构成闭区间。"""
+    message = _msg("[图片(cc02)]", mid="m", iid="cc02",
+                   data=_b64(MAX_SINGLE_IMAGE_BYTES + 1))
+
+    content = inline_message_images(
+        _joined([message]), [message], max_images=1,
+        max_bytes=MAX_SINGLE_IMAGE_BYTES * 2,
+    )
+
+    assert not _emitted(content)
+    assert "[图片已省略]" in "".join(_texts(content))
+
+
+def test_placeholder_slot_exhaustion_is_attributed() -> None:
+    """裸占位符槽位耗尽必须单独归因，而不是落进 ``unknown``（对抗审查补的盲区）。
+
+    这是最高频的真实死因：正文只有 1 个 ``[图片]``，却有 3 张可用图，
+    即使张数与体积都宽裕，多出来的 2 张也无处安放。旧实现直接 ``break``
+    且不计数，使这类省略全部退化成"原因不明"。
+    """
+    messages = [
+        _msg(f"[图片({iid:04x})]", mid=f"m{i}", iid=f"{iid:04x}", data=_b64(64))
+        for i, iid in enumerate((0xa001, 0xa002, 0xa003))
+    ]
+
+    _, summary = build_image_content(
+        "[图片]", messages, max_images=3, max_bytes=1024 * 1024
+    )
+
+    assert summary["emitted"] == 1
+    assert summary["dropped"]["placeholder_slots"] == 2
+    assert summary["reason"] == "placeholder_slots"
+    assert summary["should_warn"] is True
+
+
+def test_no_placeholder_at_all_is_attributed_to_slots() -> None:
+    """正文完全没有占位符时，多余候选同样计入槽位桶。"""
+    messages = [
+        _msg(f"[图片({iid:04x})]", mid=f"m{i}", iid=f"{iid:04x}", data=_b64(64))
+        for i, iid in enumerate((0xb001, 0xb002))
+    ]
+
+    content, summary = build_image_content(
+        "这里没有任何占位符", messages, max_images=5, max_bytes=1024 * 1024
+    )
+
+    assert not [item for item in content if isinstance(item, Image)]
+    assert summary["emitted"] == 0
+    assert summary["dropped"]["placeholder_slots"] == 2
+    assert summary["reason"] == "placeholder_slots"
+
+
+def test_zero_max_images_reports_count_not_unknown() -> None:
+    """``max_images=0`` 的正确归因是 ``count``，不得退化成 ``unknown``（对抗审查补的盲区）。
+
+    旧实现在该分支手工构造全零 ``dropped``，把唯一的张数证据自己抹掉了，
+    属于诊断能力回退。
+    """
+    messages = [
+        _msg(f"[图片({iid:04x})]", mid=f"m{i}", iid=f"{iid:04x}", data=_b64(64))
+        for i, iid in enumerate((0xc001, 0xc002, 0xc003))
+    ]
+
+    content, summary = build_image_content(
+        _joined(messages), messages, max_images=0
+    )
+
+    assert content == [Text(_joined(messages))]
+    assert summary["emitted"] == 0
+    assert summary["dropped"]["count"] == 3
+    assert summary["reason"] == "count"
+
+
+def test_count_attribution_survives_invalid_payload() -> None:
+    """载荷非法被拒后，张数证据仍须成立（对抗审查补的盲区）。
+
+    旧判据用 ``len(emitted) >= max_images`` 判张数触顶，而发射阶段会因
+    载荷非法被拒掉一张，使 ``emitted`` 低于 ``max_images``——张数证据就此丢失。
+    判据必须改用 ``dropped["count"]``。
+    """
+    bad = _msg("[图片(d001)]", mid="m1", iid="d001", data="这不是base64")
+    good = _msg("[图片(d002)]", mid="m2", iid="d002", data=_b64(64))
+    good2 = _msg("[图片(d003)]", mid="m3", iid="d003", data=_b64(64))
+    messages = [bad, good, good2]
+
+    content, summary = build_image_content(
+        _joined(messages), messages, max_images=2, max_bytes=1024 * 1024
+    )
+
+    # 非法载荷在发射阶段被拒，故实际内联数少于选中数（3 候选里只内联 2 个可用）
+    assert summary["dropped"]["count"] > 0
+    assert summary["reason"] == "count"
+    assert len(_emitted(content)) == 2
+
+
+def test_oversize_first_image_still_lets_later_image_through() -> None:
+    """首张超限时必须**继续往后选**，不能 ``break`` 提前退出（变异测试补的盲区）。
+
+    ``oversize`` 分支用 ``continue`` 而非 ``break``：一张 20 MiB 的图被单张
+    上限拦下后，后面的正常图仍应被选中。若改成 ``break``，``emitted`` 会从 1
+    变成 0，而只断言 ``dropped["oversize"]`` 的用例察觉不到。
+    """
+    huge = _msg("[图片(dd01)]", mid="m1", iid="dd01",
+                data=_b64(MAX_SINGLE_IMAGE_BYTES + 1))
+    normal = _msg("[图片(dd02)]", mid="m2", iid="dd02", data=_b64(64))
+    messages = [normal, huge]
+
+    content, summary = build_image_content(
+        _joined(messages), messages, max_images=2, max_bytes=1024 * 1024
+    )
+
+    # 超限的被跳过，后面那张正常图必须补上
+    assert len(_emitted(content)) == 1
+    assert summary["emitted"] == 1
+    assert _sizes(content) == [64]
+    assert summary["dropped"]["oversize"] == 1
+
+
+def test_single_oversize_image_reports_oversize_reason() -> None:
+    """因单张硬上限丢图必须单独归因为 ``oversize``。"""
+    messages = [
+        _msg("[图片(9111)]", mid="m1", iid="9111",
+             data=_b64(MAX_SINGLE_IMAGE_BYTES + 1)),
+        _msg("[图片(9222)]", mid="m2", iid="9222", data=_b64(64)),
+    ]
+
+    _, summary = build_image_content(
+        _joined(messages), messages, max_images=3, max_bytes=256 * 1024 * 1024
+    )
+
+    assert summary["dropped"]["oversize"] == 1
+    assert summary["reason"] == "oversize"
+
+
+def test_first_image_exemption_does_not_fire_false_over_bytes_alarm() -> None:
+    """首张豁免累计预算时不该报"体积超限"。
+
+    单张 9MB > 默认 8MB 预算属既有设计（首张豁免），且没有省略任何图。
+    若 ``over_bytes`` 只看体积，就会打出 ``should_warn=True`` 却 ``reason=""``
+    的自相矛盾告警。
+    """
+    message = _msg("[图片(aa11)]", mid="m", iid="aa11",
+                   data="base64|" + _b64(9_000_000))
+
+    content, summary = build_image_content(
+        _joined([message]), [message], max_images=3, max_bytes=8 * 1024 * 1024
+    )
+
+    assert len(_emitted(content)) == 1
+    assert summary["over_bytes"] is False
+    assert summary["should_warn"] is False
+    assert summary["reason"] == ""
+
+
+def test_reason_is_unknown_when_no_budget_evidence() -> None:
+    """有图被省略却无任何预算证据时，必须说 ``unknown`` 而不是猜 ``count``。
+
+    这里刻意用 ``max_images=1`` 制造省略，但不把 ``max_images`` 与 ``dropped``
+    传给 ``summarize_budget``——它没有证据区分"张数截断"与其它原因，
+    只能如实说 ``unknown``。
+    """
+    messages = [
+        _msg("[图片(b111)]", mid="m1", iid="b111", data=_b64(64)),
+        _msg("[图片(b222)]", mid="m2", iid="b222", data=_b64(64)),
+    ]
+    content = inline_message_images(
+        _joined(messages), messages, max_images=1, max_bytes=1024 * 1024
+    )
+
+    # 不提供 max_images / dropped 时无法证明张数上限被触及
+    summary = summarize_budget(content, messages, max_bytes=1024 * 1024)
+
+    assert len(_emitted(content)) == 1
+    assert summary["trimmed"] is True
+    assert summary["should_warn"] is True
+    assert summary["reason"] == "unknown"
+
+
+# --------------------------------------------------------------------------
+# 静默路径可见化
+# --------------------------------------------------------------------------
+
+
+def test_missing_image_id_is_counted_and_warned() -> None:
+    """缺 ``image_id`` 的图片此前被静默省略且零告警——必须可见。"""
+    messages = [
+        Message(
+            message_id=f"m{i}",
+            content={"text": "[图片]", "media": [{"type": "image", "data": _b64(64)}]},
+            processed_plain_text="[图片]",
+            sender_id="user",
+            chat_type="group",
+        )
+        for i in range(2)
+    ]
+
+    content, summary = build_image_content(
+        "[图片]\n[图片]", messages, max_images=3, max_bytes=1024 * 1024
+    )
+
+    assert not _emitted(content)
+    assert summary["unusable"]["missing_image_id"] == 2
+    assert summary["should_warn"] is True
+    assert summary["reason"] == "unusable"
+
+
+def test_missing_data_is_counted_and_warned() -> None:
+    """历史图 ``data`` 回填失败（磁盘已清理）此前静默省略——必须可见。"""
+    messages = [
+        _msg(f"[图片({iid:04x})]", mid=f"h{i}", iid=f"{iid:04x}", data=None)
+        for i, iid in enumerate((0xc111, 0xc222))
+    ]
+
+    content, summary = build_image_content(
+        _joined(messages), messages, max_images=3, max_bytes=1024 * 1024
+    )
+
+    assert not _emitted(content)
+    assert summary["unusable"]["missing_data"] == 2
+    assert summary["should_warn"] is True
+    assert summary["reason"] == "unusable"
+
+
+def test_unusable_media_summary_ignores_non_image_media() -> None:
+    """语音 / 视频 / 非媒体项不计入"图片载荷不可用"。"""
+    messages = [
+        Message(
+            message_id="m0",
+            content={
+                "text": "[语音]",
+                "media": [
+                    {"type": "voice", "voice_id": "d1"},
+                    {"type": "file", "file_id": "f1"},
+                    {"type": "image", "data": _b64(64)},
+                ],
+            },
+            processed_plain_text="[语音]",
+            sender_id="user",
+            chat_type="group",
+        )
+    ]
+
+    summary = unusable_media_summary(messages)
+
+    assert summary == {"missing_image_id": 1, "missing_data": 0}
+
+
+def test_usable_media_does_not_trip_unusable_warning() -> None:
+    """一切正常的图片不得误报载荷不可用。"""
+    messages = [
+        _msg(f"[图片({iid:04x})]", mid=f"m{i}", iid=f"{iid:04x}", data=_b64(64))
+        for i, iid in enumerate((0xd111, 0xd222))
+    ]
+
+    _, summary = build_image_content(
+        _joined(messages), messages, max_images=3, max_bytes=1024 * 1024
+    )
+
+    assert summary["unusable"] == {"missing_image_id": 0, "missing_data": 0}
+    assert summary["should_warn"] is False
+
+
+def test_raw_bytes_never_negative_for_degenerate_payload() -> None:
+    """畸形载荷不得让体积折算为负——否则累计预算会倒退。
+
+    全由 ``=`` 组成的主体会让 ``len*3//4 - padding`` 为负。负体积进入
+    ``used`` 累加器等于凭空放大预算，因此必须钳到 0。
+    """
+    for body in ("=", "==", "===", "====", "=" * 1000):
+        assert _raw_bytes(body) >= 0, f"body={body[:16]!r}"
+        assert _raw_bytes(f"base64|{body}") >= 0
+
+
+def test_raw_bytes_clamps_before_accumulating_budget() -> None:
+    """负体积不得使 ``used`` 倒退——端到端验证预算闸门不被绕过。
+
+    退化载荷（全 ``=``，修前折算出负数）若未被钳制，就会让 ``used`` 减少，
+    等于凭空释放预算。这里放一张退化载荷并**把它的体积算作 0** 的最坏情况：
+    两张 1000 字节的图在 1500 字节预算下仍只应进 1 张。若负体积生效让
+    ``used`` 倒退到负，第二张就会被错误放行。
+    """
+    junk = _msg("[图片(0111)]", mid="m0", iid="0111", data="base64|====")
+    real = _msg("[图片(0222)]", mid="m1", iid="0222", data=_b64(1000))
+    real2 = _msg("[图片(0333)]", mid="m2", iid="0333", data=_b64(1000))
+    messages = [real, real2, junk]
+
+    content, summary = build_image_content(
+        _joined(messages), messages, max_images=3, max_bytes=1500
+    )
+
+    # 首张 1000 通过；第二张会让累计 2000 > 1500，应被字节闸门拦下
+    assert len(_emitted(content)) == 1
+    assert summary["emitted_bytes"] == 1000
+    assert summary["dropped"]["bytes"] >= 1
+
+
+def test_payload_body_matches_image_normalization() -> None:
+    """``_payload_body`` 必须与 ``File`` 的归一化逐字对齐。
+
+    若这里比 ``Image`` 剥得更宽（含 TAB/VT），``_safe_image`` 的前置校验
+    就会把非法字符"洗掉"后误判为合法，校验形同虚设。
+    """
+    import base64 as _b64mod
+
+    std = _b64mod.b64encode(b"\x89PNG" + b"\x00" * 20).decode()
+
+    # Image 不认的空白必须被保留，让字符集校验如实拒绝
+    for ch in ("\t", "\x0b"):
+        dirty = std[:10] + ch + std[10:]
+        assert _safe_image("k" * 64, {"k" * 64: {"data": dirty}}) is None, repr(ch)
+
+    # Image 认的空白必须被剥掉
+    for ch in ("\n", "\r", " "):
+        dirty = std[:10] + ch + std[10:]
+        assert _safe_image("k" * 64, {"k" * 64: {"data": dirty}}) is not None, repr(ch)
+
+
+def test_payload_body_only_splits_on_base64_comma() -> None:
+    """``data:`` 前缀只在含 ``base64,`` 时才切，不得按首个逗号盲切。"""
+    std = "iVBORw0KGgo="
+    # 没有 "base64," 时不应切分
+    assert _payload_body("data:image/png;base64") == "data:image/png;base64"
+    # 有 "base64," 时按它切
+    assert _payload_body(f"data:image/png;base64,{std}") == std
+
+
+def test_invalid_payload_is_attributed_not_unknown() -> None:
+    """载荷非法（非 base64）必须单独归因，而不是落到 ``unknown``。
+
+    这类项**有** ``image_id`` 也**有** ``data``，预算侧四个桶全为 0，
+    修前只能报 ``unknown``，与真正的"归因不了"混为一谈。
+    """
+    bad = _msg("[图片(0111)]", mid="m1", iid="0111", data="这不是base64")
+    good = _msg("[图片(0222)]", mid="m2", iid="0222", data=_b64(64))
+    messages = [bad, good]
+
+    content, summary = build_image_content(
+        _joined(messages), messages, max_images=3, max_bytes=1024 * 1024
+    )
+
+    assert len(_emitted(content)) == 1
+    assert summary["invalid_payloads"] == 1
+    assert summary["reason"] == "invalid_payload"
+    assert summary["should_warn"] is True
+
+
+def test_invalid_payload_counter_is_scoped_per_call() -> None:
+    """拒绝计数必须按调用取差值，不能跨请求累积。"""
+    bad = _msg("[图片(1111)]", mid="m1", iid="1111", data="这不是base64")
+    good = _msg("[图片(2222)]", mid="m2", iid="2222", data=_b64(64))
+
+    _, first = build_image_content(
+        _joined([bad, good]), [bad, good], max_images=3, max_bytes=1024 * 1024
+    )
+    _, second = build_image_content(
+        _joined([good]), [good], max_images=3, max_bytes=1024 * 1024
+    )
+
+    assert first["invalid_payloads"] == 1
+    # 第二次调用没有非法载荷，计数必须归零
+    assert second["invalid_payloads"] == 0
+    assert second["should_warn"] is False
+
+
+def test_invalid_payload_beats_unknown_when_both_present() -> None:
+    """载荷非法优先于 unknown 归因——它是有明确成因的。
+
+    注意构造：必须让非法载荷**进入发射阶段**（``max_images`` 足够大）才会触发
+    ``_safe_image`` 的拒绝。若名额不足，非法载荷会在选择阶段就被挤掉，
+    ``_safe_image`` 根本不会被调用，归因也就落在 ``count`` 上——那同样是正确的。
+    """
+    bad = _msg("[图片(3111)]", mid="m1", iid="3111", data="这不是base64")
+    other = _msg("[图片(3222)]", mid="m2", iid="3222", data=_b64(64))
+    messages = [bad, other]
+
+    content, summary = build_image_content(
+        _joined(messages), messages, max_images=2, max_bytes=1024 * 1024
+    )
+
+    assert len(_emitted(content)) == 1
+    assert summary["invalid_payloads"] == 1
+    assert summary["reason"] == "invalid_payload"
+
+
+def test_invalid_payload_never_reports_unknown() -> None:
+    """载荷非法时 ``reason`` 不得是 ``unknown``——它有明确成因。"""
+    for max_images in (2, 3):
+        bad = _msg("[图片(3111)]", mid="m1", iid="3111", data="这不是base64")
+        other = _msg("[图片(3222)]", mid="m2", iid="3222", data=_b64(64))
+        messages = [bad, other]
+
+        _, summary = build_image_content(
+            _joined(messages), messages, max_images=max_images,
+            max_bytes=1024 * 1024,
+        )
+
+        assert summary["reason"] != "unknown", f"max_images={max_images}"
+
+
+def test_build_image_content_zero_limit_is_plain_text() -> None:
+    """``max_images <= 0`` 时退化为纯文本，但仍如实汇报载荷不可用。"""
+    message = Message(
+        message_id="m0",
+        content={"text": "[图片]", "media": [{"type": "image", "data": _b64(64)}]},
+        processed_plain_text="[图片]",
+        sender_id="user",
+        chat_type="group",
+    )
+
+    content, summary = build_image_content(
+        "[图片]", [message], max_images=0
+    )
+
+    assert content == [Text("[图片]")]
+    assert summary["emitted"] == 0
+    assert summary["unusable"]["missing_image_id"] == 1
+    assert summary["should_warn"] is True
+

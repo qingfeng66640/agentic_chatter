@@ -80,7 +80,7 @@ from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
 from .humanize.qqbot_streaming import create_streaming_session
-from .multimodal import inline_message_images, summarize_budget
+from .multimodal import build_image_content
 from .humanize.segmenter import (
     CleanReplyResult,
     clean_reply_text_with_metadata,
@@ -332,11 +332,17 @@ DEFAULT_REPLY_SIMILARITY_THRESHOLD = 0.88
 DEFAULT_REPLY_CONTAINMENT_THRESHOLD = 0.90
 
 # 图片预算收紧原因的中文说明。键与 multimodal.summarize_budget 返回的
-# reason 取值一一对应；空串表示两项上限都没触及，属于兜底情况。
+# reason 取值一一对应。``unknown`` 表示有图被省略但无预算证据——
+# 必须如实汇报，不能猜成"张数超限"把排查方向带偏。
 _BUDGET_REASON_TEXT = {
     "both": "张数与体积双超",
     "count": "张数超限",
-    "bytes": "体积超限",
+    "bytes": "累计体积超限",
+    "oversize": "单张体积超限",
+    "placeholder_slots": "正文占位符位置不足",
+    "unusable": "图片载荷不可用",
+    "invalid_payload": "图片载荷非法（非 base64）",
+    "unknown": "原因不明（有图被省略但未触及任何上限）",
     "": "未触及任何上限",
 }
 
@@ -1643,25 +1649,27 @@ class _AgenticChatterBase(BaseChatter):
             max_bytes = max(
                 0, int(getattr(config.plugin, "max_input_image_bytes", 8 * 1024 * 1024))
             )
-            user_content = inline_message_images(
+            user_content, budget = build_image_content(
                 user_text,
                 multimodal_messages,
                 preferred_messages=unread_msgs,
                 max_images=max_images,
                 max_bytes=max_bytes,
             )
-            budget = summarize_budget(
-                user_content,
-                multimodal_messages,
-                max_bytes=max_bytes,
-            )
             if budget["should_warn"]:
+                dropped = budget["dropped"]
+                unusable = budget["unusable"]
                 logger.warning(
                     f"[{self.stream_id[:8]}] 多模态图片预算生效 "
                     f"事件=多模态图片超限 引用={budget['ref_count']} "
                     f"去重={budget['distinct_count']} 实际内联={budget['emitted']} "
-                    f"上限={max_images} 体积={budget['emitted_bytes']}B "
+                    f"上限={max_images} 原始体积={budget['emitted_bytes']}B "
                     f"体积上限={max_bytes}B "
+                    f"丢弃(张数)={dropped['count']} 丢弃(体积)={dropped['bytes']} "
+                    f"丢弃(单张超限)={dropped['oversize']} "
+                    f"无位置={dropped['placeholder_slots']} "
+                    f"缺ID={unusable['missing_image_id']} 缺载荷={unusable['missing_data']} "
+                    f"载荷非法={budget['invalid_payloads']} "
                     f"原因={_BUDGET_REASON_TEXT.get(budget['reason'], '未触及任何上限')}"
                 )
 
