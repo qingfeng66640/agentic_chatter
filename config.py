@@ -1115,6 +1115,26 @@ class AgenticChatterConfig(BaseConfig):
             tag="ai",
         )
 
+    @config_section("schedule", title="定时任务", tag="ai")
+    class ScheduleSection(SectionBase):
+        """定时任务（cron）设置。"""
+
+        enabled: bool = Field(
+            default=True,
+            description="启用定时任务功能；关闭后不扫描也不响应创建请求",
+            label="启用定时任务",
+            tag="ai",
+        )
+        database_directory: str = Field(
+            default="",
+            description=(
+                "定时任务 SQLite 数据库目录；留空则复用任务检查点目录下的 "
+                "schedules 子目录"
+            ),
+            label="定时任务数据库目录",
+            tag="storage",
+        )
+
     @config_section("persona", title="人设补充", tag="text")
     class PersonaSection(SectionBase):
         """人设与场景引导。"""
@@ -1196,6 +1216,7 @@ class AgenticChatterConfig(BaseConfig):
     tools: ToolsSection = Field(default_factory=ToolsSection)
     humanize: HumanizeSection = Field(default_factory=HumanizeSection)
     tasks: TaskSection = Field(default_factory=TaskSection)
+    schedule: ScheduleSection = Field(default_factory=ScheduleSection)
     global_mind: GlobalMindSection = Field(default_factory=GlobalMindSection)
     persona: PersonaSection = Field(default_factory=PersonaSection)
     skills: SkillsSection = Field(default_factory=SkillsSection)

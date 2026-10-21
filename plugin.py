@@ -31,8 +31,15 @@ from .prompts import (
     system_prompt,
     user_prompt,
 )
+from .schedule_service import start_schedule_service, stop_schedule_service
 from .service import PipelineService, TaskRuntimeService
 from .tooling import ExploreToolsTool, ManageTasksTool, ReadSkillReferenceTool, ReadSkillTool
+from .tooling.cron_tools import (
+    CreateCronTool,
+    DeleteCronTool,
+    ReadCronTool,
+    UpdateCronTool,
+)
 from .tooling.skill_command import AgenticSkillCommand
 from .tooling.skills import clear_skills, refresh_skills
 
@@ -156,8 +163,11 @@ class AgenticChatterPlugin(BasePlugin):
                 int(getattr(tasks_config, "max_concurrent_tasks", 2))
             )
 
+        await start_schedule_service(self)
+
     async def on_plugin_unloaded(self) -> None:
         """插件卸载前的清理。"""
+        await stop_schedule_service()
         clear_skills()
         from .decision.jev import close_shared_client
 
@@ -184,6 +194,10 @@ class AgenticChatterPlugin(BasePlugin):
             AgenticSkillCommand,
             ReadSkillTool,
             ReadSkillReferenceTool,
+            CreateCronTool,
+            ReadCronTool,
+            UpdateCronTool,
+            DeleteCronTool,
             SayAction,
             DispatchTaskAction,
             EndTurnAction,
@@ -194,4 +208,15 @@ class AgenticChatterPlugin(BasePlugin):
             components.remove(ReadSkillReferenceTool)
         if config is None or config.plugin.private_enabled:
             components.insert(1, AgenticPrivateChatter)
+        if config is not None and not getattr(
+            getattr(config, "schedule", None), "enabled", True
+        ):
+            for tool_cls in (
+                CreateCronTool,
+                ReadCronTool,
+                UpdateCronTool,
+                DeleteCronTool,
+            ):
+                if tool_cls in components:
+                    components.remove(tool_cls)
         return components
