@@ -13,6 +13,7 @@ from src.kernel.llm import LLMPayload, ROLE, Text
 from ..humanize.segmenter import clean_reply_text_with_metadata
 from ..pipeline.loop import END_TURN_CALL, STOP_CALL
 from ..tooling.dedupe import build_call_key
+from ..tooling.timed_calls import run_with_timeout
 from .models import TaskResult, TaskStatus
 from .persistence import TaskStateStore
 from .policy import ToolPermission
@@ -403,11 +404,14 @@ class TaskExecutor:
         Returns:
             TaskResult | None: 预算耗尽时返回终态结果，否则 None 继续循环。
         """
-        outcomes = await self.chatter.run_tool_call(
+        outcomes = await run_with_timeout(
+            self.chatter.run_tool_call,
             normal_calls,
             response,
             registry,
             request.trigger_message,
+            config=getattr(self.chatter, "cfg", None),
+            stream_id=str(getattr(self.chatter, "stream_id", "")),
         )
         successful_tools = [
             str(getattr(call, "name", "") or "")

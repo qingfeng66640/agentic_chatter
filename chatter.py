@@ -88,7 +88,13 @@ from .humanize.segmenter import (
     detect_reply_decision_json_text,
     is_framework_message_line,
 )
-from .pipeline.mailbox import StreamMailbox, TurnClaim, get_stream_mailbox, message_key
+from .pipeline.mailbox import (
+    StreamMailbox,
+    TurnClaim,
+    get_stream_mailbox,
+    message_key,
+    safe_error_type,
+)
 from .pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -122,6 +128,7 @@ from .prompts import (
     DEFAULT_WHEN_TO_STOP,
 )
 from .tooling.dedupe import CallDeduper, build_log_args
+from .tooling.timed_calls import run_with_timeout
 from .tooling.explore import (
     ExploreToolsTool,
     clear_stream_catalog,
@@ -464,11 +471,14 @@ class _AgenticChatterBase(BaseChatter):
                 continue
 
             claim: TurnClaim | None = None
+            state: TurnState | None = None
             is_turn_owner = True
             turn_result: ChatterResult = Wait()
             try:
                 _, unread_snapshot = await self.fetch_unreads()
-                merged_count = await mailbox.merge_snapshot(unread_snapshot)
+                merged_count = await mailbox.merge_snapshot(
+                    unread_snapshot, owner=turn_token, generation=generation
+                )
                 merge_window = max(
                     0.0,
                     float(
@@ -588,13 +598,37 @@ class _AgenticChatterBase(BaseChatter):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.error(f"[{self.stream_id[:8]}] 回合执行失败：{exc}")
-                turn_result = Wait(time=DEFAULT_TURN_RETRY_SECONDS)
+                if claim is None:
+                    logger.error(
+                        f"[{self.stream_id[:8]}] 回合准备失败 "
+                        f"事件=回合准备失败 类型={safe_error_type(type(exc).__name__)}"
+                    )
+                    turn_result = Wait(time=DEFAULT_TURN_RETRY_SECONDS)
+                else:
+                    if state is None:
+                        state = TurnState(stream_id=self.stream_id)
+                    self._record_turn_failure(state, exc, model_error=False)
+                    turn_result, claim = await self._finish_failed_turn(
+                        mailbox, claim, state
+                    )
             finally:
-                if claim is not None:
-                    await self._release_claim_safely(mailbox, claim, generation, "收尾时")
-                if is_turn_owner:
-                    await self._release_owner_safely(mailbox, turn_token, generation, "mailbox")
+                try:
+                    if claim is not None:
+                        if state is not None and state.failed and not state.interrupted_by_new_input:
+                            # 确认期间取消也不能把已失败输入重新放回执行队列。
+                            await mailbox.fail_claim(
+                                claim,
+                                failure_kind=state.failure_kind,
+                                error_type=state.error_type,
+                                status_code=state.error_status_code,
+                                spoke=state.spoke,
+                                tool_count=len(state.tool_ledger),
+                            )
+                        else:
+                            await self._release_claim_safely(mailbox, claim, generation, "收尾时")
+                finally:
+                    if is_turn_owner:
+                        await self._release_owner_safely(mailbox, turn_token, generation, "mailbox")
 
             resume_event = yield turn_result
 
@@ -861,18 +895,24 @@ class _AgenticChatterBase(BaseChatter):
             tuple[ChatterResult, TurnClaim | None]:
                 (回合结果, 剩余待释放的 claim；已提交或已释放时为 None)。
         """
-        outcome_result = await self._run_pipeline(
-            config=config,
-            chat_stream=chat_stream,
-            state=state,
-            unread_msgs=unread_msgs,
-            claim=claim,
-        )
+        try:
+            outcome_result = await self._run_pipeline(
+                config=config,
+                chat_stream=chat_stream,
+                state=state,
+                unread_msgs=unread_msgs,
+                claim=claim,
+            )
+        except Exception as exc:
+            self._record_turn_failure(state, exc, model_error=False)
+            return await self._finish_failed_turn(mailbox, claim, state)
 
+        if state.failed and not state.interrupted_by_new_input:
+            return await self._finish_failed_turn(mailbox, claim, state)
         if state.failed:
             interruption_streak = await mailbox.interruption_state()
-            pending_after_release = await mailbox.pending_count()
             await self._release_claim_safely(mailbox, claim, generation, "回合")
+            pending_after_release = await mailbox.pending_count()
             logger.warning(
                 f"[{self.stream_id[:8]}] 回合已释放 事件=回合已释放 "
                 f"代次={generation} 消息数={len(unread_msgs)} "
@@ -908,7 +948,7 @@ class _AgenticChatterBase(BaseChatter):
             apply=lambda: self._apply_claim_unread_match(match),
         )
         if not is_committed:
-            self._restore_claim_unread_match(match)
+            # 失效 claim 不会调用 apply；不能用预检旧快照覆盖期间到达的新消息。
             logger.error(
                 f"[{self.stream_id[:8]}] 消息认领提交失败 "
                 f"事件=消息认领提交失败 认领代数={generation} "
@@ -930,6 +970,71 @@ class _AgenticChatterBase(BaseChatter):
             else Wait(time=outcome_result.wait_seconds)
         )
         return turn_result, None
+
+    @staticmethod
+    def _record_turn_failure(
+        state: TurnState,
+        error: Exception,
+        *,
+        model_error: bool,
+    ) -> None:
+        """记录失败类别，保留诊断类型但不把供应商正文输出到日志。"""
+        state.failed = True
+        state.interrupted_by_new_input = False
+        state.failure_kind = "model_error" if model_error else "execution_error"
+        state.error = str(error)
+        state.error_type = safe_error_type(type(error).__name__)
+        status_code = getattr(error, "status_code", None)
+        state.error_status_code = (
+            status_code if type(status_code) is int and 100 <= status_code <= 599 else None
+        )
+
+    async def _finish_failed_turn(
+        self,
+        mailbox: StreamMailbox,
+        claim: TurnClaim,
+        state: TurnState,
+    ) -> tuple[ChatterResult, TurnClaim | None]:
+        """终结失败输入，不将已发生的发言或工具动作整轮重放。
+
+        可安全匹配时将原输入归入历史，仅确认输入已处理，不代表业务成功。
+        匹配或确认失败时保留原消息并隔离。返回零秒等待只用于排空期间到达的
+        新输入，下一轮没有可领取消息时恢复普通的 Wait(None)。
+        """
+        match = None
+        try:
+            match = await self._match_claim_unreads(list(claim.messages))
+        except Exception as exc:
+            logger.warning(
+                f"[{self.stream_id[:8]}] 失败输入归档匹配异常 "
+                f"事件=失败输入归档异常 类型={safe_error_type(type(exc).__name__)}"
+            )
+        record = await mailbox.fail_claim(
+            claim,
+            failure_kind=state.failure_kind,
+            error_type=state.error_type,
+            status_code=state.error_status_code,
+            spoke=state.spoke,
+            tool_count=len(state.tool_ledger),
+            apply=(lambda: self._apply_claim_unread_match(match)) if match is not None else None,
+        )
+        if record is None:
+            logger.error(
+                f"[{self.stream_id[:8]}] 失败认领已失效 "
+                f"事件=失败认领失效 代次={claim.generation}"
+            )
+        else:
+            state.input_confirmed = record.input_acknowledged
+            reason = "模型调用失败" if record.failure_kind == "model_error" else "回合执行失败"
+            logger.warning(
+                f"[{self.stream_id[:8]}] 回合失败终止 事件=回合失败终止 "
+                f"代次={record.generation} 消息数={record.message_count} "
+                f"输入摘要={record.message_digest} 原因={reason} 类型={record.error_type} "
+                f"状态码={record.status_code} 已发言={record.spoke} "
+                f"已记录工具数={record.tool_count} 输入已归档={record.input_acknowledged} "
+                f"归档异常类型={record.acknowledgement_error_type or '无'} 自动重试=False"
+            )
+        return Wait(time=0), None
 
     def _build_deduper(self, config: AgenticChatterConfig | None) -> CallDeduper:
         """按配置构建本轮的去重器。
@@ -1035,6 +1140,9 @@ class _AgenticChatterBase(BaseChatter):
                         "unread_messages": unread_msgs,
                     },
                 )
+            if state.failed:
+                # 失败或真实输入中断后不再执行反思等后续阶段。
+                break
 
         return state.to_outcome()
 
@@ -1694,13 +1802,16 @@ class _AgenticChatterBase(BaseChatter):
                 else:
                     await response
             except Exception as exc:
+                # 在流式收尾等任何等待之前标记失败，取消也不得复活原输入。
+                self._record_turn_failure(state, exc, model_error=True)
                 if stream_session is not None and stream_session.started:
                     await stream_session.finalize(
                         str(getattr(response, "message", "") or "")
                     )
-                state.failed = True
-                state.error = str(exc)
-                logger.error(f"[{self.stream_id[:8]}] 语言模型调用失败：{exc}")
+                logger.error(
+                    f"[{self.stream_id[:8]}] 语言模型调用失败 事件=模型调用失败 "
+                    f"类型={state.error_type} 状态码={state.error_status_code}"
+                )
                 clear_stream_catalog(self.stream_id)
                 clear_scope(self.stream_id)
                 return
@@ -2279,7 +2390,15 @@ class _AgenticChatterBase(BaseChatter):
                     )
 
             payload_start = len(list(getattr(response, "payloads", None) or []))
-            results = await self.run_tool_call(batch, response, registry, trigger)
+            results = await run_with_timeout(
+                self.run_tool_call,
+                batch,
+                response,
+                registry,
+                trigger,
+                config=self.cfg,
+                stream_id=self.stream_id,
+            )
             captured = collect_tool_result_delta(response, payload_start)
             records = build_tool_execution_records(
                 batch,
@@ -2534,7 +2653,9 @@ class _AgenticChatterBase(BaseChatter):
         _, current_unreads = await self.fetch_unreads()
         if claim is not None:
             mailbox = get_stream_mailbox(self.stream_id)
-            merged_count = await mailbox.merge_snapshot(current_unreads)
+            merged_count = await mailbox.merge_snapshot(
+                current_unreads, owner=claim.owner, generation=claim.generation
+            )
             pending_count, merge_wait = await mailbox.pending_state(
                 max(
                     0.0,

@@ -1007,8 +1007,11 @@ async def test_execute_calls_invalid_mode_falls_back_to_planning() -> None:
     )
 
     chatter.run_tool_call.assert_awaited_once_with(
-        [call], response, ANY, None,
+        [call], ANY, ANY, None,
     )
+    buffered_response = chatter.run_tool_call.await_args.args[1]
+    assert buffered_response is not response
+    assert buffered_response.payloads == response.payloads
 
 
 async def test_execute_calls_logs_tool_name_and_safe_args(monkeypatch) -> None:

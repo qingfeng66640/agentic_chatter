@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Annotated, ClassVar
+
+from pydantic import Field as PydanticField
 
 from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
 
@@ -603,6 +605,42 @@ class AgenticChatterConfig(BaseConfig):
             label="工具调用模式",
             tag="ai",
             hint="可选 planning 或 batch，默认 planning",
+        )
+        tool_timeout_seconds: float = Field(
+            default=30.0,
+            ge=0.0,
+            allow_inf_nan=False,
+            description=(
+                "一次工具提交中每个调用的时间预算（秒），0 表示关闭超时管理。"
+                "planning 每次提交一个调用；batch 的提交预算为批内预算之和。"
+                "超时后保留已返回结果，补齐缺失结果并请求取消执行任务。"
+            ),
+            label="工具调用预算（秒）",
+            tag="performance",
+        )
+        tool_timeout_overrides: dict[
+            str, Annotated[float, PydanticField(gt=0, allow_inf_nan=False)]
+        ] = Field(
+            default_factory=dict,
+            description=(
+                "按完整组件签名覆盖时间预算（秒），仅接受有限正数。"
+                "未覆盖的 dispatch_task 自动使用 tasks.timeout_seconds + 30 秒宽限，"
+                "且不低于普通工具预算；其它长耗时工具可在此配置。"
+            ),
+            label="工具预算覆盖表",
+            tag="performance",
+        )
+        tool_cancel_grace_seconds: float = Field(
+            default=1.0,
+            ge=0.0,
+            le=10.0,
+            allow_inf_nan=False,
+            description=(
+                "工具超时或外部取消后，等待执行任务响应取消的最长秒数。"
+                "超过宽限便恢复聊天，不等待拒绝取消的任务；底层线程不能强杀。"
+            ),
+            label="取消宽限（秒）",
+            tag="performance",
         )
         encourage_prompt: bool = Field(
             default=True,

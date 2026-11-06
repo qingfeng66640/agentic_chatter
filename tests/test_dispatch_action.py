@@ -11,6 +11,7 @@ from ..actions import dispatch as dispatch_module
 from ..actions.dispatch import DispatchTaskAction, _resolve_task_type
 from ..task_runtime import coordinator as coordinator_module
 from ..task_runtime import (
+    TaskBudget,
     TaskResult,
     TaskRuntime,
     TaskState,
@@ -115,6 +116,9 @@ async def test_execute_returns_success_with_summary(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_execute_reports_timeout(monkeypatch) -> None:
     action, _plugin = _make_action()
+    monkeypatch.setattr(
+        dispatch_module, "TaskBudget", lambda: TaskBudget(timeout_seconds=0.01)
+    )
 
     class _HangingExecutor:
         def __init__(self, chatter: object, runtime: TaskRuntime, store: object = None) -> None:
@@ -130,7 +134,8 @@ async def test_execute_reports_timeout(monkeypatch) -> None:
         lambda stream_id, plugin: object(),
     )
     monkeypatch.setattr(
-        "plugins.agentic_chatter.actions.dispatch._TIMEOUT_GRACE_SECONDS",
+        dispatch_module,
+        "_TIMEOUT_GRACE_SECONDS",
         0.05,
     )
 
