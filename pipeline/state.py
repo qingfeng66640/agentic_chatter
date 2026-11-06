@@ -89,6 +89,9 @@ class TurnState:
     decision: ReplyDecision | None = None
     failed: bool = False
     error: str = ""
+    failure_kind: Literal["", "model_error", "execution_error"] = ""
+    error_type: str = ""
+    error_status_code: int | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
     def to_outcome(self) -> TurnOutcome:

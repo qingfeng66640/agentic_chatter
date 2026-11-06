@@ -177,7 +177,9 @@ async def test_report_turn_failure_keeps_events_for_retry(monkeypatch, failure: 
         async def try_acquire(self, owner: object) -> int:
             return 1
 
-        async def merge_snapshot(self, messages: list[Any]) -> int:
+        async def merge_snapshot(
+            self, messages: list[Any], *, owner: object, generation: int,
+        ) -> int:
             return 0
 
         async def pending_state(self, window: float) -> tuple[int, float]:
@@ -258,7 +260,9 @@ async def test_normal_turn_acknowledges_report_only_after_success(monkeypatch, f
         async def try_acquire(self, owner: object) -> int:
             return 1
 
-        async def merge_snapshot(self, messages: list[Any]) -> int:
+        async def merge_snapshot(
+            self, messages: list[Any], *, owner: object, generation: int,
+        ) -> int:
             return 1
 
         async def pending_state(self, window: float) -> tuple[int, float]:
