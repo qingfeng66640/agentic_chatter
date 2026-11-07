@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from src.app.plugin_system.api import send_api
@@ -24,9 +24,11 @@ class SayAction(BaseAction):
 
     action_name = "say"
     action_description = (
-        "仅在需要「引用回复某条消息」或「@某个人」时使用。"
-        "普通说话不需要这个工具——你直接输出文本就会被发送出去。"
-        "content 只写你要说的话本身，不要写理由或旁白。"
+        "仅在需要「引用回复某条消息」或「在群聊中 @ 某个人」时使用。"
+        "target_type 必须为 reply 或 mention，target_id 必须提供对应的消息 ID 或用户 ID。"
+        "它会独立额外发送一条消息；普通回复直接输出正文即可。"
+        "调用本动作时，把完整回复只写在 content 中，不要在同一响应再输出正文，"
+        "也不要重发或改写本轮已输出的正文。"
     )
     primary_action = False
     associated_types = ["text"]
@@ -34,21 +36,21 @@ class SayAction(BaseAction):
     async def execute(
         self,
         content: Annotated[str, "你要说的话，只写正文，不要加引号或前缀"],
-        reply_to: Annotated[
+        target_type: Annotated[
+            Literal["reply", "mention"],
+            "发送模式：reply 引用回复消息；mention 在群聊中 @ 用户。",
+        ],
+        target_id: Annotated[
             str,
-            "要引用回复的消息 ID，取自消息记录中方括号里的那个 ID。不引用时留空。",
-        ] = "",
-        at: Annotated[
-            str,
-            "要 @ 的对象的平台 ID。不需要 @ 时留空。",
-        ] = "",
+            "必填目标 ID：reply 时填写上下文中方括号里的消息 ID；mention 时填写用户的平台 ID。",
+        ],
     ) -> tuple[bool, str]:
-        """发送一条带引用或 @ 的消息。
+        """发送一条引用回复或带 @ 的消息。
 
         Args:
             content: 消息正文。
-            reply_to: 要引用的消息 ID；留空表示不引用。
-            at: 要 @ 的平台 ID；留空表示不 @。
+            target_type: 发送模式，reply 表示引用消息，mention 表示 @ 群聊用户。
+            target_id: 必填的消息 ID 或用户平台 ID。
 
         Returns:
             tuple[bool, str]: (是否发送成功, 结果说明)。
@@ -57,19 +59,22 @@ class SayAction(BaseAction):
         if not text:
             return False, "content 为空，没有内容可发送"
 
+        mode = str(target_type or "").strip().lower()
+        if mode not in {"reply", "mention"}:
+            return False, "target_type 必须是 reply 或 mention"
+
+        target = str(target_id or "").strip()
+        if not target:
+            return False, "target_id 不能为空"
+
         stream_id = str(getattr(self.chat_stream, "stream_id", "") or "")
         if not stream_id:
             return False, "无法解析当前对话流，发送失败"
 
-        reply_target = str(reply_to or "").strip()
-        at_target = str(at or "").strip()
-        if reply_target and at_target:
-            return False, "reply_to 与 at 不能同时使用"
-
-        if at_target:
+        if mode == "mention":
             chat_type = str(getattr(self.chat_stream, "chat_type", "") or "")
             if chat_type != "group":
-                return False, "at 仅支持群聊发送"
+                return False, "mention 仅支持群聊发送"
 
             platform = str(getattr(self.chat_stream, "platform", "") or "")
             bot_info = await get_bot_info_by_platform(platform)
@@ -84,7 +89,7 @@ class SayAction(BaseAction):
                 chat_type=chat_type,
                 stream_id=stream_id,
             )
-            message.extra["at_user_id"] = at_target
+            message.extra["at_user_id"] = target
             context_message = self._get_context_message_for_target()
             if context_message is not None:
                 target_group_id = context_message.extra.get("group_id")
@@ -104,7 +109,7 @@ class SayAction(BaseAction):
                 ok = await send_api.send_text(
                     content=text,
                     stream_id=stream_id,
-                    reply_to=reply_target or None,
+                    reply_to=target,
                 )
             except Exception as exc:
                 logger.error(f"引用或提及发送动作失败：{exc}")

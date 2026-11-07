@@ -4,6 +4,7 @@
 
 ### Added
 
+- **[发送动作]** `action-say` 将发送模式和目标 ID 设为必填参数，明确选择引用消息或群聊 @，避免无目标的普通文本发送。
 - **[工具调用]** 主聊天与后台任务共用提交超时保护，新增 `tool_timeout_seconds`、
   `tool_timeout_overrides` 和 `tool_cancel_grace_seconds`。默认每调用预算 30 秒，
   全局设为 0 可关闭；覆盖表按完整组件签名匹配，batch 预算为各调用预算之和。

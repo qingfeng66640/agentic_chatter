@@ -298,7 +298,7 @@ record_provider_error_request_body = true
 - `agentic_chatter:service:pipeline`：`PipelineService`，供其他插件注册自定义管线阶段、读写全局心智；
 - `agentic_chatter:tool:explore_tools`：`ExploreToolsTool`，供模型按需展开折叠工具；
 - `agentic_chatter:tool:manage_tasks`：`ManageTasksTool`，供模型列出/查询/取消当前对话的后台任务；
-- `agentic_chatter:action:say`：`SayAction`，发送文本消息；
+- `agentic_chatter:action:say`：`SayAction`，通过必填 `target_type`（`reply`/`mention`）与 `target_id` 执行引用回复或群聊 @；
 - `agentic_chatter:action:end_turn`：`EndTurnAction`，结束当前 Agent 回合；
 - `agentic_chatter:action:stop_conversation`：`StopConversationAction`，停止当前会话处理；
 - `agentic_chatter:action:dispatch_task`：`DispatchTaskAction`，供主 Agent 以同步方式把复杂任务派发给 sub-agent 执行（受 `[tasks].action_enabled` 控制）；

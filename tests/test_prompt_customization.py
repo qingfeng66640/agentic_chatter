@@ -9,6 +9,7 @@ from ..prompts import (
     DEFAULT_HOW_YOU_ACT,
     DEFAULT_HOW_YOU_SPEAK,
     DEFAULT_WHEN_TO_STOP,
+    system_prompt,
 )
 
 
@@ -49,6 +50,24 @@ def test_prompt_section_defaults_are_independent() -> None:
     assert "只说重点" in custom_speak
     assert DEFAULT_HOW_YOU_ACT.startswith("<how_you_act>")
     assert DEFAULT_WHEN_TO_STOP.startswith("<when_to_stop>")
+
+
+def test_default_prompts_distinguish_direct_text_from_say_action() -> None:
+    """内置提示必须明确正文直出与 action-say 是互斥的发送路径。"""
+    assert "普通回复直接输出正文" in DEFAULT_HOW_YOU_SPEAK
+    assert "额外发送一条消息" in DEFAULT_HOW_YOU_SPEAK
+    assert "本次模型响应不要再输出正文" in DEFAULT_HOW_YOU_SPEAK
+    assert "不要先直出一句、再用 action-say 发送同义或补全后的版本" in DEFAULT_HOW_YOU_ACT
+    assert "没有引用或 @ 需求时，不要调用 action-say" in DEFAULT_HOW_YOU_ACT
+
+
+def test_system_prompt_keeps_send_channel_rule_outside_custom_sections() -> None:
+    """发送通道约束必须保留在系统模板固定区，不被 persona 覆盖。"""
+    assert "<message_channel_rules>" in system_prompt
+    assert "普通回复直接输出正文，框架会自动发送" in system_prompt
+    assert "本次响应不要再输出正文" in system_prompt
+    assert "必须填写 target_type（reply 或 mention）和非空 target_id" in system_prompt
+    assert "不要先直接输出正文，再用 action-say 重发或改写同一内容" in system_prompt
 
 
 def test_persona_fields_are_available_with_default_values() -> None:
