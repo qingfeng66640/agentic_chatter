@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 
 from ..task_runtime.models import TaskState, TaskStatus, TaskType
@@ -10,13 +12,33 @@ from ..tooling.manage_tasks import ManageTasksTool, _resolve_task_ref
 
 
 def _make_tool(stream_id: str) -> ManageTasksTool:
+    """绕过组件初始化构造绑定指定聊天流的任务管理工具。
+
+    Args:
+        stream_id: 工具查询或控制任务时使用的聊天流标识。
+
+    Returns:
+        未关联触发消息的任务管理工具。
+    """
     tool = ManageTasksTool.__new__(ManageTasksTool)
     tool.stream_id = stream_id
     tool.trigger_message = None
     return tool
 
 
-def _make_task(stream_id: str, goal: str, status: TaskStatus = TaskStatus.RUNNING) -> TaskRuntime:
+def _make_task(
+    stream_id: str, goal: str, status: TaskStatus = TaskStatus.RUNNING
+) -> TaskRuntime:
+    """创建已启动的通用任务，并按需切换到暂停状态。
+
+    Args:
+        stream_id: 任务所属的聊天流标识。
+        goal: 用于构造任务状态的用户目标。
+        status: 为 PAUSED 时暂停任务，其他值保留运行状态。
+
+    Returns:
+        尚未注册到管理器的任务运行时。
+    """
     runtime = TaskRuntime(
         TaskState(stream_id=stream_id, user_goal=goal, task_type=TaskType.GENERAL)
     )
@@ -27,7 +49,12 @@ def _make_task(stream_id: str, goal: str, status: TaskStatus = TaskStatus.RUNNIN
 
 
 @pytest.fixture(autouse=True)
-def _clean_registries():
+def _clean_registries() -> Iterator[None]:
+    """保存任务注册表，并在用例结束后恢复原有条目。
+
+    Yields:
+        None: 将控制权交给用例，随后还原注册表。
+    """
     manager = get_task_runtime_manager()
     saved = dict(manager._tasks)
     yield
@@ -37,6 +64,7 @@ def _clean_registries():
 
 @pytest.mark.asyncio
 async def test_list_empty_stream() -> None:
+    """聊天流没有活跃任务时，列表查询应成功并返回空列表提示。"""
     ok, message = await _make_tool("empty-stream").execute("list")
     assert ok is True
     assert "没有进行中的任务" in message
@@ -44,6 +72,7 @@ async def test_list_empty_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_list_renders_tasks() -> None:
+    """列表查询应包含当前聊天流的任务总数与目标。"""
     runtime = _make_task("stream-l", "调研竞品")
     get_task_runtime_manager()._tasks[runtime.state.task_id] = runtime
     ok, message = await _make_tool("stream-l").execute("list")
@@ -54,6 +83,7 @@ async def test_list_renders_tasks() -> None:
 
 @pytest.mark.asyncio
 async def test_status_by_ordinal_and_prefix() -> None:
+    """状态查询应分别通过序号和任务 ID 前缀选中对应任务。"""
     first = _make_task("stream-s", "任务一")
     second = _make_task("stream-s", "任务二", TaskStatus.PAUSED)
     manager = get_task_runtime_manager()
@@ -72,6 +102,7 @@ async def test_status_by_ordinal_and_prefix() -> None:
 
 @pytest.mark.asyncio
 async def test_status_requires_ref() -> None:
+    """状态查询未提供任务引用时，应失败并提示使用序号或 ID。"""
     runtime = _make_task("stream-r", "任务")
     get_task_runtime_manager()._tasks[runtime.state.task_id] = runtime
     ok, message = await _make_tool("stream-r").execute("status", "")
@@ -81,6 +112,7 @@ async def test_status_requires_ref() -> None:
 
 @pytest.mark.asyncio
 async def test_status_ambiguous_prefix() -> None:
+    """任务 ID 前缀同时匹配多个任务时，应拒绝查询并提示歧义。"""
     tasks = [_make_task("stream-a", "任务一"), _make_task("stream-a", "任务二")]
     manager = get_task_runtime_manager()
     # 构造同前缀。task_id 来自随机 uuid4().hex，前 6 位有约 15% 概率全为数字，
@@ -99,6 +131,7 @@ async def test_status_ambiguous_prefix() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_by_ordinal_removes_task() -> None:
+    """按序号取消任务后，应返回取消提示并从管理器移除该任务。"""
     runtime = _make_task("stream-c", "待取消任务")
     get_task_runtime_manager()._tasks[runtime.state.task_id] = runtime
     ok, message = await _make_tool("stream-c").execute("cancel", "1")
@@ -110,6 +143,7 @@ async def test_cancel_by_ordinal_removes_task() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_stream_id_fails() -> None:
+    """缺少聊天流标识时，应拒绝任务列表查询并提示上下文缺失。"""
     tool = _make_tool("")
     ok, message = await tool.execute("list")
     assert ok is False
@@ -117,6 +151,7 @@ async def test_missing_stream_id_fails() -> None:
 
 
 def test_resolve_task_ref_out_of_range() -> None:
+    """超出候选列表范围的序号应返回空目标并提示越界。"""
     tasks = [_make_task("s", "唯一")]
     target, error = _resolve_task_ref("5", tasks)
     assert target is None

@@ -1,7 +1,7 @@
 """定时任务子系统测试。
 
 覆盖调度表达式解析、SQLite 持久化、调度管理器的触发与可靠性语义，
-以及四个 LLM 工具的关键约束。
+以及单次认领、错过触发点的补偿和线程历史注入。
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Never
 
 import pytest
 
@@ -16,14 +17,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # pragma: no cover - 测试环境准备
     sys.path.insert(0, str(ROOT))
 
-from agentic_chatter.task_runtime.schedule import (  # noqa: E402
+from ..task_runtime.schedule import (  # noqa: E402
     ScheduleError,
     ScheduleManager,
     ScheduleStore,
     parse_cron,
     parse_schedule,
 )
-from agentic_chatter.task_runtime.schedule.store import (  # noqa: E402
+from ..task_runtime.schedule.store import (  # noqa: E402
     CLAIMED_SENTINEL_MS,
 )
 
@@ -277,6 +278,7 @@ class TestStore:
         assert store.reset_stale_claims() == 0
 
     def test_thread_history_trimmed(self, store: ScheduleStore) -> None:
+        """固定线程历史只保留最近三条，并按时间正序返回第五至第七次记录。"""
         for index in range(8):
             store.append_thread_entry("c1", f"第{index}次", max_entries=3)
         entries = store.list_thread_entries("c1", limit=10)
@@ -355,8 +357,12 @@ class TestManager:
 
     def test_resolve_ambiguous_prefix_raises(self, manager: ScheduleManager) -> None:
         """前缀匹配到多个任务时报错而非随意挑一个。"""
-        manager.create(cron_name="日报A", prompt="p", stream_id="s", schedule="0 9 * * *")
-        manager.create(cron_name="日报B", prompt="p", stream_id="s", schedule="0 10 * * *")
+        manager.create(
+            cron_name="日报A", prompt="p", stream_id="s", schedule="0 9 * * *"
+        )
+        manager.create(
+            cron_name="日报B", prompt="p", stream_id="s", schedule="0 10 * * *"
+        )
         with pytest.raises(ScheduleError):
             manager.resolve_id("日报")
 
@@ -415,12 +421,18 @@ class TestManager:
         assert manager.read_list() == ()
 
     @pytest.mark.asyncio
-    async def test_failure_does_not_disable_task(
-        self, store: ScheduleStore
-    ) -> None:
+    async def test_failure_does_not_disable_task(self, store: ScheduleStore) -> None:
         """触发失败只记录，不禁用任务，下次仍会触发。"""
 
-        async def failing(**_: object) -> str:
+        async def failing(**_: object) -> Never:
+            """拒绝任务提交以触发调度器的失败记录分支。
+
+            Args:
+                **_: 忽略提交时传入的任务参数。
+
+            Raises:
+                RuntimeError: 固定抛出提交失败异常。
+            """
             raise RuntimeError("提交失败")
 
         manager = ScheduleManager(store, submitter=failing)
@@ -443,6 +455,14 @@ class TestManager:
         calls: list[str] = []
 
         async def submitter(**_: object) -> str:
+            """记录一次补偿提交并返回固定任务标识。
+
+            Args:
+                **_: 忽略提交时传入的任务参数。
+
+            Returns:
+                表示补偿任务已创建的固定标识。
+            """
             calls.append("run")
             return "task-1"
 
@@ -463,12 +483,18 @@ class TestManager:
         assert int(refreshed["next_run_at_ms"]) > 1_700_000_000_000
 
     @pytest.mark.asyncio
-    async def test_one_shot_completes_and_stops(
-        self, store: ScheduleStore
-    ) -> None:
+    async def test_one_shot_completes_and_stops(self, store: ScheduleStore) -> None:
         """一次性任务触发后不再排程。"""
 
         async def submitter(**_: object) -> str:
+            """返回一次性任务的固定标识，避免创建真实任务。
+
+            Args:
+                **_: 忽略提交时传入的任务参数。
+
+            Returns:
+                模拟创建的一次性任务标识。
+            """
             return "task-1"
 
         manager = ScheduleManager(store, submitter=submitter)
@@ -494,6 +520,15 @@ class TestManager:
         contexts: list[str] = []
 
         async def submitter(*, context: str = "", **_: object) -> str:
+            """收集每次提交携带的线程上下文并返回固定任务标识。
+
+            Args:
+                context: 本次注入的历史上下文，默认不含历史。
+                **_: 忽略其余任务参数。
+
+            Returns:
+                模拟创建任务的固定标识。
+            """
             contexts.append(context)
             return "task-x"
 
@@ -524,6 +559,15 @@ class TestManager:
         contexts: list[str] = []
 
         async def submitter(*, context: str = "", **_: object) -> str:
+            """收集无状态任务的上下文，供断言多次提交均为空使用。
+
+            Args:
+                context: 本次提交收到的上下文。
+                **_: 忽略其余任务参数。
+
+            Returns:
+                模拟创建任务的固定标识。
+            """
             contexts.append(context)
             return "task-x"
 
@@ -545,7 +589,12 @@ class TestManager:
     ) -> None:
         """存储异常不会中断扫描循环。"""
 
-        def boom() -> tuple[()]:
+        def boom() -> Never:
+            """模拟扫描认领时遇到数据库锁定。
+
+            Raises:
+                RuntimeError: 固定抛出数据库锁定异常。
+            """
             raise RuntimeError("db locked")
 
         monkeypatch.setattr(store, "claim_due", boom)

@@ -104,7 +104,6 @@ system_prompt = """你是{nickname}。
 """
 
 
-
 user_prompt = """你正在名为"{stream_name}"的对话中。
 
 消息格式：【时间】<角色> [平台ID] 昵称$群名片 [消息ID]： 内容

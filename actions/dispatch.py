@@ -77,8 +77,8 @@ def _format_task_result(result: TaskResult) -> str:
 class DispatchTaskAction(BaseAction):
     """把复杂任务交给独立 sub-agent 同步执行。"""
 
-    action_name = "dispatch_task"
-    action_description = (
+    name = "dispatch_task"
+    description = (
         "把一个复杂的多步任务交给独立的 sub-agent 同步执行，完成后返回结果摘要。"
         "适合需要多轮工具调用的调研、代码分析、代码修改、内容整理等任务。"
         "调用后当前行动会等待 sub-agent 完成（受任务预算时限约束），"
@@ -88,6 +88,10 @@ class DispatchTaskAction(BaseAction):
     )
     primary_action = False
     associated_types = ["text"]
+
+    # 核心动作执行前事件仍读取历史字段，保留同值别名。
+    action_name = name
+    action_description = description
 
     async def execute(
         self,
@@ -125,10 +129,14 @@ class DispatchTaskAction(BaseAction):
             return False, "无法确定当前聊天流"
 
         manager = get_task_runtime_manager()
-        cap = max(
-            1,
-            int(getattr(tasks_config, "max_concurrent_tasks", 2) or 2),
-        ) if tasks_config is not None else 2
+        cap = (
+            max(
+                1,
+                int(getattr(tasks_config, "max_concurrent_tasks", 2) or 2),
+            )
+            if tasks_config is not None
+            else 2
+        )
         active_tasks = manager.get_active_tasks(stream_id)
         if len(active_tasks) >= cap:
             return False, (
@@ -139,7 +147,9 @@ class DispatchTaskAction(BaseAction):
         task_type_enum = _resolve_task_type(task_type)
         budget = _build_task_budget(config) if config is not None else TaskBudget()
         denied_tools = tuple(getattr(tasks_config, "denied_tools", ()) or ())
-        default_allowed = tuple(getattr(tasks_config, "default_allowed_tools", ()) or ())
+        default_allowed = tuple(
+            getattr(tasks_config, "default_allowed_tools", ()) or ()
+        )
         try:
             runtime = manager.create(
                 stream_id,
@@ -155,14 +165,18 @@ class DispatchTaskAction(BaseAction):
 
         try:
             template = get_task_templates().get(task_type_enum)
-            runtime.state.metadata["validation_steps"] = tuple(template.validation_steps)
+            runtime.state.metadata["validation_steps"] = tuple(
+                template.validation_steps
+            )
             if template.result_schema is not None:
                 runtime.state.metadata["result_schema"] = template.result_schema
 
             checkpoint_directory = str(
                 getattr(tasks_config, "checkpoint_directory", "") or ""
             ).strip()
-            store = TaskStateStore(checkpoint_directory) if checkpoint_directory else None
+            store = (
+                TaskStateStore(checkpoint_directory) if checkpoint_directory else None
+            )
             chatter = AgenticChatter(stream_id, self.plugin)
             request = TaskRequest(
                 objective=objective,
@@ -183,7 +197,9 @@ class DispatchTaskAction(BaseAction):
                 return False, "任务登记丢失，无法执行"
             result = await asyncio.wait_for(
                 active.executor.run(request),
-                timeout=max(1.0, float(budget.timeout_seconds) + _TIMEOUT_GRACE_SECONDS),
+                timeout=max(
+                    1.0, float(budget.timeout_seconds) + _TIMEOUT_GRACE_SECONDS
+                ),
             )
         except asyncio.TimeoutError:
             return False, f"任务超时（{budget.timeout_seconds:.0f} 秒），已取消"

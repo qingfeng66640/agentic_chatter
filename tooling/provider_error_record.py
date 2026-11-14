@@ -32,6 +32,17 @@ _PERSONA_FIELDS = {
 
 
 def _truncate(text: str, limit: int, field: str, truncated_fields: list[str]) -> str:
+    """限制诊断文本长度，并记录被截断的字段。
+
+    Args:
+        text: 待保存的文本。
+        limit: 允许保留的字符数。
+        field: 用于诊断记录的字段路径。
+        truncated_fields: 收集截断字段名的可变列表。
+
+    Returns:
+        str: 原文本或带截断标记的文本。
+    """
     if len(text) <= limit:
         return text
     truncated_fields.append(field)
@@ -39,13 +50,17 @@ def _truncate(text: str, limit: int, field: str, truncated_fields: list[str]) ->
 
 
 def _json_text(value: Any) -> str:
+    """将脱敏后的值序列化为 JSON 文本，不可序列化时返回诊断标记。"""
     try:
-        return json.dumps(redact_sensitive_value(value), ensure_ascii=False, default=str)
+        return json.dumps(
+            redact_sensitive_value(value), ensure_ascii=False, default=str
+        )
     except (TypeError, ValueError):
         return "[UNSERIALIZABLE]"
 
 
 def _redact_system_text(text: str, persona_values: dict[str, Any]) -> str:
+    """将系统文本中的人格配置值替换为对应的字段占位符。"""
     result = text
     for field, replacement in _PERSONA_FIELDS.items():
         value = persona_values.get(field)
@@ -62,6 +77,7 @@ def _redact_system_text(text: str, persona_values: dict[str, Any]) -> str:
 
 
 def _serialize_file(content: File) -> dict[str, Any]:
+    """仅记录文件类型和 MIME 类型，不保存文件载荷。"""
     result: dict[str, Any] = {"type": type(content).__name__}
     mime_type = getattr(content, "mime_type", None)
     if mime_type:
@@ -77,6 +93,17 @@ def _serialize_content(
     persona_values: dict[str, Any],
     truncated_fields: list[str],
 ) -> Any:
+    """按载荷类型脱敏、限长，并省略推理和文件内容。
+
+    Args:
+        content: 待记录的单个载荷内容。
+        role: 载荷角色，决定文本长度预算和人格脱敏范围。
+        persona_values: 待从系统文本中移除的人格配置值。
+        truncated_fields: 收集截断字段路径的可变列表。
+
+    Returns:
+        Any: 可写入诊断 JSON 的内容或类型摘要。
+    """
     if isinstance(content, ReasoningText):
         return {"type": "reasoning", "omitted": True}
     if isinstance(content, Text):
@@ -135,7 +162,9 @@ def serialize_payload(
     truncated_fields = truncated_fields if truncated_fields is not None else []
     role = getattr(payload, "role", None)
     if not isinstance(role, ROLE):
-        role = ROLE(str(role)) if str(role) in {item.value for item in ROLE} else ROLE.USER
+        role = (
+            ROLE(str(role)) if str(role) in {item.value for item in ROLE} else ROLE.USER
+        )
     content = getattr(payload, "content", [])
     return {
         "role": role.value,
@@ -175,9 +204,7 @@ def build_provider_error_request_record(
     record: dict[str, Any] = {
         "schema_version": 1,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "stream_id": _truncate(
-            str(stream_id), 512, "stream_id", truncated_fields
-        ),
+        "stream_id": _truncate(str(stream_id), 512, "stream_id", truncated_fields),
         "provider_error_rule": _truncate(
             str(rule), 512, "provider_error_rule", truncated_fields
         ),
@@ -211,6 +238,7 @@ def build_provider_error_request_record(
 
 
 def _append_record_sync(path: Path, line: str) -> None:
+    """创建诊断目录，并以 UTF-8 追加一行已序列化的记录。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line)
@@ -228,4 +256,3 @@ __all__ = [
     "build_provider_error_request_record",
     "serialize_payload",
 ]
-

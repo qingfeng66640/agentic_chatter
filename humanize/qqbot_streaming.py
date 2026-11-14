@@ -9,7 +9,11 @@ from typing import Any, Callable
 
 from src.app.plugin_system.api import service_api
 
-from .segmenter import CleanReplyResult, clean_reply_text_with_metadata, detect_provider_error_text
+from .segmenter import (
+    CleanReplyResult,
+    clean_reply_text_with_metadata,
+    detect_provider_error_text,
+)
 
 DEFAULT_STREAMING_SERVICE = "qqbot_adapter:service:qqbot"
 _THOUGHT_TAGS = ("think", "analysis", "reasoning")
@@ -52,7 +56,9 @@ def extract_streaming_context(message: Any | None) -> QQBotStreamingContext | No
     event_type = str(extra.get("qq_event_type") or "").upper()
     if event_type == "INTERACTION_CREATE":
         event_id = str(extra.get("qq_event_id") or "").strip()
-        return QQBotStreamingContext(user_openid, event_id=event_id) if event_id else None
+        return (
+            QQBotStreamingContext(user_openid, event_id=event_id) if event_id else None
+        )
 
     msg_id = str(getattr(message, "message_id", "") or "").strip()
     return QQBotStreamingContext(user_openid, msg_id=msg_id) if msg_id else None

@@ -17,6 +17,7 @@ from ..humanize.segmenter import (
 
 
 def test_detect_provider_error_text_matches_google_policy_response() -> None:
+    """完整的 Google 政策拒绝响应被识别为提示词政策拦截。"""
     text = (
         "The prompt could not be submitted. The prompt contains sensitive words "
         "that violate Google's [Generative AI Prohibited Use Policy]. "
@@ -26,19 +27,24 @@ def test_detect_provider_error_text_matches_google_policy_response() -> None:
 
 
 def test_detect_provider_error_text_matches_gemini_filter_response() -> None:
+    """Gemini 过滤器拒绝响应及其大写换行形式均返回过滤拦截原因。"""
     text = (
         "This request was blocked by Gemini's filters. They can occasionally trigger "
         "by mistake on safe coding, security, or biology-related queries. Please try "
         "rephrasing your prompt. You can [send feedback] or read more about our policies here."
     )
     assert detect_provider_error_text(text) == "gemini_filter_block"
-    assert detect_provider_error_text(
-        "THIS REQUEST WAS BLOCKED BY GEMINI'S FILTERS.\n"
-        "Please try rephrasing your prompt."
-    ) == "gemini_filter_block"
+    assert (
+        detect_provider_error_text(
+            "THIS REQUEST WAS BLOCKED BY GEMINI'S FILTERS.\n"
+            "Please try rephrasing your prompt."
+        )
+        == "gemini_filter_block"
+    )
 
 
 def test_detect_provider_error_text_normalizes_case_and_whitespace() -> None:
+    """Google 拒绝信号的大写及换行变体仍能被识别。"""
     text = (
         "THE PROMPT COULD NOT BE SUBMITTED.\n"
         "The prompt contains sensitive content.\n"
@@ -48,7 +54,11 @@ def test_detect_provider_error_text_normalizes_case_and_whitespace() -> None:
 
 
 def test_detect_provider_error_text_does_not_match_generic_discussion() -> None:
-    assert detect_provider_error_text("请解释 content policy 和 API error 的区别。") is None
+    """普通政策讨论与孤立的拒绝提示片段不会误报供应商拦截。"""
+    assert (
+        detect_provider_error_text("请解释 content policy 和 API error 的区别。")
+        is None
+    )
     assert detect_provider_error_text("The prompt could not be submitted.") is None
     assert detect_provider_error_text("Try rephrasing the prompt.") is None
     assert detect_provider_error_text("Gemini's filters can block a request.") is None
@@ -56,12 +66,17 @@ def test_detect_provider_error_text_does_not_match_generic_discussion() -> None:
 
 
 def test_detect_provider_error_text_requires_complete_provider_signal() -> None:
-    assert detect_provider_error_text(
-        "The prompt could not be submitted. The prompt contains sensitive words."
-    ) is None
+    """缺少改写提示的 Google 拒绝片段不构成完整拦截信号。"""
+    assert (
+        detect_provider_error_text(
+            "The prompt could not be submitted. The prompt contains sensitive words."
+        )
+        is None
+    )
 
 
 def test_detect_reply_decision_json_text_matches_complete_schema() -> None:
+    """字段完整且类型正确的决策 JSON 被识别为静默决策。"""
     text = (
         '{"action":"silent","confidence":0.8,"addressee":"other",'
         '"interrupt_cost":0.0,"reason_codes":["not_directed_to_bot"],'
@@ -71,20 +86,28 @@ def test_detect_reply_decision_json_text_matches_complete_schema() -> None:
 
 
 def test_detect_reply_decision_json_text_matches_markdown_json_fence() -> None:
-    text = '''```json
+    """Markdown JSON 围栏中的完整决策仍被识别为静默决策。"""
+    text = """```json
 {"action":"silent","confidence":0.8,"addressee":"other","interrupt_cost":0.0,"reason_codes":[],"brief_reason":"未指向 bot"}
-```'''
+```"""
     assert detect_reply_decision_json_text(text) == "silent"
+
+
 def test_detect_reply_decision_json_text_rejects_incomplete_or_normal_json() -> None:
+    """字段不全、理由类型错误及普通消息 JSON 均不被视为决策。"""
     assert detect_reply_decision_json_text('{"action":"silent"}') is None
-    assert detect_reply_decision_json_text(
-        '{"action":"silent","confidence":0.8,"addressee":"other",'
-        '"interrupt_cost":0.0,"reason_codes":[],"brief_reason":1}'
-    ) is None
+    assert (
+        detect_reply_decision_json_text(
+            '{"action":"silent","confidence":0.8,"addressee":"other",'
+            '"interrupt_cost":0.0,"reason_codes":[],"brief_reason":1}'
+        )
+        is None
+    )
     assert detect_reply_decision_json_text('{"message":"我会保持沉默"}') is None
 
 
 def test_detect_reply_decision_json_text_rejects_invalid_numbers() -> None:
+    """布尔值及超出有效范围的置信度不能通过决策识别。"""
     text = (
         '{"action":"silent","confidence":true,"addressee":"other",'
         '"interrupt_cost":0.0,"reason_codes":[],"brief_reason":"x"}'
@@ -98,6 +121,7 @@ def test_detect_reply_decision_json_text_rejects_invalid_numbers() -> None:
 
 
 def test_clean_metadata_contains_removed_thoughts() -> None:
+    """清洗结果保留可见回复，并按顺序记录两段被移除的思考内容。"""
     result = clean_reply_text_with_metadata(
         "<think>先分析语气</think>[思考]再确认一下[/思考]你好"
     )
@@ -107,6 +131,7 @@ def test_clean_metadata_contains_removed_thoughts() -> None:
 
 
 def test_clean_metadata_keeps_structured_reasoning_separate() -> None:
+    """普通回复保持原文，移除思考的元数据为空元组。"""
     result = clean_reply_text_with_metadata("普通回复")
 
     assert result.text == "普通回复"
@@ -114,54 +139,74 @@ def test_clean_metadata_keeps_structured_reasoning_separate() -> None:
 
 
 def test_clean_removes_tagged_thought_blocks() -> None:
+    """成对的思考、分析和推理标签连同内容被移除，保留后续回复。"""
     assert clean_reply_text("<think>内部推理</think>你好") == "你好"
     assert clean_reply_text("<ANALYSIS data-x='1'>多行\n分析</ANALYSIS>答案") == "答案"
-    assert clean_reply_text("<analysis>步骤一</analysis><reasoning>步骤二</reasoning>结果") == "结果"
+    assert (
+        clean_reply_text("<analysis>步骤一</analysis><reasoning>步骤二</reasoning>结果")
+        == "结果"
+    )
 
 
 def test_clean_removes_bracketed_thought_blocks() -> None:
+    """中英文方括号思考标记及其内部内容被移除，保留可见回复。"""
     assert clean_reply_text("[思考]内部推理[/思考]你好") == "你好"
     assert clean_reply_text("【内心】不该发送【/内心】在的") == "在的"
     assert clean_reply_text("[OS]internal[/OS]收到") == "收到"
 
 
 def test_clean_keeps_reply_after_explicit_thought_section() -> None:
+    """显式最终回复分隔符之前的思考被移除，之后的回答被保留。"""
     assert clean_reply_text("[思考]先判断语气\n[最终回复]你好呀") == "你好呀"
     assert clean_reply_text("分析过程：先看上下文\n回复：可以的") == "可以的"
 
 
 def test_clean_returns_empty_for_thought_only_output() -> None:
+    """仅含思考块的输出清洗为空文本，分段结果也为空列表。"""
     assert clean_reply_text("<think>只有推理</think>") == ""
     assert clean_reply_text("【思考】只有独白【/思考】") == ""
     assert segment_reply("<analysis>只有分析</analysis>") == []
 
 
 def test_clean_does_not_remove_unclosed_or_mismatched_tags() -> None:
-    assert clean_reply_text("<think>未闭合内容\n最终回复") == "<think>未闭合内容\n最终回复"
-    assert clean_reply_text("<think>内容</analysis>回答") == "<think>内容</analysis>回答"
+    """未闭合或首尾不匹配的标签内容保持原样，避免误删正文。"""
+    assert (
+        clean_reply_text("<think>未闭合内容\n最终回复") == "<think>未闭合内容\n最终回复"
+    )
+    assert (
+        clean_reply_text("<think>内容</analysis>回答") == "<think>内容</analysis>回答"
+    )
 
 
 def test_clean_preserves_normal_visible_reasoning_words() -> None:
+    """正文中的思考、判断和分析措辞不会被当作内部推理删除。"""
     assert clean_reply_text("我想先确认一下需求。") == "我想先确认一下需求。"
     assert clean_reply_text("我觉得这个方案可行。") == "我觉得这个方案可行。"
-    assert clean_reply_text("我的分析：问题来自配置缺失。") == "我的分析：问题来自配置缺失。"
+    assert (
+        clean_reply_text("我的分析：问题来自配置缺失。")
+        == "我的分析：问题来自配置缺失。"
+    )
 
 
 def test_clean_strips_suspend_marker() -> None:
+    """单独的挂起标记被清洗为空文本。"""
     assert clean_reply_text("__SUSPEND__") == ""
 
 
 def test_clean_strips_wrapping_quotes() -> None:
+    """包围回复的英文双引号与直角引号被剥离。"""
     assert clean_reply_text('"你好呀"') == "你好呀"
     assert clean_reply_text("「在的」") == "在的"
 
 
 def test_clean_returns_empty_for_blank() -> None:
+    """空字符串与纯空白回复均清洗为空文本。"""
     assert clean_reply_text("") == ""
     assert clean_reply_text("   ") == ""
 
 
 def test_framework_message_line_detection_requires_complete_single_line() -> None:
+    """仅完整单行框架消息被识别，普通文本、前缀说明和格式不完整的行不匹配。"""
     assert is_framework_message_line(
         "【13:47】<机器人> [6264745991384149877] 我是打工蝶😭 ："
     )
@@ -175,12 +220,14 @@ def test_framework_message_line_detection_requires_complete_single_line() -> Non
 
 
 def test_segmentation_disabled_returns_single_segment() -> None:
+    """关闭分段时长回复只产生一个无延迟片段。"""
     segments = segment_reply("啊" * 200, enabled=False)
     assert len(segments) == 1
     assert segments[0].delay == 0.0
 
 
 def test_segments_split_at_sentence_boundary() -> None:
+    """句子超过分段长度时拆为多段，首段保留句号边界。"""
     text = "今天天气不错。我们去爬山吧！你觉得怎么样？"
     segments = segment_reply(text, max_segment_chars=10, max_segments=4, typing_cps=0)
 
@@ -189,6 +236,7 @@ def test_segments_split_at_sentence_boundary() -> None:
 
 
 def test_first_segment_has_no_delay() -> None:
+    """首段没有打字延迟，存在后续段时其延迟为正。"""
     segments = segment_reply(
         "第一句话。第二句话。第三句话。",
         max_segment_chars=6,
@@ -202,6 +250,7 @@ def test_first_segment_has_no_delay() -> None:
 
 
 def test_delay_is_capped() -> None:
+    """慢速打字与长片段组合下，每段延迟仍不超过三秒上限。"""
     segments = segment_reply(
         "短。" + "长" * 500,
         max_segment_chars=400,
@@ -214,6 +263,7 @@ def test_delay_is_capped() -> None:
 
 
 def test_zero_cps_produces_no_delay() -> None:
+    """打字速度设为零时所有片段都不增加延迟。"""
     segments = segment_reply(
         "一句。两句。三句。",
         max_segment_chars=4,
@@ -225,6 +275,7 @@ def test_zero_cps_produces_no_delay() -> None:
 
 
 def test_max_segments_is_respected() -> None:
+    """多句长回复的分段数量不超过配置的三段上限。"""
     text = "。".join(f"句子{index}" for index in range(20))
     segments = segment_reply(text, max_segment_chars=5, max_segments=3, typing_cps=0)
 
@@ -232,11 +283,13 @@ def test_max_segments_is_respected() -> None:
 
 
 def test_empty_input_returns_no_segments() -> None:
+    """空文本与纯空白文本均不生成消息片段。"""
     assert segment_reply("") == []
     assert segment_reply("   ") == []
 
 
 def test_hard_split_when_no_punctuation() -> None:
+    """无标点的长文本会被硬切为多个非空片段。"""
     segments = segment_reply(
         "啊" * 100,
         max_segment_chars=20,
@@ -332,6 +385,7 @@ def test_plain_bracketed_text_is_not_treated_as_unit() -> None:
 
 
 def test_find_units_reports_kind_and_span() -> None:
+    """表情与颜文字的类型、顺序及原文位置区间均正确返回。"""
     text = "开心 \U0001f600 呀 (´･ω･`) 真的"
     units = find_units(text)
 
@@ -344,6 +398,7 @@ def test_find_units_reports_kind_and_span() -> None:
 
 
 def test_split_into_atoms_round_trips() -> None:
+    """原子拆分结果包含不可拆单元标记，并能无损重建原文。"""
     text = "你好 \U0001f600 (´･ω･`) 结束"
     atoms = split_into_atoms(text, find_units(text))
 
@@ -368,6 +423,7 @@ def test_bare_kaomoji_without_brackets_is_recognized() -> None:
 
 
 def test_bare_kaomoji_survives_split() -> None:
+    """扫描裸颜文字周围的切点时，颜文字始终完整保留在某一段中。"""
     text = FILLER_TAIL + "、´ω´、" + "乙" * 20
     base = len(FILLER_TAIL)
 

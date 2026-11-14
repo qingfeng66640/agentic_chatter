@@ -11,13 +11,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from src.app.plugin_system.base import Wait
-from src.kernel.llm import LLMPayload, ROLE, ToolCall, ToolResult
+from src.kernel.llm import ROLE, LLMPayload, ToolCall, ToolResult
 
 from .. import chatter as chatter_module
 from ..chatter import AgenticChatter
 from ..pipeline.mailbox import StreamMailbox, TurnClaim
 from ..pipeline.state import ToolExecutionRecord, TurnState
-
 
 SECRET = "原始异常含敏感输入，不得写入日志"
 

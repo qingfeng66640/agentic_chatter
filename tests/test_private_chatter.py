@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
+
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -19,12 +24,14 @@ from ..plugin import AgenticChatterPlugin
 
 
 def _plugin_with_config(config: AgenticChatterConfig) -> AgenticChatterPlugin:
+    """绕过插件初始化，仅绑定指定配置以验证组件注册开关。"""
     plugin = object.__new__(AgenticChatterPlugin)
     plugin.config = config
     return plugin
 
 
 def test_private_config_defaults_preserve_existing_behavior() -> None:
+    """默认启用私聊组件，且不指定专用私聊模型。"""
     config = AgenticChatterConfig()
 
     assert config.plugin.private_enabled
@@ -32,6 +39,7 @@ def test_private_config_defaults_preserve_existing_behavior() -> None:
 
 
 def test_components_follow_plugin_and_private_switches() -> None:
+    """私聊开关只影响私聊组件，插件总开关关闭时不注册任何组件。"""
     config = AgenticChatterConfig()
     plugin = _plugin_with_config(config)
 
@@ -51,6 +59,7 @@ def test_components_follow_plugin_and_private_switches() -> None:
 
 
 def test_chatter_types_are_precise_and_unique() -> None:
+    """群聊、私聊及讨论组组件各自使用正确聊天类型和独立名称。"""
     assert AgenticChatter.chat_type == ChatType.GROUP
     assert AgenticPrivateChatter.chat_type == ChatType.PRIVATE
     assert AgenticDiscussChatter.chat_type == ChatType.DISCUSS
@@ -59,7 +68,10 @@ def test_chatter_types_are_precise_and_unique() -> None:
     assert AgenticDiscussChatter.name == "agentic_discuss"
 
 
-def test_private_act_request_falls_back_to_model_task(monkeypatch) -> None:
+def test_private_act_request_falls_back_to_model_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未指定私聊模型时按配置的模型任务创建私聊请求。"""
     config = AgenticChatterConfig()
     config.plugin.model_task = "custom_actor"
     config.plugin.private_model_name = ""
@@ -76,15 +88,14 @@ def test_private_act_request_falls_back_to_model_task(monkeypatch) -> None:
     )
 
 
-def test_private_act_request_uses_named_model(monkeypatch) -> None:
+def test_private_act_request_uses_named_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """专用私聊模型继承 actor 参数，且请求携带聊天流元数据和上下文管理器。"""
     config = AgenticChatterConfig()
     config.plugin.private_model_name = "private-chat-model"
     chatter = AgenticPrivateChatter(stream_id="private-stream", plugin=object())
     model_set = [{"model_identifier": "provider/private"}]
     get_model = Mock(return_value=model_set)
-    get_task = Mock(
-        return_value=[{"temperature": 0.35, "max_tokens": 2048}]
-    )
+    get_task = Mock(return_value=[{"temperature": 0.35, "max_tokens": 2048}])
     monkeypatch.setattr(chatter_module.llm_api, "get_model_set_by_name", get_model)
     monkeypatch.setattr(chatter_module.llm_api, "get_model_set_by_task", get_task)
 
@@ -102,7 +113,10 @@ def test_private_act_request_uses_named_model(monkeypatch) -> None:
     assert isinstance(request.context_manager, LLMContextManager)
 
 
-def test_group_act_request_ignores_private_model(monkeypatch) -> None:
+def test_group_act_request_ignores_private_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """群聊请求使用自身模型任务，不查询配置中的私聊专用模型。"""
     config = AgenticChatterConfig()
     config.plugin.model_task = "group_actor"
     config.plugin.private_model_name = "private-chat-model"

@@ -8,7 +8,7 @@ from typing import Any
 import json_repair
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.kernel.llm import LLMPayload, ROLE, Text
+from src.kernel.llm import ROLE, LLMPayload, Text
 from src.kernel.llm.token_counter import count_text_tokens
 
 from .models import DecisionAction, DecisionSource, ReplyDecision
@@ -33,6 +33,7 @@ def trim_text_suffix(text: str, token_budget: int, model_identifier: str) -> str
     value = text.strip()
 
     def count(candidate: str) -> int:
+        """统计候选文本的 token 数，计数器不可用时按字符数估算。"""
         try:
             return count_text_tokens(candidate, model_identifier=model_identifier)
         except Exception:
@@ -205,7 +206,9 @@ async def decide_with_sub_actor(
         await response
         raw = str(getattr(response, "message", "") or "")
         if not raw.strip():
-            raise ValueError(f"子决策模型未返回正文（{_response_diagnostics(response)}）")
+            raise ValueError(
+                f"子决策模型未返回正文（{_response_diagnostics(response)}）"
+            )
         result = _parse_decision_result(raw)
         action = str(result.get("action", "")).strip().lower()
         if action not in {DecisionAction.RESPOND.value, DecisionAction.SILENT.value}:

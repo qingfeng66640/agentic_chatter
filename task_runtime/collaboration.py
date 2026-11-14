@@ -35,8 +35,12 @@ class TaskExecutorFactory:
         if used >= parent.budget.max_subtasks:
             return None
         budget = parent.budget
-        reserved_iterations = int(parent.metadata.get("subtasks_iterations_reserved", 0))
-        reserved_tool_calls = int(parent.metadata.get("subtasks_tool_calls_reserved", 0))
+        reserved_iterations = int(
+            parent.metadata.get("subtasks_iterations_reserved", 0)
+        )
+        reserved_tool_calls = int(
+            parent.metadata.get("subtasks_tool_calls_reserved", 0)
+        )
         reserved_failures = int(parent.metadata.get("subtasks_failures_reserved", 0))
         remaining_iterations = max(
             0, budget.max_iterations - parent.iterations - reserved_iterations
@@ -47,11 +51,19 @@ class TaskExecutorFactory:
         remaining_failures = max(
             0, budget.max_failures - parent.failures - reserved_failures
         )
-        if not remaining_iterations or not remaining_tool_calls or not remaining_failures:
+        if (
+            not remaining_iterations
+            or not remaining_tool_calls
+            or not remaining_failures
+        ):
             return None
         child_budget = TaskBudget(
-            max_iterations=max(1, min(remaining_iterations, budget.max_iterations // 2)),
-            max_tool_calls=max(1, min(remaining_tool_calls, budget.max_tool_calls // 2)),
+            max_iterations=max(
+                1, min(remaining_iterations, budget.max_iterations // 2)
+            ),
+            max_tool_calls=max(
+                1, min(remaining_tool_calls, budget.max_tool_calls // 2)
+            ),
             max_same_signature_calls=budget.max_same_signature_calls,
             max_no_progress_steps=budget.max_no_progress_steps,
             max_failures=max(1, min(remaining_failures, budget.max_failures // 2)),
@@ -60,9 +72,15 @@ class TaskExecutorFactory:
             max_result_size=budget.max_result_size,
         )
         parent.metadata["subtasks_used"] = used + 1
-        parent.metadata["subtasks_iterations_reserved"] = reserved_iterations + child_budget.max_iterations
-        parent.metadata["subtasks_tool_calls_reserved"] = reserved_tool_calls + child_budget.max_tool_calls
-        parent.metadata["subtasks_failures_reserved"] = reserved_failures + child_budget.max_failures
+        parent.metadata["subtasks_iterations_reserved"] = (
+            reserved_iterations + child_budget.max_iterations
+        )
+        parent.metadata["subtasks_tool_calls_reserved"] = (
+            reserved_tool_calls + child_budget.max_tool_calls
+        )
+        parent.metadata["subtasks_failures_reserved"] = (
+            reserved_failures + child_budget.max_failures
+        )
         return TaskRuntime(
             TaskState(
                 stream_id=parent.stream_id,
@@ -154,7 +172,9 @@ class TaskCollaboration:
         names = {spec.name for spec in specs}
         if len(names) != len(specs):
             return TaskResult(TaskStatus.FAILED, "子任务名称重复")
-        if any(dependency not in names for spec in specs for dependency in spec.depends_on):
+        if any(
+            dependency not in names for spec in specs for dependency in spec.depends_on
+        ):
             return TaskResult(TaskStatus.FAILED, "子任务依赖不存在")
 
         pending = {spec.name: spec for spec in specs}
@@ -162,6 +182,7 @@ class TaskCollaboration:
         semaphore = asyncio.Semaphore(self.max_concurrency)
 
         async def guarded(spec: SubtaskSpec) -> tuple[str, TaskResult]:
+            """在并发限制内传递依赖摘要，并将执行异常转换为子任务失败结果。"""
             async with semaphore:
                 try:
                     dependency_context = "\n".join(
@@ -202,19 +223,33 @@ class TaskCollaboration:
                 break
 
         completed = tuple(
-            name for name, result in results.items() if result.status == TaskStatus.SUCCEEDED
+            name
+            for name, result in results.items()
+            if result.status == TaskStatus.SUCCEEDED
         )
         failed = tuple(
-            name for name, result in results.items() if result.status == TaskStatus.FAILED
+            name
+            for name, result in results.items()
+            if result.status == TaskStatus.FAILED
         )
-        waiting = any(result.status == TaskStatus.WAITING_USER for result in results.values())
+        waiting = any(
+            result.status == TaskStatus.WAITING_USER for result in results.values()
+        )
         return TaskResult(
-            TaskStatus.WAITING_USER if waiting else TaskStatus.FAILED if failed else TaskStatus.SUCCEEDED,
+            TaskStatus.WAITING_USER
+            if waiting
+            else TaskStatus.FAILED
+            if failed
+            else TaskStatus.SUCCEEDED,
             "；".join(f"{name}：{result.summary}" for name, result in results.items()),
             completed_steps=completed,
             remaining_steps=failed + tuple(pending),
-            artifacts=tuple(item for result in results.values() for item in result.artifacts),
-            validation=tuple(item for result in results.values() for item in result.validation),
+            artifacts=tuple(
+                item for result in results.values() for item in result.artifacts
+            ),
+            validation=tuple(
+                item for result in results.values() for item in result.validation
+            ),
             needs_user_input=waiting,
             error="部分子任务失败" if failed else "",
         )

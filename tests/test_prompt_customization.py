@@ -57,7 +57,9 @@ def test_default_prompts_distinguish_direct_text_from_say_action() -> None:
     assert "普通回复直接输出正文" in DEFAULT_HOW_YOU_SPEAK
     assert "额外发送一条消息" in DEFAULT_HOW_YOU_SPEAK
     assert "本次模型响应不要再输出正文" in DEFAULT_HOW_YOU_SPEAK
-    assert "不要先直出一句、再用 action-say 发送同义或补全后的版本" in DEFAULT_HOW_YOU_ACT
+    assert (
+        "不要先直出一句、再用 action-say 发送同义或补全后的版本" in DEFAULT_HOW_YOU_ACT
+    )
     assert "没有引用或 @ 需求时，不要调用 action-say" in DEFAULT_HOW_YOU_ACT
 
 

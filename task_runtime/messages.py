@@ -29,7 +29,9 @@ class TaskMessageMailbox:
         """获取任务队列。"""
         return self._queues.setdefault(task_id, asyncio.Queue())
 
-    async def put(self, task_id: str, text: str, *, kind: TaskMessageKind | None = None) -> TaskEnvelope:
+    async def put(
+        self, task_id: str, text: str, *, kind: TaskMessageKind | None = None
+    ) -> TaskEnvelope:
         """写入任务控制或补充消息。"""
         generation = self._generations.get(task_id, 0) + 1
         self._generations[task_id] = generation

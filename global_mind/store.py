@@ -220,7 +220,9 @@ class GlobalMind:
         """
         with self._lock:
             mood = self._stream_moods.get(str(stream_id or "").strip(), MoodState())
-            return MoodState(value=mood.value, label=mood.label, updated_at=mood.updated_at)
+            return MoodState(
+                value=mood.value, label=mood.label, updated_at=mood.updated_at
+            )
 
     def nudge_stream_mood(
         self,

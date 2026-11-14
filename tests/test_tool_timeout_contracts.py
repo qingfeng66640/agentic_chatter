@@ -14,7 +14,7 @@ from src.kernel.llm.usable_execution import execute_usable_instance
 
 from ..tooling.timed_calls import run_with_timeout
 from ..tooling.timeout import ToolExecutionScope
-from .test_tool_timeout import _Response, _Usable, _config, _spawn
+from .test_tool_timeout import _config, _Response, _spawn, _Usable
 
 
 @pytest.mark.parametrize("eager", [False, True])

@@ -16,7 +16,7 @@ from ..tooling.registry import (
 )
 
 
-def _make_component(signature: str, short_name: str) -> type:
+def _make_component(signature: str, short_name: str) -> type[object]:
     """构造一个带签名的假组件类。
 
     Args:
@@ -28,14 +28,18 @@ def _make_component(signature: str, short_name: str) -> type:
     """
 
     class _Fake:
-        tool_name = short_name
+        """保留传入签名和短名的组件替身，用于工具筛选与排序。"""
+
+        name = short_name
 
         @classmethod
         def get_signature(cls) -> str:
+            """返回构造时传入的组件签名，供匹配和黑名单过滤使用。"""
             return signature
 
         @classmethod
-        def to_schema(cls) -> dict:
+        def to_schema(cls) -> dict[str, dict[str, str]]:
+            """用组件短名构造最小工具结构，供工具布局识别名称。"""
             return {"function": {"name": f"tool-{short_name}"}}
 
     _Fake.__name__ = f"Fake_{short_name}"
@@ -43,12 +47,16 @@ def _make_component(signature: str, short_name: str) -> type:
 
 
 def test_signature_matches_supports_wildcard() -> None:
-    assert signature_matches("onebot_expand:tool:get_group_info", ["onebot_expand:tool:*"])
+    """通配签名应匹配指定插件工具，并排除其他插件和空签名。"""
+    assert signature_matches(
+        "onebot_expand:tool:get_group_info", ["onebot_expand:tool:*"]
+    )
     assert not signature_matches("emoji_sender:action:send", ["onebot_expand:tool:*"])
     assert not signature_matches("", ["*"])
 
 
 def test_blacklist_hides_component_entirely() -> None:
+    """命中黑名单的组件既不得直接暴露，也不得进入折叠目录。"""
     usables = [_make_component("bad_plugin:tool:danger", "danger")]
 
     layout = build_tool_layout(
@@ -64,6 +72,7 @@ def test_blacklist_hides_component_entirely() -> None:
 
 
 def test_is_blacklisted_component_uses_signature_patterns() -> None:
+    """组件黑名单判断应依据所属插件的签名模式。"""
     component = _make_component("bad_plugin:tool:danger", "danger")
 
     assert is_blacklisted_component(component, ["bad_plugin:tool:*"])
@@ -71,6 +80,7 @@ def test_is_blacklisted_component_uses_signature_patterns() -> None:
 
 
 def test_always_visible_components_are_pinned_first() -> None:
+    """常驻可见的表情动作应排在普通工具之前。"""
     usables = [
         _make_component("other:tool:filler_1", "filler_1"),
         _make_component("other:tool:filler_2", "filler_2"),
@@ -111,6 +121,7 @@ def test_collapsed_components_do_not_consume_exposure_budget() -> None:
 
 
 def test_max_exposed_truncates_normal_components() -> None:
+    """普通工具超过暴露预算时，应保留限额并记录丢弃数量。"""
     usables = [_make_component(f"p:tool:t{index}", f"t{index}") for index in range(50)]
 
     layout = build_tool_layout(
@@ -126,6 +137,7 @@ def test_max_exposed_truncates_normal_components() -> None:
 
 
 def test_max_exposed_zero_means_unlimited() -> None:
+    """暴露预算为零时应保留所有普通工具，不记录丢弃项。"""
     usables = [_make_component(f"p:tool:t{index}", f"t{index}") for index in range(50)]
 
     layout = build_tool_layout(
@@ -141,6 +153,7 @@ def test_max_exposed_zero_means_unlimited() -> None:
 
 
 def test_describe_categories_renders_hint() -> None:
+    """折叠分类提示应包含探索工具入口和所属插件类别。"""
     usables = [
         _make_component(f"onebot_expand:tool:api_{index}", f"api_{index}")
         for index in range(12)
@@ -160,6 +173,7 @@ def test_describe_categories_renders_hint() -> None:
 
 
 def test_describe_categories_empty_when_nothing_collapsed() -> None:
+    """不存在折叠工具时，分类提示应为空字符串。"""
     layout = build_tool_layout(
         [_make_component("p:tool:t", "t")],
         always_visible=[],
@@ -172,6 +186,7 @@ def test_describe_categories_empty_when_nothing_collapsed() -> None:
 
 
 def test_tool_call_mode_defaults_to_planning() -> None:
+    """默认配置和缺失配置都应选择逐个提交的规划模式。"""
     config = AgenticChatterConfig()
     chatter = AgenticChatter(stream_id="tool-mode", plugin=object())
 
@@ -181,6 +196,7 @@ def test_tool_call_mode_defaults_to_planning() -> None:
 
 
 def test_tool_call_mode_invalid_value_falls_back_to_planning() -> None:
+    """配置中的未知工具调用模式应按规划模式处理。"""
     config = AgenticChatterConfig()
     config.tools.tool_call_mode = "invalid"
     chatter = AgenticChatter(stream_id="tool-mode-invalid", plugin=object())
@@ -189,6 +205,7 @@ def test_tool_call_mode_invalid_value_falls_back_to_planning() -> None:
 
 
 def test_tool_call_mode_guidance_describes_planning_and_batch() -> None:
+    """模式指引应说明规划等待结果，以及批量调度不保证并行和固定顺序。"""
     chatter = AgenticChatter(stream_id="tool-mode-guidance", plugin=object())
 
     planning = chatter._tool_call_mode_guidance("planning")
@@ -204,6 +221,7 @@ def test_tool_call_mode_guidance_describes_planning_and_batch() -> None:
 
 
 def test_encouragement_prompt_mentions_tool_usage() -> None:
+    """工具鼓励提示应强调实际调用、结果依赖、独立批次和新信息发言约束。"""
     text = build_encouragement_prompt()
     assert "优先调用实际可用的工具" in text
     assert "查询、读取、计算、记录或执行动作" in text

@@ -29,7 +29,9 @@ def _format_digest_line(digest: StreamDigest) -> str:
     """
     parts: list[str] = []
 
-    name = digest.stream_name.strip() or ("私聊" if digest.chat_type == "private" else "某个对话")
+    name = digest.stream_name.strip() or (
+        "私聊" if digest.chat_type == "private" else "某个对话"
+    )
     parts.append(name)
 
     age = digest.age_minutes()

@@ -80,6 +80,7 @@ async def compute_semantic_relevance(
     bot_values = [value for value in similarities[len(topics) :] if value is not None]
 
     def normalize(values: list[float]) -> float | None:
+        """提取有效相似度的最大值并限制在零到一之间。"""
         if not values:
             return None
         return max(0.0, min(1.0, max(values)))

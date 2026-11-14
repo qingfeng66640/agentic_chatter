@@ -94,7 +94,10 @@ async def _submit_task(
     tasks_config = getattr(getattr(self, "plugin", None), "config", None)
     cap = max(
         1,
-        int(getattr(getattr(tasks_config, "tasks", None), "max_concurrent_tasks", 2) or 2),
+        int(
+            getattr(getattr(tasks_config, "tasks", None), "max_concurrent_tasks", 2)
+            or 2
+        ),
     )
     if len(manager.get_active_tasks(stream_id)) >= cap:
         logger.warning(f"提交任务失败：该聊天流活动任务数已达上限（{cap}）")
@@ -130,7 +133,9 @@ async def _submit_task(
 def _task_store(service: Any) -> TaskStateStore | None:
     """按服务所属插件配置构建任务状态存储。"""
     config = getattr(service, "plugin", None)
-    directory = str(getattr(getattr(config, "tasks", None), "checkpoint_directory", "") or "").strip()
+    directory = str(
+        getattr(getattr(config, "tasks", None), "checkpoint_directory", "") or ""
+    ).strip()
     return TaskStateStore(directory) if directory else None
 
 
@@ -148,9 +153,13 @@ def _get_task_status(self: Any, task_id: str) -> TaskResult | None:
 class PipelineService(BaseService):
     """AgenticChatter 管线扩展服务。"""
 
-    service_name = "pipeline"
-    service_description = "注册自定义回复管线阶段，并读写跨流全局心智"
+    name = "pipeline"
+    description = "注册自定义回复管线阶段，并读写跨流全局心智"
     version = "0.1.0"
+
+    # 对旧字段读取者保留兼容值，组件注册使用统一属性。
+    service_name = name
+    service_description = description
 
     submit_task = _submit_task
     get_task_status = _get_task_status
@@ -245,9 +254,13 @@ class PipelineService(BaseService):
 class TaskRuntimeService(BaseService):
     """复杂任务提交服务，供其他插件转入独立任务运行时。"""
 
-    service_name = "tasks"
-    service_description = "提交受预算与工具策略约束的复杂任务并查询任务状态"
+    name = "tasks"
+    description = "提交受预算与工具策略约束的复杂任务并查询任务状态"
     version = "0.1.0"
+
+    # 对旧字段读取者保留兼容值，组件注册使用统一属性。
+    service_name = name
+    service_description = description
 
     submit_task = _submit_task
     get_task_status = _get_task_status

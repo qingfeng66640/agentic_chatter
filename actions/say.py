@@ -22,8 +22,8 @@ logger = get_logger("agentic_chatter")
 class SayAction(BaseAction):
     """引用回复或 @ 某人时使用的发送动作。"""
 
-    action_name = "say"
-    action_description = (
+    name = "say"
+    description = (
         "仅在需要「引用回复某条消息」或「在群聊中 @ 某个人」时使用。"
         "target_type 必须为 reply 或 mention，target_id 必须提供对应的消息 ID 或用户 ID。"
         "它会独立额外发送一条消息；普通回复直接输出正文即可。"
@@ -32,6 +32,10 @@ class SayAction(BaseAction):
     )
     primary_action = False
     associated_types = ["text"]
+
+    # 核心动作执行前事件仍读取历史字段，保留同值别名。
+    action_name = name
+    action_description = description
 
     async def execute(
         self,

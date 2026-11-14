@@ -63,7 +63,9 @@ def _parse_again(record: dict[str, Any]) -> Schedule:
             timezone_name=str(record.get("timezone_name", "")),
         )
     if kind == "after":
-        return Schedule(kind="after", duration_seconds=float(record.get("duration_seconds", 0.0)))
+        return Schedule(
+            kind="after", duration_seconds=float(record.get("duration_seconds", 0.0))
+        )
     return Schedule(kind="at", absolute_at_ms=int(record.get("absolute_at_ms", 0)))
 
 
@@ -175,9 +177,7 @@ class ScheduleManager:
                 "next_run_at_ms": next_run_at_ms,
             }
         )
-        logger.info(
-            f"已创建定时任务「{title}」，下次触发 {_format_ms(next_run_at_ms)}"
-        )
+        logger.info(f"已创建定时任务「{title}」，下次触发 {_format_ms(next_run_at_ms)}")
         return record
 
     def read_list(self, *, limit: int = 50) -> tuple[dict[str, Any], ...]:
@@ -190,7 +190,9 @@ class ScheduleManager:
 
     def read_runs(self, cron_id: str, *, limit: int = 20) -> tuple[str, ...]:
         """读取某任务的运行历史（可读文本）。"""
-        return tuple(describe_run(run) for run in self._store.list_runs(cron_id, limit=limit))
+        return tuple(
+            describe_run(run) for run in self._store.list_runs(cron_id, limit=limit)
+        )
 
     def update(
         self,
@@ -227,13 +229,15 @@ class ScheduleManager:
                 raise ScheduleError("prompt 不能为空")
             changes["prompt"] = cleaned
 
-        timing_changed = any(
-            value is not None for value in (schedule, after, at)
-        ) or timezone_name is not None
+        timing_changed = (
+            any(value is not None for value in (schedule, after, at))
+            or timezone_name is not None
+        )
         if timing_changed:
-            if sum(
-                1 for value in (schedule, after, at) if str(value or "").strip()
-            ) > 1:
+            if (
+                sum(1 for value in (schedule, after, at) if str(value or "").strip())
+                > 1
+            ):
                 raise ScheduleError("schedule、after、at 必须且只能提供一个")
             # 未改动的那一段沿用原值，保证三选一语义不被破坏
             effective_schedule = schedule
@@ -244,7 +248,9 @@ class ScheduleManager:
                 if kind == "cron":
                     effective_schedule = str(record.get("cron_expression", ""))
                 elif kind == "after":
-                    effective_after = f"{int(float(record.get('duration_seconds', 0)))}s"
+                    effective_after = (
+                        f"{int(float(record.get('duration_seconds', 0)))}s"
+                    )
                 else:
                     effective_at = str(record.get("absolute_at_ms", 0))
             parsed, first_run = parse_schedule(
@@ -264,7 +270,9 @@ class ScheduleManager:
                     "duration_seconds": parsed.duration_seconds,
                     "absolute_at_ms": parsed.absolute_at_ms,
                     "timezone_name": parsed.timezone_name,
-                    "next_run_at_ms": int(first_run.timestamp() * 1000) if first_run else None,
+                    "next_run_at_ms": int(first_run.timestamp() * 1000)
+                    if first_run
+                    else None,
                 }
             )
 
@@ -308,9 +316,7 @@ class ScheduleManager:
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise ScheduleError(
-                f"「{text}」匹配到多个任务，请改用完整 cron_id"
-            )
+            raise ScheduleError(f"「{text}」匹配到多个任务，请改用完整 cron_id")
         return None
 
     # ==================== 调度循环 ====================
@@ -382,11 +388,11 @@ class ScheduleManager:
         if one_shot:
             self._store.finish_state(cron_id, _ONESHOT_COMPLETED)
         if task_id:
-            self._store.mark_run(
-                cron_id, status=RUN_DELIVERED, task_id=str(task_id)
-            )
+            self._store.mark_run(cron_id, status=RUN_DELIVERED, task_id=str(task_id))
             if self._uses_thread(record):
-                self._store.append_thread_entry(cron_id, prompt, max_entries=THREAD_HISTORY_ENTRIES)
+                self._store.append_thread_entry(
+                    cron_id, prompt, max_entries=THREAD_HISTORY_ENTRIES
+                )
 
     async def _invoke_submitter(
         self,
@@ -505,7 +511,6 @@ def shutdown_schedule_manager() -> None:
     """释放全局管理器引用。"""
     global _manager
     _manager = None
-
 
 
 def _normalize_session_mode(mode: str) -> str:

@@ -14,14 +14,23 @@ from typing import Annotated, ClassVar
 
 from pydantic import Field as PydanticField
 
-from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
+from src.core.components.base.config import (
+    BaseConfig,
+    Field,
+    SectionBase,
+    config_section,
+)
 
 
 class AgenticChatterConfig(BaseConfig):
     """AgenticChatter 配置。"""
 
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "Agentic Chatter 配置"
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = "Agentic Chatter 配置"
+
+    # 保留历史属性的读取兼容性，不再依赖旧属性向新属性的桥接。
+    config_name: ClassVar[str] = name
+    config_description: ClassVar[str] = description
 
     @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):
@@ -987,8 +996,7 @@ class AgenticChatterConfig(BaseConfig):
         enabled: bool = Field(
             default=True,
             description=(
-                "是否启用跨流全局心智。关闭后各聊天流完全独立，"
-                "退化为传统的单流行为。"
+                "是否启用跨流全局心智。关闭后各聊天流完全独立，退化为传统的单流行为。"
             ),
             label="启用全局心智",
             tag="ai",

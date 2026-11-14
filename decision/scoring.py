@@ -137,10 +137,7 @@ def _combined_decision(
     if features.rhythm_cooldown >= 1.0 and (
         features.low_information >= 1.0
         or features.topic_closure >= 1.0
-        or (
-            features.contribution_value < 0.20
-            and features.question_or_request <= 0.0
-        )
+        or (features.contribution_value < 0.20 and features.question_or_request <= 0.0)
     ):
         return _local_decision(
             DecisionAction.SILENT,
@@ -232,9 +229,14 @@ def score_features(
     return None
 
 
-def interval_summary(features: DecisionFeatures, config: Any) -> tuple[float, float, float]:
+def interval_summary(
+    features: DecisionFeatures, config: Any
+) -> tuple[float, float, float]:
     """计算无随机扰动的分数与区间，供子决策模型参考。"""
+
     class _NoRandom:
+        """为评分摘要提供固定返回零的随机数接口。"""
+
         def uniform(self, _low: float, _high: float) -> float:
             """消除随机扰动。"""
             return 0.0

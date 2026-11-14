@@ -36,7 +36,9 @@ def signature_matches(signature: str, patterns: list[str]) -> bool:
     target = str(signature or "").strip()
     if not target:
         return False
-    return any(fnmatch.fnmatch(target, str(pattern).strip()) for pattern in patterns if pattern)
+    return any(
+        fnmatch.fnmatch(target, str(pattern).strip()) for pattern in patterns if pattern
+    )
 
 
 @dataclass
@@ -97,7 +99,9 @@ def _extract_signature(component_cls: type) -> str:
 
 def is_blacklisted_component(component_cls: type, blacklist: list[str]) -> bool:
     """判断组件类是否命中工具黑名单。"""
-    return bool(blacklist and signature_matches(_extract_signature(component_cls), blacklist))
+    return bool(
+        blacklist and signature_matches(_extract_signature(component_cls), blacklist)
+    )
 
 
 def _category_of(signature: str) -> str:

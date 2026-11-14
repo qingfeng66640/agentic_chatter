@@ -576,6 +576,7 @@ def parse_choice_answer(
     respond_probability = 0.0
     silent_probability = 0.0
     if isinstance(probabilities, dict):
+
         def _prob(key: str) -> float:
             """读取单个选项概率，非法值按 0 处理。"""
             try:
@@ -587,9 +588,7 @@ def parse_choice_answer(
         silent_probability = _prob(_ACTION_SILENT)
 
     action = (
-        DecisionAction.RESPOND
-        if choice == _ACTION_RESPOND
-        else DecisionAction.SILENT
+        DecisionAction.RESPOND if choice == _ACTION_RESPOND else DecisionAction.SILENT
     )
     return JevAnswer(
         action=action,
@@ -769,9 +768,7 @@ async def request_decision(
             used=0,
         )
     suffix = (
-        f"；已达总预算 {budget:.1f} 秒，放弃剩余重试"
-        if budget_cut
-        else "；重试已用尽"
+        f"；已达总预算 {budget:.1f} 秒，放弃剩余重试" if budget_cut else "；重试已用尽"
     )
     raise _fail(
         f"Jev 调用失败：{last_error}{suffix}",
@@ -779,7 +776,6 @@ async def request_decision(
         used=last_error.attempts,
         status=last_error.status,
     ) from last_error
-
 
 
 async def _backoff(settings: JevSettings, attempt: int, deadline: float) -> None:

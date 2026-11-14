@@ -9,6 +9,7 @@ from ..task_runtime.runtime import TaskRuntimeManager
 
 
 def test_get_active_tasks_sorted_by_created_at() -> None:
+    """活跃任务列表应按创建先后顺序返回同一聊天流的任务。"""
     manager = TaskRuntimeManager()
     first = manager.create("stream", "第一个", task_type=TaskType.RESEARCH)
     second = manager.create("stream", "第二个")
@@ -20,6 +21,7 @@ def test_get_active_tasks_sorted_by_created_at() -> None:
 
 
 def test_get_active_tasks_excludes_terminal_statuses() -> None:
+    """活跃任务列表应排除已完成任务，但保留暂停任务。"""
     manager = TaskRuntimeManager()
     done = manager.create("stream", "已完成")
     done.start()
@@ -32,6 +34,7 @@ def test_get_active_tasks_excludes_terminal_statuses() -> None:
 
 
 def test_get_active_shim_returns_latest_task() -> None:
+    """兼容单任务查询应返回最新任务，未知聊天流则返回空值。"""
     manager = TaskRuntimeManager()
     manager.create("stream", "第一个")
     second = manager.create("stream", "第二个")
@@ -40,6 +43,7 @@ def test_get_active_shim_returns_latest_task() -> None:
 
 
 def test_create_rejects_when_capacity_reached() -> None:
+    """同一聊天流达到默认任务容量后，继续创建应抛出上限错误。"""
     manager = TaskRuntimeManager()
     manager.create("stream", "第一个")
     manager.create("stream", "第二个")
@@ -48,6 +52,7 @@ def test_create_rejects_when_capacity_reached() -> None:
 
 
 def test_capacity_does_not_count_other_streams() -> None:
+    """一个聊天流占满任务容量不应阻止另一个聊天流创建任务。"""
     manager = TaskRuntimeManager()
     manager.create("stream-a", "A流任务一")
     manager.create("stream-a", "A流任务二")
@@ -56,6 +61,7 @@ def test_capacity_does_not_count_other_streams() -> None:
 
 
 def test_remove_reduces_active_count() -> None:
+    """成功移除任务后，该聊天流的活跃任务数量应相应减少。"""
     manager = TaskRuntimeManager()
     first = manager.create("stream", "第一个")
     manager.create("stream", "第二个")
@@ -64,6 +70,7 @@ def test_remove_reduces_active_count() -> None:
 
 
 def test_concurrent_recovery_tasks_share_capacity() -> None:
+    """暂停任务仍应占用容量，取消后才允许创建新的任务。"""
     manager = TaskRuntimeManager()
     manager.configure_limits(1)
     paused = manager.create("stream", "暂停任务")

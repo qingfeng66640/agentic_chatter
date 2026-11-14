@@ -23,7 +23,9 @@ class ToolPolicy:
     denied_tools: tuple[str, ...] = ()
     require_confirmation_tools: tuple[str, ...] = ()
     default_allow: bool = False
-    _counts: dict[str, int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _counts: dict[str, int] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     @staticmethod
     def _matches(name: str, patterns: tuple[str, ...]) -> bool:
@@ -38,7 +40,11 @@ class ToolPolicy:
         if self._matches(normalized, self.require_confirmation_tools):
             return ToolPermission.CONFIRM
         if self.allowed_tools:
-            return ToolPermission.ALLOW if self._matches(normalized, self.allowed_tools) else ToolPermission.DENY
+            return (
+                ToolPermission.ALLOW
+                if self._matches(normalized, self.allowed_tools)
+                else ToolPermission.DENY
+            )
         return ToolPermission.ALLOW if self.default_allow else ToolPermission.DENY
 
     def check_and_count(self, name: str, maximum: int) -> bool:

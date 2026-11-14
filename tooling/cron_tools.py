@@ -80,8 +80,8 @@ def _format_detail(record: dict[str, Any]) -> str:
 class CreateCronTool(BaseTool):
     """创建定时任务。"""
 
-    tool_name = "cron_create"
-    tool_description = (
+    name = "cron_create"
+    description = (
         "创建一个定时任务，到点自动执行一段指令。"
         "schedule/after/at 三者必须且只能提供一个："
         "schedule 是五段 cron 表达式（如 0 9 * * 1-5 表示工作日早九点）；"
@@ -92,6 +92,10 @@ class CreateCronTool(BaseTool):
         "用户说“每天早上…”“每隔一小时…”“30分钟后…”时调用。"
     )
 
+    # 新代码使用统一属性，同时保留历史字段读取兼容性。
+    tool_name = name
+    tool_description = description
+
     async def execute(
         self,
         cron_name: Annotated[str, "任务标题，例如「工作日晨报」"],
@@ -100,8 +104,12 @@ class CreateCronTool(BaseTool):
         after: Annotated[str, "一次性相对延迟，例如 30m、2h"] = "",
         at: Annotated[str, "一次性绝对时间，Unix 毫秒时间戳或日期时间字符串"] = "",
         timezone_name: Annotated[str, "IANA 时区名，例如 Asia/Shanghai"] = "",
-        session_mode: Annotated[str, "会话策略：new（每次新上下文，默认）或 session（复用专属上下文）"] = "new",
-        session_target: Annotated[str, "session 模式下要复用的历史标识；留空表示由任务自行累积，me 非法"] = "",
+        session_mode: Annotated[
+            str, "会话策略：new（每次新上下文，默认）或 session（复用专属上下文）"
+        ] = "new",
+        session_target: Annotated[
+            str, "session 模式下要复用的历史标识；留空表示由任务自行累积，me 非法"
+        ] = "",
     ) -> tuple[bool, str]:
         """创建定时任务。
 
@@ -149,12 +157,16 @@ class CreateCronTool(BaseTool):
 class ReadCronTool(BaseTool):
     """查询定时任务。"""
 
-    tool_name = "cron_read"
-    tool_description = (
+    name = "cron_read"
+    description = (
         "查询定时任务。view=list 列出全部任务；view=detail 查询单个任务详情；"
         "view=runs 查询某任务的运行历史。detail 与 runs 需要 cron_ref，"
         "可填任务ID或唯一名称前缀。用户问“我设了哪些定时任务/下次什么时候跑”时调用。"
     )
+
+    # 新代码使用统一属性，同时保留历史字段读取兼容性。
+    tool_name = name
+    tool_description = description
 
     async def execute(
         self,
@@ -207,12 +219,16 @@ class ReadCronTool(BaseTool):
 class UpdateCronTool(BaseTool):
     """修改定时任务。"""
 
-    tool_name = "cron_update"
-    tool_description = (
+    name = "cron_update"
+    description = (
         "修改定时任务。可改标题、指令、调度表达式、时区，或用 enabled 暂停/恢复。"
         "会话策略在创建后固定，无法通过本工具更改。"
         "用户说“把每天早上的任务改成九点”“暂停那个定时任务”时调用。"
     )
+
+    # 新代码使用统一属性，同时保留历史字段读取兼容性。
+    tool_name = name
+    tool_description = description
 
     async def execute(
         self,
@@ -223,7 +239,9 @@ class UpdateCronTool(BaseTool):
         after: Annotated[str, "新的相对延迟，留空表示不改"] = "",
         at: Annotated[str, "新的绝对时间，留空表示不改"] = "",
         timezone_name: Annotated[str, "新的时区名，留空表示不改"] = "",
-        enabled: Annotated[str, "enabled=false 暂停，enabled=true 恢复；留空表示不改"] = "",
+        enabled: Annotated[
+            str, "enabled=false 暂停，enabled=true 恢复；留空表示不改"
+        ] = "",
     ) -> tuple[bool, str]:
         """修改定时任务。
 
@@ -285,11 +303,15 @@ class UpdateCronTool(BaseTool):
 class DeleteCronTool(BaseTool):
     """删除定时任务。"""
 
-    tool_name = "cron_delete"
-    tool_description = (
+    name = "cron_delete"
+    description = (
         "删除定时任务，停止其后续运行。运行历史会保留，仍可用 cron_read 的 runs 视图查询。"
         "用户明确要求取消或删除某个定时任务时调用。"
     )
+
+    # 新代码使用统一属性，同时保留历史字段读取兼容性。
+    tool_name = name
+    tool_description = description
 
     async def execute(
         self,
@@ -317,4 +339,7 @@ class DeleteCronTool(BaseTool):
             return False, f"没有找到匹配「{cron_ref}」的定时任务"
 
         manager.delete(str(record["cron_id"]))
-        return True, f"已删除定时任务「{record.get('cron_name', '')}」，运行历史仍可通过 cron_read 的 runs 视图查看。"
+        return (
+            True,
+            f"已删除定时任务「{record.get('cron_name', '')}」，运行历史仍可通过 cron_read 的 runs 视图查看。",
+        )

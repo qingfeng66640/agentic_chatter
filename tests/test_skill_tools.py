@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from ..config import AgenticChatterConfig
 from ..plugin import AgenticChatterPlugin
 from ..tooling import skills
@@ -12,6 +14,18 @@ from ..tooling.skill_command import AgenticSkillCommand
 
 
 def _write_skill(root: Path, name: str = "demo") -> Path:
+    """在给定根目录创建包含元数据、正文和引用文件的技能样本。
+
+    Args:
+        root: 已存在的技能父目录。
+        name: 新建技能的目录名及元数据名称。
+
+    Returns:
+        包含 SKILL.md 和 guide.md 的技能目录。
+
+    Raises:
+        OSError: 无法创建目录或写入技能文件。
+    """
     skill_root = root / name
     skill_root.mkdir()
     (skill_root / "SKILL.md").write_text(
@@ -23,6 +37,7 @@ def _write_skill(root: Path, name: str = "demo") -> Path:
 
 
 def test_refresh_discovers_direct_skill_and_reads_reference(tmp_path: Path) -> None:
+    """刷新发现技能后，可在同一聊天流中读取其正文与已授权引用。"""
     _write_skill(tmp_path)
     assert skills.refresh_skills([str(tmp_path)]) == 1
     catalog = skills.skill_catalog()
@@ -35,7 +50,10 @@ def test_refresh_discovers_direct_skill_and_reads_reference(tmp_path: Path) -> N
     assert "引用内容" in reference
 
 
-def test_skill_reference_requires_selection_and_rejects_traversal(tmp_path: Path) -> None:
+def test_skill_reference_requires_selection_and_rejects_traversal(
+    tmp_path: Path,
+) -> None:
+    """引用读取必须先选中技能，即使已授权也拒绝越出技能目录的路径。"""
     _write_skill(tmp_path)
     skills.refresh_skills([str(tmp_path)])
     success, message = skills.read_reference("stream-b", "demo", "guide.md")
@@ -54,7 +72,9 @@ def test_skill_reference_accepts_escaped_markdown_path(tmp_path: Path) -> None:
     reference.parent.mkdir()
     reference.write_text("已找到引用", encoding="utf-8")
     for filename in ("_guide.md", ".hidden.md"):
-        (reference.parent / filename).write_text(f"原始路径：{filename}", encoding="utf-8")
+        (reference.parent / filename).write_text(
+            f"原始路径：{filename}", encoding="utf-8"
+        )
         (root / f"refs{filename}").write_text(f"转义路径：{filename}", encoding="utf-8")
     skills.refresh_skills([str(tmp_path)])
     assert skills.read_skill("stream-a", "demo")[0] is True
@@ -66,14 +86,20 @@ def test_skill_reference_accepts_escaped_markdown_path(tmp_path: Path) -> None:
         assert success is True, content
         assert "已找到引用" in content
     for filename in ("_guide.md", ".hidden.md"):
-        success, content = skills.read_reference("stream-a", "demo", rf"refs\{filename}")
+        success, content = skills.read_reference(
+            "stream-a", "demo", rf"refs\{filename}"
+        )
         assert success is True, content
         assert f"原始路径：{filename}" in content
         assert "转义路径：" not in content
-    assert skills.read_reference("stream-a", "demo", r"refs/\.\./outside.md")[0] is False
+    assert (
+        skills.read_reference("stream-a", "demo", r"refs/\.\./outside.md")[0] is False
+    )
 
 
-def test_skill_reference_does_not_fallback_from_existing_unsafe_path(tmp_path: Path) -> None:
+def test_skill_reference_does_not_fallback_from_existing_unsafe_path(
+    tmp_path: Path,
+) -> None:
     """原始路径存在但不是文件时，不能读取另一个转义候选文件。"""
     root = _write_skill(tmp_path)
     (root / "refs").mkdir()
@@ -85,6 +111,7 @@ def test_skill_reference_does_not_fallback_from_existing_unsafe_path(tmp_path: P
 
 
 def test_refresh_rejects_invalid_metadata(tmp_path: Path) -> None:
+    """刷新仅收录具有合法元数据的技能，忽略缺少元数据的目录。"""
     _write_skill(tmp_path, "valid")
     invalid = tmp_path / "invalid"
     invalid.mkdir()
@@ -94,8 +121,11 @@ def test_refresh_rejects_invalid_metadata(tmp_path: Path) -> None:
 
 
 def test_skill_reference_denies_other_stream_and_scripts(tmp_path: Path) -> None:
+    """引用授权不跨聊天流共享，不允许读取脚本，清空授权后也不能继续读取。"""
     root = _write_skill(tmp_path)
-    (root / "run.py").write_text("raise RuntimeError('should not execute')", encoding="utf-8")
+    (root / "run.py").write_text(
+        "raise RuntimeError('should not execute')", encoding="utf-8"
+    )
     skills.refresh_skills([str(tmp_path)])
     skills.read_skill("stream-a", "demo")
     assert skills.read_reference("stream-b", "demo", "guide.md")[0] is False
@@ -105,6 +135,7 @@ def test_skill_reference_denies_other_stream_and_scripts(tmp_path: Path) -> None
 
 
 def test_refresh_clears_old_selection(tmp_path: Path) -> None:
+    """再次刷新技能目录后，旧的聊天流引用授权失效。"""
     _write_skill(tmp_path)
     skills.refresh_skills([str(tmp_path)])
     skills.read_skill("stream-a", "demo")
@@ -113,6 +144,7 @@ def test_refresh_clears_old_selection(tmp_path: Path) -> None:
 
 
 def test_multiline_description_and_optional_triggers(tmp_path: Path) -> None:
+    """目录展示归一化的多行描述和多种触发词格式，但技能私有正文仅按需读取。"""
     root = _write_skill(tmp_path)
     (root / "SKILL.md").write_text(
         "---\nname: demo\ndescription: >\n  汇总文章。\n  在需要阅读长文时使用。\ntriggers:\n  - 文章总结\n  - 阅读助手\n---\n\n# 私有正文\n",
@@ -140,6 +172,7 @@ def test_multiline_description_and_optional_triggers(tmp_path: Path) -> None:
 
 
 def test_multiple_roots_and_duplicate_name_first_wins(tmp_path: Path) -> None:
+    """多根目录扫描保留首次遇到的同名技能，同时收录后续根目录的独有技能。"""
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
@@ -156,6 +189,7 @@ def test_multiple_roots_and_duplicate_name_first_wins(tmp_path: Path) -> None:
 
 
 def test_invalid_metadata_skips_only_invalid_skill(tmp_path: Path) -> None:
+    """元数据类型、语法或安全校验失败只跳过对应技能，合法技能仍被收录。"""
     _write_skill(tmp_path, "valid")
     for name, body in {
         "bad_trigger": "name: bad_trigger\ndescription: 正常\ntriggers: [好, 42]",
@@ -171,7 +205,10 @@ def test_invalid_metadata_skips_only_invalid_skill(tmp_path: Path) -> None:
     assert "valid" in skills.skill_catalog()
 
 
-def test_catalog_budget_does_not_hide_name_lookup(tmp_path: Path, monkeypatch) -> None:
+def test_catalog_budget_does_not_hide_name_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目录展示受字符预算截断时，被隐藏的技能仍可按名称读取。"""
     for index in range(12):
         _write_skill(tmp_path, f"skill{index:02}")
     monkeypatch.setattr(skills, "MAX_CATALOG_CHARS", 235)
@@ -192,14 +229,18 @@ def test_directory_name_resolves_canonical_skill_and_reference(tmp_path: Path) -
     )
     assert skills.refresh_skills([str(tmp_path)]) == 1
     assert "COS后期提示词（目录名：cos-effect-prompt）" in skills.skill_catalog()
-    assert skills.read_reference("stream-a", "cos-effect-prompt", "guide.md")[0] is False
+    assert (
+        skills.read_reference("stream-a", "cos-effect-prompt", "guide.md")[0] is False
+    )
     assert skills.read_skill("stream-a", "cos-effect-prompt")[0] is True
     assert skills.read_reference("stream-a", "cos-effect-prompt", "guide.md")[0] is True
     assert skills.read_reference("stream-a", "COS后期提示词", "guide.md")[0] is True
     assert skills.read_skill("stream-b", "COS后期提示词")[0] is True
     assert skills.read_reference("stream-b", "cos-effect-prompt", "guide.md")[0] is True
     skills.clear_scope("stream-a")
-    assert skills.read_reference("stream-a", "cos-effect-prompt", "guide.md")[0] is False
+    assert (
+        skills.read_reference("stream-a", "cos-effect-prompt", "guide.md")[0] is False
+    )
 
 
 def test_canonical_name_wins_over_directory_alias(tmp_path: Path) -> None:
@@ -298,9 +339,12 @@ def test_description_limit_can_be_configured(tmp_path: Path) -> None:
         f"---\nname: demo\ndescription: >\n  {description}\n---\n正文",
         encoding="utf-8",
     )
-    assert skills.refresh_skills(
-        [str(tmp_path)], max_description_chars=config.skills.max_description_chars
-    ) == 1
+    assert (
+        skills.refresh_skills(
+            [str(tmp_path)], max_description_chars=config.skills.max_description_chars
+        )
+        == 1
+    )
     catalog = skills.skill_catalog()
     assert len(catalog) <= skills.MAX_CATALOG_CHARS
     assert "demo" in catalog
@@ -334,7 +378,7 @@ async def test_plugin_load_uses_configured_description_limit(tmp_path: Path) -> 
 
 
 async def test_owner_refresh_uses_configured_description_limit(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Owner 刷新使用当前配置而非扫描器默认上限。"""
     from ..tooling import skill_command
@@ -358,6 +402,7 @@ async def test_owner_refresh_uses_configured_description_limit(
 
 
 def test_disabled_skill_catalog_and_script_free_surface(tmp_path: Path) -> None:
+    """关闭技能扫描时目录为空，且模块不暴露脚本执行接口。"""
     _write_skill(tmp_path)
     assert skills.refresh_skills([str(tmp_path)], enabled=False) == 0
     assert skills.skill_catalog() == ""

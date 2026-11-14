@@ -21,6 +21,7 @@ class _ExpandedTool:
 
 
 async def test_expansion_is_scoped_by_stream() -> None:
+    """探索展开结果仅应进入当前流，不应污染其他流的工具目录。"""
     set_stream_catalog(
         "stream_a",
         {"platform": ["get_info"]},
@@ -33,7 +34,9 @@ async def test_expansion_is_scoped_by_stream() -> None:
     )
 
     tool = ExploreToolsTool(_FakePlugin())
-    tool._bind_runtime_context(stream_id="stream_a", message=SimpleNamespace(stream_id="stream_a"))
+    tool._bind_runtime_context(
+        stream_id="stream_a", message=SimpleNamespace(stream_id="stream_a")
+    )
 
     success, text = await tool.execute("platform")
 
@@ -47,7 +50,10 @@ async def test_expansion_is_scoped_by_stream() -> None:
 
 
 async def test_listing_categories_does_not_expand() -> None:
-    set_stream_catalog("stream", {"platform": ["get_info"]}, {"platform": [_ExpandedTool]})
+    """仅列出分类时应返回分类名称，但不得产生待注册的工具展开结果。"""
+    set_stream_catalog(
+        "stream", {"platform": ["get_info"]}, {"platform": [_ExpandedTool]}
+    )
     tool = ExploreToolsTool(_FakePlugin())
     tool._bind_runtime_context(stream_id="stream")
 

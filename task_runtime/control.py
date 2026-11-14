@@ -113,7 +113,9 @@ def classify_task_message(text: str, task_id: str | None = None) -> TaskMessage:
     # 序号由 match_task_ref 解析
     import re
 
-    if re.fullmatch(r"(?:取消|停止|终止|放弃|暂停|继续|恢复)任务\d+号?", _normalize(normalized)):
+    if re.fullmatch(
+        r"(?:取消|停止|终止|放弃|暂停|继续|恢复)任务\d+号?", _normalize(normalized)
+    ):
         verb = _normalize(normalized)[0:2]
         command = {
             "取消": "cancel",
@@ -193,9 +195,7 @@ def match_task_ref(text: str, tasks: list[TaskRuntime]) -> TaskRuntime | None:
     ordinal = re.fullmatch(r"(?:#(\d+))|(?:(\d+)号)|(?:任务(\d+))", token)
     if ordinal is not None:
         raw = next((group for group in ordinal.groups() if group), None)
-    elif re.fullmatch(
-        r"(?:取消|停止|终止|放弃|暂停|继续|恢复)任务\d+号?", normalized
-    ):
+    elif re.fullmatch(r"(?:取消|停止|终止|放弃|暂停|继续|恢复)任务\d+号?", normalized):
         # 控制动词 + 序号（如“取消任务2”）：检索内嵌的 任务N 引用
         embedded = re.search(r"任务(\d+)", normalized)
         raw = embedded.group(1) if embedded else None
@@ -206,9 +206,7 @@ def match_task_ref(text: str, tasks: list[TaskRuntime]) -> TaskRuntime | None:
         return None
     if len(token) >= 6:
         candidates = [
-            runtime
-            for runtime in tasks
-            if runtime.state.task_id.startswith(token)
+            runtime for runtime in tasks if runtime.state.task_id.startswith(token)
         ]
         if len(candidates) == 1:
             return candidates[0]

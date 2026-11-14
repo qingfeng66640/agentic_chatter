@@ -36,7 +36,9 @@ def set_stream_catalog(
     if not key:
         return
     with _lock:
-        _categories_by_stream[key] = {name: list(items) for name, items in categories.items()}
+        _categories_by_stream[key] = {
+            name: list(items) for name, items in categories.items()
+        }
         _classes_by_stream[key] = {name: list(items) for name, items in classes.items()}
         _pending_by_stream.pop(key, None)
 
@@ -55,7 +57,9 @@ def consume_expansion(stream_id: str) -> list[type]:
         category = _pending_by_stream.pop(key, None)
         if not category:
             return []
-        return list(_classes_by_stream.get(key, {}).get(category, []))[:MAX_EXPANDED_TOOLS]
+        return list(_classes_by_stream.get(key, {}).get(category, []))[
+            :MAX_EXPANDED_TOOLS
+        ]
 
 
 def clear_stream_catalog(stream_id: str) -> None:
@@ -74,12 +78,16 @@ def clear_stream_catalog(stream_id: str) -> None:
 class ExploreToolsTool(BaseTool):
     """展开被折叠的工具分类。"""
 
-    tool_name = "explore_tools"
-    tool_description = (
+    name = "explore_tools"
+    description = (
         "按类别展开当前未加载的工具。需要群管理、用户资料、特殊消息等能力，"
         "但当前列表没有合适工具时调用。不传类别会列出目录；指定类别后，"
         "该类别的工具会在下一步变为可调用。"
     )
+
+    # 新代码使用统一属性，同时保留历史字段读取兼容性。
+    tool_name = name
+    tool_description = description
 
     async def execute(
         self,
@@ -113,7 +121,10 @@ class ExploreToolsTool(BaseTool):
             None,
         )
         if matched_name is None:
-            return False, f"没有类别「{target}」。可用类别：{'、'.join(sorted(categories))}。"
+            return (
+                False,
+                f"没有类别「{target}」。可用类别：{'、'.join(sorted(categories))}。",
+            )
 
         names = categories[matched_name][:MAX_EXPANDED_TOOLS]
         with _lock:

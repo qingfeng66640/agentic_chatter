@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.kernel.llm import LLMPayload, ROLE, Text
+from src.kernel.llm import ROLE, LLMPayload, Text
 from src.kernel.scheduler import TriggerType, get_unified_scheduler
 
 from .task_runtime.schedule import (
@@ -85,14 +85,17 @@ def _make_submitter(plugin: Any) -> Any:
         from .chatter import AgenticChatter
         from .task_runtime import TaskRequest
         from .task_runtime.coordinator import start_task
-        from .task_runtime.runtime import get_task_runtime_manager
         from .task_runtime.models import TaskType
+        from .task_runtime.runtime import get_task_runtime_manager
 
         manager = get_task_runtime_manager()
         tasks_config = getattr(plugin, "config", None)
         cap = max(
             1,
-            int(getattr(getattr(tasks_config, "tasks", None), "max_concurrent_tasks", 2) or 2),
+            int(
+                getattr(getattr(tasks_config, "tasks", None), "max_concurrent_tasks", 2)
+                or 2
+            ),
         )
         if len(manager.get_active_tasks(stream_id)) >= cap:
             logger.warning(f"定时任务触发被跳过：该聊天流活动任务数已达上限（{cap}）")
@@ -112,9 +115,7 @@ def _make_submitter(plugin: Any) -> Any:
         # 固定线程模式：把此前运行记录作为初始上下文注入本次执行
         initial_context: tuple[LLMPayload, ...] = ()
         if context:
-            initial_context = (
-                LLMPayload(ROLE.USER, Text(context)),
-            )
+            initial_context = (LLMPayload(ROLE.USER, Text(context)),)
 
         chatter = AgenticChatter(stream_id, plugin)
         start_task(
@@ -122,7 +123,10 @@ def _make_submitter(plugin: Any) -> Any:
             runtime,
             TaskRequest(
                 objective=prompt,
-                metadata={"cron_id": cron_id, "cron_name": str(record.get("cron_name", ""))},
+                metadata={
+                    "cron_id": cron_id,
+                    "cron_name": str(record.get("cron_name", "")),
+                },
                 initial_context=initial_context,
                 report_events=True,
             ),

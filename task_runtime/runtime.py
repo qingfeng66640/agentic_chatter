@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .models import TaskBudget, TaskCheckpoint, TaskResult, TaskState, TaskStatus, TaskType
+from .models import (
+    TaskBudget,
+    TaskCheckpoint,
+    TaskResult,
+    TaskState,
+    TaskStatus,
+    TaskType,
+)
 from .policy import ToolPermission, ToolPolicy
 from .templates import TaskTemplateRegistry, get_task_templates
 
@@ -48,7 +55,11 @@ class TaskRuntime:
         if self.state.status == TaskStatus.CREATED:
             self.state.transition(TaskStatus.PLANNING)
             self.state.transition(TaskStatus.RUNNING)
-        elif self.state.status in (TaskStatus.PAUSED, TaskStatus.WAITING_USER, TaskStatus.FAILED):
+        elif self.state.status in (
+            TaskStatus.PAUSED,
+            TaskStatus.WAITING_USER,
+            TaskStatus.FAILED,
+        ):
             self.state.transition(TaskStatus.RUNNING)
         else:
             raise ValueError(f"任务当前不可启动：{self.state.status}")
@@ -73,7 +84,9 @@ class TaskRuntime:
         self.state.error = reason
         return self.finish(TaskStatus.PAUSED, reason, error=reason)
 
-    def check_tool(self, name: str, signature: str, policy: ToolPolicy | None = None) -> ToolPermission:
+    def check_tool(
+        self, name: str, signature: str, policy: ToolPolicy | None = None
+    ) -> ToolPermission:
         """在执行入口检查固化权限和重复预算。"""
         permission = self.policy.permission(name)
         if permission == ToolPermission.ALLOW and policy is not None:
@@ -97,7 +110,9 @@ class TaskRuntime:
     def record_iteration(self, progressed: bool) -> TaskResult | None:
         """记录迭代及进展。"""
         self.state.iterations += 1
-        self.state.no_progress_steps = 0 if progressed else self.state.no_progress_steps + 1
+        self.state.no_progress_steps = (
+            0 if progressed else self.state.no_progress_steps + 1
+        )
         self.state.touch()
         return self.check_budget()
 
@@ -107,12 +122,16 @@ class TaskRuntime:
         self.state.touch()
         return self.check_budget()
 
-    def checkpoint(self, step_id: str, summary: str = "", artifacts: tuple[str, ...] = ()) -> None:
+    def checkpoint(
+        self, step_id: str, summary: str = "", artifacts: tuple[str, ...] = ()
+    ) -> None:
         """保存步骤边界的内存检查点。"""
         self.state.current_step = step_id
         if step_id not in self.state.completed_steps:
             self.state.completed_steps.append(step_id)
-        checkpoint = TaskCheckpoint(self.state.task_id, step_id, "completed", summary, artifacts)
+        checkpoint = TaskCheckpoint(
+            self.state.task_id, step_id, "completed", summary, artifacts
+        )
         self.state.checkpoints.append(checkpoint)
         self.state.last_result_summary = summary
         self.state.metadata["checkpoint_step"] = step_id
@@ -191,7 +210,11 @@ class TaskRuntime:
 
     def resume(self) -> None:
         """恢复任务并清除旧终态结果。"""
-        if self.state.status not in (TaskStatus.PAUSED, TaskStatus.WAITING_USER, TaskStatus.FAILED):
+        if self.state.status not in (
+            TaskStatus.PAUSED,
+            TaskStatus.WAITING_USER,
+            TaskStatus.FAILED,
+        ):
             raise ValueError(f"任务当前不可恢复：{self.state.status}")
         self.state.result = None
         self.state.error = ""
@@ -276,9 +299,7 @@ class TaskRuntimeManager:
         """为聊天流创建活动任务，超过并发上限时拒绝。"""
         active_tasks = self.get_active_tasks(stream_id)
         if len(active_tasks) >= self._max_concurrent:
-            occupied = "、".join(
-                task.state.task_id[:8] for task in active_tasks
-            )
+            occupied = "、".join(task.state.task_id[:8] for task in active_tasks)
             raise ValueError(
                 f"聊天流任务数已达上限（{self._max_concurrent}）：{occupied}，"
                 "可先取消或等待完成"

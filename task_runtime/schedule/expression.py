@@ -36,11 +36,27 @@ _FIELD_RANGES: tuple[tuple[int, int], ...] = (
 )
 
 _MONTH_ALIASES = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
 }
 _DOW_ALIASES = {
-    "sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6,
+    "sun": 0,
+    "mon": 1,
+    "tue": 2,
+    "wed": 3,
+    "thu": 4,
+    "fri": 5,
+    "sat": 6,
 }
 
 
@@ -180,7 +196,7 @@ class CronExpression:
         Returns:
             datetime | None: 下一个匹配时刻；四年内无匹配时返回 None。
         """
-        cursor = (moment.replace(second=0, microsecond=0) + timedelta(minutes=1))
+        cursor = moment.replace(second=0, microsecond=0) + timedelta(minutes=1)
         limit = moment + timedelta(days=366 * 4)
         while cursor <= limit:
             if cursor.month not in self.months:
@@ -214,7 +230,9 @@ class CronExpression:
 
 def _advance_month(moment: datetime) -> datetime:
     """跳到下一个月同一时刻的零点。"""
-    year, month = (moment.year + 1, 1) if moment.month == 12 else (moment.year, moment.month + 1)
+    year, month = (
+        (moment.year + 1, 1) if moment.month == 12 else (moment.year, moment.month + 1)
+    )
     return moment.replace(year=year, month=month, day=1, hour=0, minute=0)
 
 
@@ -365,7 +383,9 @@ class Schedule:
         local_moment = moment.astimezone(tzinfo) if tzinfo else moment
         if _croniter is not None:
             following = _croniter(self.cron_expression, local_moment).get_next(datetime)
-            return following.astimezone(moment.tzinfo) if following.tzinfo else following
+            return (
+                following.astimezone(moment.tzinfo) if following.tzinfo else following
+            )
         return parse_cron(self.cron_expression).next_after(local_moment)
 
 
@@ -407,7 +427,11 @@ def parse_schedule(
         # 提前校验时区，避免创建成功后才在调度时报错
         _resolve_timezone(timezone_name)
         parse_cron(str(schedule).strip())
-        parsed = Schedule(kind="cron", cron_expression=str(schedule).strip(), timezone_name=str(timezone_name or "").strip())
+        parsed = Schedule(
+            kind="cron",
+            cron_expression=str(schedule).strip(),
+            timezone_name=str(timezone_name or "").strip(),
+        )
         return parsed, parsed.next_after(moment)
 
     if provided_name == "after":

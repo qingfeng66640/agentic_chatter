@@ -16,7 +16,7 @@ from ..actions.say import SayAction
 
 def test_say_action_description_limits_use_to_quote_or_mention() -> None:
     """工具 schema 必须说明 action-say 的特殊能力和必填目标。"""
-    description = SayAction.action_description
+    description = SayAction.description
 
     assert "引用回复某条消息" in description
     assert "@ 某个人" in description
@@ -38,6 +38,7 @@ TEXT = "qf阁下？蝶在的，怎么了？"
 
 
 def _group_action() -> SayAction:
+    """构造带一条群消息历史的 SayAction，提供发送所需的群聊上下文。"""
     stream = ChatStream(
         "stream-group",
         platform="qq",
@@ -61,7 +62,7 @@ def _group_action() -> SayAction:
 
 
 async def test_group_at_sends_structured_message_and_preserves_target(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """群聊 @ 必须通过 Message.extra 传递，而非拼接进正文。"""
     sent: list[Message] = []
@@ -97,7 +98,9 @@ async def test_group_at_sends_structured_message_and_preserves_target(
     ]
 
 
-async def test_action_requires_target_parameters(monkeypatch) -> None:
+async def test_action_requires_target_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """调用时省略模式或目标 ID 必须在参数绑定阶段失败。"""
     send_text = AsyncMock()
     monkeypatch.setattr(say_module.send_api, "send_text", send_text)
@@ -108,7 +111,9 @@ async def test_action_requires_target_parameters(monkeypatch) -> None:
     send_text.assert_not_awaited()
 
 
-async def test_empty_target_id_fails_without_sending(monkeypatch) -> None:
+async def test_empty_target_id_fails_without_sending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """空白目标不能绕过必填目标约束。"""
     send_text = AsyncMock()
     send_message = AsyncMock()
@@ -125,7 +130,9 @@ async def test_empty_target_id_fails_without_sending(monkeypatch) -> None:
     send_message.assert_not_awaited()
 
 
-async def test_invalid_target_type_fails_without_sending(monkeypatch) -> None:
+async def test_invalid_target_type_fails_without_sending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """未知发送模式必须失败且不触发发送 API。"""
     send_text = AsyncMock()
     send_message = AsyncMock()
@@ -133,7 +140,9 @@ async def test_invalid_target_type_fails_without_sending(monkeypatch) -> None:
     monkeypatch.setattr(say_module.send_api, "send_message", send_message)
 
     ok, detail = await _group_action().execute(
-        TEXT, target_type="plain", target_id="target-1"  # type: ignore[arg-type]
+        TEXT,
+        target_type="plain",
+        target_id="target-1",  # type: ignore[arg-type]
     )
 
     assert not ok
@@ -142,7 +151,9 @@ async def test_invalid_target_type_fails_without_sending(monkeypatch) -> None:
     send_message.assert_not_awaited()
 
 
-async def test_private_at_fails_without_leaking_target(monkeypatch) -> None:
+async def test_private_at_fails_without_leaking_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """私聊不能发送结构化 mention，也不能泄露目标 ID。"""
     stream = ChatStream("stream-private", platform="qq", chat_type="private")
     action = SayAction(chat_stream=stream, plugin=object())
@@ -151,9 +162,7 @@ async def test_private_at_fails_without_leaking_target(monkeypatch) -> None:
     monkeypatch.setattr(say_module.send_api, "send_text", send_text)
     monkeypatch.setattr(say_module.send_api, "send_message", send_message)
 
-    ok, detail = await action.execute(
-        TEXT, target_type="mention", target_id=OPENID
-    )
+    ok, detail = await action.execute(TEXT, target_type="mention", target_id=OPENID)
 
     assert not ok
     assert "群聊" in detail
@@ -162,7 +171,9 @@ async def test_private_at_fails_without_leaking_target(monkeypatch) -> None:
     send_message.assert_not_awaited()
 
 
-async def test_reply_mode_uses_required_message_id(monkeypatch) -> None:
+async def test_reply_mode_uses_required_message_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """引用模式必须将目标消息 ID 传入 reply_to。"""
     send_text = AsyncMock(return_value=True)
     monkeypatch.setattr(say_module.send_api, "send_text", send_text)
@@ -177,10 +188,16 @@ async def test_reply_mode_uses_required_message_id(monkeypatch) -> None:
     )
 
 
-async def test_send_failures_keep_existing_result_semantics(monkeypatch) -> None:
+async def test_send_failures_keep_existing_result_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """mention 发送失败或异常应保留失败语义。"""
-    monkeypatch.setattr(say_module, "get_bot_info_by_platform", AsyncMock(return_value={}))
-    monkeypatch.setattr(say_module.send_api, "send_message", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        say_module, "get_bot_info_by_platform", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        say_module.send_api, "send_message", AsyncMock(return_value=False)
+    )
     ok, detail = await _group_action().execute(
         TEXT, target_type="mention", target_id=OPENID
     )

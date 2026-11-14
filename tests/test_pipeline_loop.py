@@ -8,16 +8,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import ANY, AsyncMock, Mock
 
-from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall, ToolResult
+from src.kernel.llm import ROLE, LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.context_structure import validate_payload_sequence
 
-from ..actions.control import MAX_STOP_MINUTES
 from .. import chatter as chatter_module
+from ..actions.control import MAX_STOP_MINUTES
 from ..chatter import AgenticChatter, _thought_log_line
-from ..pipeline.mailbox import StreamMailbox
 from ..pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -32,6 +31,7 @@ from ..pipeline.loop import (
     reply_similarity,
     should_continue_loop,
 )
+from ..pipeline.mailbox import StreamMailbox
 from ..pipeline.stages import (
     STAGE_ACT,
     STAGE_PERCEIVE,
@@ -40,6 +40,12 @@ from ..pipeline.stages import (
     resolve_stage_order,
 )
 from ..pipeline.state import LoopDecision, TerminationReason, TurnState
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from pathlib import Path
+
+    import pytest
 
 
 @dataclass
@@ -62,6 +68,7 @@ class _FakeHumanize:
 
 
 def test_thought_log_line_is_single_line_and_bounded() -> None:
+    """思考日志应移除换行和制表符，并截断为带省略号的单行。"""
     line = _thought_log_line("stream", "reasoning_content", "a\n\t" + "长" * 500)
 
     assert "\n" not in line
@@ -70,11 +77,14 @@ def test_thought_log_line_is_single_line_and_bounded() -> None:
     assert line.endswith("…")
 
 
-async def test_deliver_message_logs_structured_and_removed_thoughts(monkeypatch) -> None:
+async def test_deliver_message_logs_structured_and_removed_thoughts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """主 Agent 应在 INFO 中记录结构化和正文清洗思考。"""
     sent: list[str] = []
 
     async def send_text(*, content: str, stream_id: str) -> bool:
+        """收集发出的可见正文，并根据流标识返回发送结果。"""
         sent.append(content)
         return bool(stream_id)
 
@@ -99,14 +109,13 @@ async def test_deliver_message_logs_structured_and_removed_thoughts(monkeypatch)
     logs = [str(call.args[0]) for call in info.call_args_list]
     assert len(logs) == 2
     assert any("来源=推理内容" in line and "结构化 推理" in line for line in logs)
-    assert any(
-        "来源=移除的消息块" in line and "正文里的思考" in line
-        for line in logs
-    )
+    assert any("来源=移除的消息块" in line and "正文里的思考" in line for line in logs)
     assert all("\n" not in line and len(line) <= 300 for line in logs)
 
 
-async def test_deliver_message_does_not_log_thought_only_output(monkeypatch) -> None:
+async def test_deliver_message_does_not_log_thought_only_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """只有思考而无可见回复时不得发送或记录 INFO。"""
     send_text = AsyncMock(return_value=True)
     info = Mock()
@@ -128,7 +137,9 @@ async def test_deliver_message_does_not_log_thought_only_output(monkeypatch) -> 
     info.assert_not_called()
 
 
-async def test_deliver_message_intercepts_provider_error_text(monkeypatch) -> None:
+async def test_deliver_message_intercepts_provider_error_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """供应商审核错误正文不得进入发送 API。"""
     send_text = AsyncMock(return_value=True)
     warning = Mock()
@@ -161,7 +172,10 @@ async def test_deliver_message_intercepts_provider_error_text(monkeypatch) -> No
     assert state.visible_text_emissions == 0
 
 
-async def test_deliver_message_intercepts_gemini_filter_text(monkeypatch) -> None:
+async def test_deliver_message_intercepts_gemini_filter_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini 过滤提示不得发送，也不得将回合标记为已发言。"""
     send_text = AsyncMock(return_value=True)
     monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
     chatter = AgenticChatter(stream_id="gemini-filter", plugin=object())
@@ -181,18 +195,24 @@ async def test_deliver_message_intercepts_gemini_filter_text(monkeypatch) -> Non
 
 
 async def test_deliver_message_provider_error_recording_is_disabled_by_default(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """未开启诊断开关时不得序列化或写入请求体。"""
     send_text = AsyncMock(return_value=True)
     build_record = Mock()
     append_record = AsyncMock()
     monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
-    monkeypatch.setattr(chatter_module, "build_provider_error_request_record", build_record)
-    monkeypatch.setattr(chatter_module, "append_provider_error_request_record", append_record)
+    monkeypatch.setattr(
+        chatter_module, "build_provider_error_request_record", build_record
+    )
+    monkeypatch.setattr(
+        chatter_module, "append_provider_error_request_record", append_record
+    )
     chatter = AgenticChatter(stream_id="provider-error-off", plugin=object())
     state = TurnState(stream_id="provider-error-off")
-    config = SimpleNamespace(tools=SimpleNamespace(record_provider_error_request_body=False))
+    config = SimpleNamespace(
+        tools=SimpleNamespace(record_provider_error_request_body=False)
+    )
     visible_text = (
         "The prompt could not be submitted. The prompt contains sensitive words "
         "that violate Google's [Generative AI Prohibited Use Policy]."
@@ -210,18 +230,26 @@ async def test_deliver_message_provider_error_recording_is_disabled_by_default(
     append_record.assert_not_awaited()
 
 
-async def test_deliver_message_records_provider_error_request_body(monkeypatch) -> None:
+async def test_deliver_message_records_provider_error_request_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """开启诊断开关时记录响应中的 payload 快照。"""
     build_record = Mock(return_value={"payload_count": 1, "truncated": False})
     append_record = AsyncMock(return_value="data/provider-error.jsonl")
     info = Mock()
-    monkeypatch.setattr(chatter_module, "build_provider_error_request_record", build_record)
-    monkeypatch.setattr(chatter_module, "append_provider_error_request_record", append_record)
+    monkeypatch.setattr(
+        chatter_module, "build_provider_error_request_record", build_record
+    )
+    monkeypatch.setattr(
+        chatter_module, "append_provider_error_request_record", append_record
+    )
     monkeypatch.setattr(chatter_module.logger, "info", info)
     chatter = AgenticChatter(stream_id="provider-error-on", plugin=object())
     state = TurnState(stream_id="provider-error-on")
     payloads = ["payload"]
-    config = SimpleNamespace(tools=SimpleNamespace(record_provider_error_request_body=True))
+    config = SimpleNamespace(
+        tools=SimpleNamespace(record_provider_error_request_body=True)
+    )
     visible_text = (
         "The prompt could not be submitted. The prompt contains sensitive words "
         "that violate Google's [Generative AI Prohibited Use Policy]."
@@ -236,11 +264,14 @@ async def test_deliver_message_records_provider_error_request_body(monkeypatch) 
     assert build_record.call_args.kwargs["rule"] == "google_prompt_policy_block"
     assert build_record.call_args.kwargs["stream_id"] == "provider-error-on"
     append_record.assert_awaited_once_with(build_record.return_value)
-    assert any("事件=供应商异常请求体已记录" in str(call.args[0]) for call in info.call_args_list)
+    assert any(
+        "事件=供应商异常请求体已记录" in str(call.args[0])
+        for call in info.call_args_list
+    )
 
 
 async def test_deliver_message_provider_error_recording_failure_still_intercepts(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """请求体记录失败时仍不得发送供应商异常正文。"""
     send_text = AsyncMock(return_value=True)
@@ -254,7 +285,9 @@ async def test_deliver_message_provider_error_recording_failure_still_intercepts
     monkeypatch.setattr(chatter_module.logger, "warning", warning)
     chatter = AgenticChatter(stream_id="provider-error-fail", plugin=object())
     state = TurnState(stream_id="provider-error-fail")
-    config = SimpleNamespace(tools=SimpleNamespace(record_provider_error_request_body=True))
+    config = SimpleNamespace(
+        tools=SimpleNamespace(record_provider_error_request_body=True)
+    )
     visible_text = (
         "The prompt could not be submitted. The prompt contains sensitive words "
         "that violate Google's [Generative AI Prohibited Use Policy]."
@@ -268,10 +301,15 @@ async def test_deliver_message_provider_error_recording_failure_still_intercepts
 
     assert result == (False, False)
     send_text.assert_not_awaited()
-    assert any("事件=供应商异常请求体记录失败" in str(call.args[0]) for call in warning.call_args_list)
+    assert any(
+        "事件=供应商异常请求体记录失败" in str(call.args[0])
+        for call in warning.call_args_list
+    )
 
 
-async def test_deliver_message_allows_provider_error_discussion(monkeypatch) -> None:
+async def test_deliver_message_allows_provider_error_discussion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """正常讨论供应商错误的回复不应被误拦截。"""
     send_text = AsyncMock(return_value=True)
     monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
@@ -291,7 +329,9 @@ async def test_deliver_message_allows_provider_error_discussion(monkeypatch) -> 
     )
 
 
-async def test_deliver_message_intercepts_reply_decision_json(monkeypatch) -> None:
+async def test_deliver_message_intercepts_reply_decision_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """子决策 JSON 被主 Agent 输出时不得进入发送 API。"""
     send_text = AsyncMock(return_value=True)
     warning = Mock()
@@ -324,7 +364,9 @@ async def test_deliver_message_intercepts_reply_decision_json(monkeypatch) -> No
     assert state.visible_text_emissions == 0
 
 
-async def test_deliver_message_allows_normal_decision_json_discussion(monkeypatch) -> None:
+async def test_deliver_message_allows_normal_decision_json_discussion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """普通讨论决策 JSON 的正文不得被过度拦截。"""
     send_text = AsyncMock(return_value=True)
     monkeypatch.setattr(chatter_module.send_api, "send_text", send_text)
@@ -344,7 +386,9 @@ async def test_deliver_message_allows_normal_decision_json_discussion(monkeypatc
     )
 
 
-async def test_deliver_message_intercepts_complete_framework_message_line(monkeypatch) -> None:
+async def test_deliver_message_intercepts_complete_framework_message_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """模型完整复述框架消息行时不得再次发送给用户。"""
     send_text = AsyncMock(return_value=True)
     warning = Mock()
@@ -371,7 +415,9 @@ async def test_deliver_message_intercepts_complete_framework_message_line(monkey
     assert state.visible_text_emissions == 0
 
 
-async def test_deliver_message_allows_normal_text_with_framework_keywords(monkeypatch) -> None:
+async def test_deliver_message_allows_normal_text_with_framework_keywords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """普通正文包含相似关键词时仍应正常发送。"""
     send_text = AsyncMock(return_value=True)
     text = "机器人刚才的回答让我很开心。"
@@ -440,6 +486,7 @@ def test_base_loop_does_not_stop_only_because_state_spoke() -> None:
 
 
 def test_loop_stops_on_end_turn() -> None:
+    """已有结束回合决策时，基础循环不再继续。"""
     state = TurnState(
         stream_id="s",
         termination=LoopDecision(
@@ -450,6 +497,7 @@ def test_loop_stops_on_end_turn() -> None:
 
 
 def test_loop_stops_on_stop_request() -> None:
+    """已有停止会话决策时，基础循环不再继续。"""
     state = TurnState(
         stream_id="s",
         termination=LoopDecision(
@@ -460,11 +508,13 @@ def test_loop_stops_on_stop_request() -> None:
 
 
 def test_loop_stops_at_max_iterations() -> None:
+    """迭代次数达到配置上限时应停止循环。"""
     state = TurnState(stream_id="s", iterations=6)
     assert not should_continue_loop(state, max_iterations=6)
 
 
 def test_loop_unlimited_when_max_is_zero() -> None:
+    """迭代上限为零时，即使已执行多轮也不因次数终止。"""
     state = TurnState(stream_id="s", iterations=999)
     assert should_continue_loop(state, max_iterations=0)
 
@@ -475,6 +525,7 @@ def test_loop_unlimited_when_max_is_zero() -> None:
 
 
 def test_classify_separates_control_calls() -> None:
+    """结束回合调用应从普通工具中移除，并提取等待秒数。"""
     calls = [
         _FakeCall("tool-search", {"q": "天气"}),
         _FakeCall("action-end_turn", {"seconds": 30}),
@@ -488,6 +539,7 @@ def test_classify_separates_control_calls() -> None:
 
 
 def test_classify_handles_stop_call() -> None:
+    """停止会话调用应单独提取冷却分钟数，不留下普通调用。"""
     normal, end_seconds, stop_minutes = classify_calls(
         [_FakeCall("action-stop_conversation", {"minutes": 10})]
     )
@@ -498,7 +550,10 @@ def test_classify_handles_stop_call() -> None:
 
 
 def test_classify_uses_defaults_on_bad_args() -> None:
-    _, end_seconds, _ = classify_calls([_FakeCall("action-end_turn", {"seconds": "bad"})])
+    """无法转换的控制参数应分别采用零秒等待和五分钟冷却。"""
+    _, end_seconds, _ = classify_calls(
+        [_FakeCall("action-end_turn", {"seconds": "bad"})]
+    )
     assert end_seconds == 0.0
 
     _, _, stop_minutes = classify_calls(
@@ -508,6 +563,7 @@ def test_classify_uses_defaults_on_bad_args() -> None:
 
 
 def test_classify_clamps_stop_minutes() -> None:
+    """停止会话的冷却时长不得超过允许的最大分钟数。"""
     _, _, stop_minutes = classify_calls(
         [_FakeCall("action-stop_conversation", {"minutes": 99999})]
     )
@@ -515,6 +571,7 @@ def test_classify_clamps_stop_minutes() -> None:
 
 
 def test_classify_handles_empty_input() -> None:
+    """空调用列表应得到空普通调用列表和未设置的控制时长。"""
     assert classify_calls([]) == ([], None, None)
 
 
@@ -524,29 +581,35 @@ def test_classify_handles_empty_input() -> None:
 
 
 def test_build_speak_segments_from_message() -> None:
+    """正常正文应生成至少一个分段，且每段文本均非空。"""
     segments = build_speak_segments("你好呀。今天怎么样？", _FakeHumanize())
     assert segments
     assert all(segment.text for segment in segments)
 
 
 def test_build_speak_segments_empty_message() -> None:
+    """空字符串和缺失正文都不应产生发送分段。"""
     assert build_speak_segments("", _FakeHumanize()) == []
     assert build_speak_segments(None, _FakeHumanize()) == []
 
 
 def test_build_speak_segments_without_config() -> None:
+    """未提供拟人化配置时，正文应保留为单个发送分段。"""
     segments = build_speak_segments("你好", None)
     assert len(segments) == 1
 
 
 async def test_deliver_segments_sends_all() -> None:
+    """所有分段发送成功时，返回计数应与实际发送段数一致。"""
     sent: list[str] = []
 
     async def speak(text: str) -> bool:
+        """收集每个发送分段并模拟发送成功。"""
         sent.append(text)
         return True
 
     async def no_sleep(_seconds: float) -> None:
+        """忽略输入延时，避免分段发送测试实际等待。"""
         return None
 
     segments = build_speak_segments("第一句。第二句。", _FakeHumanize())
@@ -557,10 +620,14 @@ async def test_deliver_segments_sends_all() -> None:
 
 
 async def test_deliver_segments_counts_only_successes() -> None:
+    """发送回调失败的分段不得计入成功数量。"""
+
     async def failing_speak(_text: str) -> bool:
+        """模拟正文发送失败，使成功计数保持为零。"""
         return False
 
     async def no_sleep(_seconds: float) -> None:
+        """忽略分段延时，使失败计数验证无需实际等待。"""
         return None
 
     segments = build_speak_segments("一句话", _FakeHumanize())
@@ -568,7 +635,10 @@ async def test_deliver_segments_counts_only_successes() -> None:
 
 
 async def test_deliver_empty_segments() -> None:
+    """空分段列表的发送成功数量应为零。"""
+
     async def speak(_text: str) -> bool:
+        """为发送接口提供固定成功结果，不引入外部发送行为。"""
         return True
 
     assert await deliver_segments([], speak) == 0
@@ -580,6 +650,7 @@ async def test_deliver_empty_segments() -> None:
 
 
 def test_resolve_stage_order_filters_disabled() -> None:
+    """阶段编排应过滤被关闭的感知阶段并保留行动与反思。"""
     order = resolve_stage_order(
         [STAGE_PERCEIVE, STAGE_ACT, STAGE_REFLECT],
         enable_perceive=False,
@@ -604,6 +675,7 @@ def test_resolve_stage_order_always_includes_act() -> None:
 
 
 def test_resolve_stage_order_preserves_custom_order() -> None:
+    """自定义阶段顺序中，规划应继续排在感知之前。"""
     order = resolve_stage_order(
         [STAGE_PLAN, STAGE_PERCEIVE, STAGE_ACT],
         enable_perceive=True,
@@ -615,6 +687,7 @@ def test_resolve_stage_order_preserves_custom_order() -> None:
 
 
 def test_resolve_stage_order_dedupes() -> None:
+    """重复配置的行动阶段只应保留一次。"""
     order = resolve_stage_order(
         [STAGE_ACT, STAGE_ACT, STAGE_ACT],
         enable_perceive=False,
@@ -626,6 +699,7 @@ def test_resolve_stage_order_dedupes() -> None:
 
 
 def test_resolve_stage_order_keeps_custom_stage_names() -> None:
+    """未知的自定义阶段名称不应被内置阶段过滤规则丢弃。"""
     order = resolve_stage_order(
         ["my_custom_stage", STAGE_ACT],
         enable_perceive=False,
@@ -642,12 +716,14 @@ def test_resolve_stage_order_keeps_custom_stage_names() -> None:
 
 
 def test_outcome_defaults_to_wait() -> None:
+    """默认回合结果应等待后续输入，而不是停止会话。"""
     outcome = TurnState(stream_id="s").to_outcome()
     assert outcome.should_wait
     assert not outcome.should_stop
 
 
 def test_outcome_reflects_stop_request() -> None:
+    """停止会话决策应转换为带原冷却秒数的停止结果。"""
     state = TurnState(
         stream_id="s",
         termination=LoopDecision(
@@ -663,6 +739,7 @@ def test_outcome_reflects_stop_request() -> None:
 
 
 def test_outcome_carries_wait_seconds() -> None:
+    """结束回合决策中的等待秒数应传递给回合结果。"""
     state = TurnState(
         stream_id="s",
         termination=LoopDecision(
@@ -685,6 +762,14 @@ class _PayloadResponse:
         delayed: bool = False,
         delayed_message: str = "",
     ) -> None:
+        """准备立即可用或延迟消费后可用的响应内容。
+
+        Args:
+            payloads: 接收后续上下文追加的原始载荷列表。
+            calls: 立即暴露或等待消费后暴露的工具调用。
+            delayed: 是否推迟填充正文和工具调用。
+            delayed_message: 延迟消费时填入的正文。
+        """
         self.payloads = payloads
         self._pending_calls = calls if delayed else []
         self._pending_message = delayed_message if delayed else ""
@@ -693,15 +778,27 @@ class _PayloadResponse:
         self.consumed = False
 
     def add_payload(self, payload: LLMPayload) -> None:
+        """将新增载荷追加到共享上下文列表，供结果捕获和校验使用。"""
         self.payloads.append(payload)
 
-    def __await__(self):
+    def __await__(self) -> Generator[Any, None, str]:
+        """提供消费入口，使等待响应时填充延迟内容。
+
+        Returns:
+            Generator[Any, None, str]: 消费协程的等待迭代器，最终返回正文。
+        """
+
         async def consume() -> str:
+            """标记响应已消费，并把延迟正文和工具调用补入助手载荷。
+
+            Returns:
+                str: 已填充的正文；没有正文时返回空字符串。
+            """
             self.consumed = True
             if self._pending_calls or self._pending_message:
                 self.call_list = self._pending_calls
                 self.message = self._pending_message
-                content: list[Any] = []
+                content: list[Text | ToolCall] = []
                 if self.message:
                     content.append(Text(self.message))
                 content.extend(self.call_list)
@@ -717,13 +814,23 @@ class _RequestReturningResponse:
     """返回预设响应的假请求。"""
 
     def __init__(self, response: _PayloadResponse) -> None:
+        """保存预设响应，并建立用于收集请求上下文的空载荷列表。"""
         self.response = response
         self.payloads: list[LLMPayload] = []
 
     def add_payload(self, payload: LLMPayload) -> None:
+        """收集请求载荷，以便断言实际暴露的工具集合。"""
         self.payloads.append(payload)
 
     async def send(self, *, stream: bool = False) -> _PayloadResponse:
+        """返回预设响应而不发起模型请求。
+
+        Args:
+            stream: 为兼容请求接口保留的流式开关，不影响替身响应。
+
+        Returns:
+            _PayloadResponse: 初始化时传入的同一个响应对象。
+        """
         return self.response
 
 
@@ -731,16 +838,24 @@ class _InterruptConfig:
     """关闭探索工具的 act 阶段配置替身。"""
 
     class Plugin:
+        """为中断场景提供行动模型任务名。"""
+
         model_task = "actor"
 
     class Pipeline:
+        """将中断场景的行动循环限制为一次迭代。"""
+
         max_iterations = 1
 
     class Tools:
+        """关闭探索工具注入，并提供可覆盖的空黑名单。"""
+
         enable_explore_tools = False
         blacklist: list[str] = []
 
     class Humanize:
+        """允许生成期间的新消息触发中断。"""
+
         enable_interrupt = True
 
     plugin = Plugin()
@@ -753,16 +868,24 @@ class _ToolConfig:
     """包含工具筛选配置的 act 阶段替身。"""
 
     class Plugin:
+        """为工具执行场景提供行动模型任务名。"""
+
         model_task = "actor"
 
     class Pipeline:
+        """将工具执行场景的行动循环限制为一次迭代。"""
+
         max_iterations = 1
 
     class Tools:
+        """开启探索工具，并提供按测试调整的黑名单。"""
+
         enable_explore_tools = True
         blacklist: list[str] = []
 
     class Humanize:
+        """提供连续复读次数上限，供行动阶段判断是否终止。"""
+
         max_duplicate_streak = 2
 
     plugin = Plugin()
@@ -774,7 +897,7 @@ class _ToolConfig:
 class _AllowedExpandedTool:
     """允许在探索后注册的假工具。"""
 
-    tool_name = "allowed"
+    name = "allowed"
 
     @classmethod
     def get_signature(cls) -> str:
@@ -790,7 +913,7 @@ class _AllowedExpandedTool:
 class _BlockedExpandedTool:
     """必须被黑名单阻止的假工具。"""
 
-    tool_name = "blocked"
+    name = "blocked"
 
     @classmethod
     def get_signature(cls) -> str:
@@ -904,6 +1027,15 @@ async def test_execute_calls_counts_only_successful_tools() -> None:
     async def run_tool_call(
         batch: list[ToolCall], *_args: Any
     ) -> list[tuple[str, bool]]:
+        """按调用标识追加成功或失败的工具结果载荷。
+
+        Args:
+            batch: 当前待处理的工具调用批次，仅处理首个调用。
+            *_args: 工具执行接口传入的其余动态上下文，本替身不使用。
+
+        Returns:
+            list[tuple[str, bool]]: 与当前调用对应的结果说明和成功标志。
+        """
         call = batch[0]
         if call.id == "success":
             response.add_payload(
@@ -935,11 +1067,15 @@ async def test_execute_calls_counts_only_successful_tools() -> None:
 
     assert count == 1
     assert [record.outcome for record in state.tool_ledger] == ["success", "failure"]
-    assert [record.result_preview for record in state.tool_ledger] == ["晴天", "查询失败"]
+    assert [record.result_preview for record in state.tool_ledger] == [
+        "晴天",
+        "查询失败",
+    ]
     assert "晴天" in state.deduper.check("tool-success", {}).note
 
 
 async def test_execute_calls_batch_mode_submits_all_calls_once() -> None:
+    """批量模式应只提交一次完整调用列表，并累计两个成功结果。"""
     calls = [
         ToolCall(id="first", name="tool-first", args={}),
         ToolCall(id="second", name="tool-second", args={}),
@@ -965,13 +1101,14 @@ async def test_execute_calls_batch_mode_submits_all_calls_once() -> None:
 
 
 async def test_execute_calls_planning_mode_submits_calls_one_by_one() -> None:
+    """规划模式应按原顺序逐个提交调用，并累计成功结果。"""
     calls = [
         ToolCall(id="first", name="tool-first", args={}),
         ToolCall(id="second", name="tool-second", args={}),
     ]
     response = _PayloadResponse([], calls)
     chatter = AgenticChatter(stream_id="tool-planning", plugin=object())
-    chatter.run_tool_call = AsyncMock(side_effect=[[('ok', True)], [('ok', True)]])
+    chatter.run_tool_call = AsyncMock(side_effect=[[("ok", True)], [("ok", True)]])
     state = TurnState(stream_id="tool-planning")
 
     count = await chatter._execute_calls(
@@ -992,6 +1129,7 @@ async def test_execute_calls_planning_mode_submits_calls_one_by_one() -> None:
 
 
 async def test_execute_calls_invalid_mode_falls_back_to_planning() -> None:
+    """未知调用模式应采用规划接口，并使用内容一致的缓冲响应。"""
     call = ToolCall(id="fallback", name="tool-fallback", args={})
     response = _PayloadResponse([], [call])
     chatter = AgenticChatter(stream_id="tool-mode-fallback", plugin=object())
@@ -1007,14 +1145,20 @@ async def test_execute_calls_invalid_mode_falls_back_to_planning() -> None:
     )
 
     chatter.run_tool_call.assert_awaited_once_with(
-        [call], ANY, ANY, None,
+        [call],
+        ANY,
+        ANY,
+        None,
     )
     buffered_response = chatter.run_tool_call.await_args.args[1]
     assert buffered_response is not response
     assert buffered_response.payloads == response.payloads
 
 
-async def test_execute_calls_logs_tool_name_and_safe_args(monkeypatch) -> None:
+async def test_execute_calls_logs_tool_name_and_safe_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """开启工具日志后应记录工具名和普通参数，同时脱敏密钥值。"""
     calls = [
         ToolCall(
             id="logged",
@@ -1048,7 +1192,10 @@ async def test_execute_calls_logs_tool_name_and_safe_args(monkeypatch) -> None:
     assert "[REDACTED]" in tool_logs[0]
 
 
-async def test_execute_calls_does_not_log_when_disabled(monkeypatch) -> None:
+async def test_execute_calls_does_not_log_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未开启工具日志时，不应输出调用工具事件。"""
     call = ToolCall(id="quiet", name="tool-search", args={"query": "天气"})
     response = _PayloadResponse([], [call])
     chatter = AgenticChatter(stream_id="tool-log-off", plugin=object())
@@ -1057,13 +1204,18 @@ async def test_execute_calls_does_not_log_when_disabled(monkeypatch) -> None:
     monkeypatch.setattr(chatter_module.logger, "info", info)
 
     await chatter._execute_calls(
-        [call], response, TurnState(stream_id="tool-log-off"), SimpleNamespace(), [],
+        [call],
+        response,
+        TurnState(stream_id="tool-log-off"),
+        SimpleNamespace(),
+        [],
     )
 
     assert not any("事件=调用工具" in str(call.args[0]) for call in info.call_args_list)
 
 
 def test_decide_iteration_preserves_control_and_text_priority() -> None:
+    """停止会话优先于其他进展，纯文本结束优先于无进展限制。"""
     stop = decide_iteration(
         normal_call_count=1,
         end_seconds=2.0,
@@ -1099,6 +1251,7 @@ def test_decide_iteration_preserves_control_and_text_priority() -> None:
 
 
 def test_tool_result_delta_matches_calls_by_id() -> None:
+    """工具结果即使逆序追加，也应按调用标识归入对应执行记录。"""
     calls = [
         ToolCall(id="first", name="tool-a", args={}),
         ToolCall(id="second", name="tool-b", args={}),
@@ -1156,11 +1309,15 @@ async def test_stage_act_does_not_inject_blacklisted_explore_tool() -> None:
     state = TurnState(stream_id="blocked-explore")
     await chatter._stage_act(config, object(), state, [])
 
-    tool_payload = next(payload for payload in request.payloads if payload.role == ROLE.TOOL)
+    tool_payload = next(
+        payload for payload in request.payloads if payload.role == ROLE.TOOL
+    )
     assert tool_payload.content == []
 
 
-async def test_stage_act_only_offers_available_unblocked_skill_tools(tmp_path) -> None:
+async def test_stage_act_only_offers_available_unblocked_skill_tools(
+    tmp_path: Path,
+) -> None:
     """仅在工具可用且未被黑名单禁止时向 ACT 暴露技能。"""
     from ..tooling import skills
     from ..tooling.skills import ReadSkillReferenceTool, ReadSkillTool
@@ -1195,7 +1352,9 @@ async def test_stage_act_only_offers_available_unblocked_skill_tools(tmp_path) -
             chatter.create_request = lambda **_kwargs: request
             chatter._has_new_unreads = AsyncMock(return_value=False)
             chatter._deliver_message = AsyncMock(return_value=(False, False))
-            await chatter._stage_act(config, object(), TurnState(stream_id="skill-visibility"), [])
+            await chatter._stage_act(
+                config, object(), TurnState(stream_id="skill-visibility"), []
+            )
             layout = chatter._build_system_prompt.await_args.args[2]
             assert (ReadSkillTool in layout.exposed) is expected
             chatter._build_system_prompt.reset_mock()
@@ -1203,7 +1362,9 @@ async def test_stage_act_only_offers_available_unblocked_skill_tools(tmp_path) -
         skills.clear_skills()
 
 
-async def test_stage_act_filters_blacklisted_expanded_tools(monkeypatch) -> None:
+async def test_stage_act_filters_blacklisted_expanded_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """展开结果在注册前仍必须遵守黑名单。"""
     config = _ToolConfig()
     config.tools.blacklist = ["blocked_plugin:tool:*"]
@@ -1230,9 +1391,13 @@ async def test_stage_act_filters_blacklisted_expanded_tools(monkeypatch) -> None
         lambda _stream_id: [_AllowedExpandedTool, _BlockedExpandedTool],
     )
 
-    await chatter._stage_act(config, object(), TurnState(stream_id="expanded-filter"), [])
+    await chatter._stage_act(
+        config, object(), TurnState(stream_id="expanded-filter"), []
+    )
 
-    tool_payloads = [payload for payload in response.payloads if payload.role == ROLE.TOOL]
+    tool_payloads = [
+        payload for payload in response.payloads if payload.role == ROLE.TOOL
+    ]
     assert tool_payloads[-1].content == [_AllowedExpandedTool]
 
 
@@ -1242,6 +1407,7 @@ async def test_stage_act_filters_blacklisted_expanded_tools(monkeypatch) -> None
 
 
 def test_interrupted_calls_are_closed_for_strict_context_validation() -> None:
+    """中断应为所有未执行调用补齐对应结果，使严格上下文校验通过。"""
     calls = [
         ToolCall(id="call_tool", name="tool-search", args={"q": "天气"}),
         ToolCall(id="call_end", name="action-end_turn", args={"seconds": 30}),
@@ -1269,6 +1435,7 @@ def test_interrupted_calls_are_closed_for_strict_context_validation() -> None:
 
 
 def test_control_calls_are_closed_for_strict_context_validation() -> None:
+    """控制调用应补齐结果，并说明停止会话对结束回合的覆盖关系。"""
     calls = [
         ToolCall(id="call_end", name="action-end_turn", args={"seconds": 30}),
         ToolCall(id="call_stop", name="action-stop_conversation", args={"minutes": 5}),
@@ -1297,6 +1464,7 @@ def test_control_calls_are_closed_for_strict_context_validation() -> None:
 
 
 async def test_stage_act_consumes_stream_before_reading_calls() -> None:
+    """行动阶段应先消费流式响应，再读取结束回合调用并应用等待时长。"""
     calls = [
         ToolCall(id="call_end", name="action-end_turn", args={"seconds": 30}),
     ]
@@ -1334,7 +1502,7 @@ async def test_stage_act_consumes_stream_before_reading_calls() -> None:
 
 
 async def test_apply_claim_unread_match_restores_context_when_match_disappears(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """提交前 claim 对应 unread 消失时恢复完整上下文。"""
     claimed = SimpleNamespace(message_id="claimed")
@@ -1363,7 +1531,7 @@ async def test_apply_claim_unread_match_restores_context_when_match_disappears(
 
 
 async def test_apply_claim_unread_match_accepts_message_moved_to_history(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """预检后由其他组件移入历史的消息应在提交时完成对账。"""
     claimed = SimpleNamespace(message_id="suppressed-during-turn")
@@ -1385,7 +1553,11 @@ async def test_apply_claim_unread_match_accepts_message_moved_to_history(
 
     assert context.unread_messages == []
     assert context.history == [current]
-async def test_mailbox_commit_failure_restores_context_match(monkeypatch) -> None:
+
+
+async def test_mailbox_commit_failure_restores_context_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """mailbox commit 失败时恢复已应用的上下文确认。"""
     claimed = SimpleNamespace(message_id="claimed")
     current = SimpleNamespace(message_id="claimed")
@@ -1409,7 +1581,9 @@ async def test_mailbox_commit_failure_restores_context_match(monkeypatch) -> Non
     assert context.history == []
 
 
-async def test_mailbox_interrupt_ignores_claim_and_keeps_new_input(monkeypatch) -> None:
+async def test_mailbox_interrupt_ignores_claim_and_keeps_new_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """claim 重现不算新输入，新 ID 应进入 pending 并触发中断。"""
     old = SimpleNamespace(message_id="old")
     repeated_old = SimpleNamespace(message_id="old")
@@ -1424,7 +1598,9 @@ async def test_mailbox_interrupt_ignores_claim_and_keeps_new_input(monkeypatch) 
 
     chatter = AgenticChatter(stream_id="mailbox-interrupt", plugin=object())
     chatter.fetch_unreads = AsyncMock(return_value=("", [repeated_old]))
-    monkeypatch.setattr(chatter_module, "get_stream_mailbox", Mock(return_value=mailbox))
+    monkeypatch.setattr(
+        chatter_module, "get_stream_mailbox", Mock(return_value=mailbox)
+    )
 
     assert not await chatter._has_new_unreads(
         _InterruptConfig(),
@@ -1442,6 +1618,7 @@ async def test_mailbox_interrupt_ignores_claim_and_keeps_new_input(monkeypatch) 
 
 
 async def test_stage_act_closes_calls_before_interrupting() -> None:
+    """新消息中断前应闭合所有调用上下文，且不发送旧正文或执行工具。"""
     calls = [
         ToolCall(id="call_tool", name="tool-search", args={"q": "天气"}),
         ToolCall(id="call_end", name="action-end_turn", args={"seconds": 30}),

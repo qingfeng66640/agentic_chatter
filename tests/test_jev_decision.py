@@ -12,6 +12,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator
+    from typing import Any
+
+    from ..decision.models import ReplyDecision
+
 import asyncio
 import json
 from contextlib import contextmanager
@@ -43,8 +51,15 @@ from ..decision.models import DecisionAction, DecisionSource, describe_decision
 REDACTED = "[REDACTED]"
 
 
-def _settings(**overrides) -> JevSettings:
-    """构造带默认值的 JevSettings。"""
+def _settings(**overrides: Any) -> JevSettings:
+    """构造带默认值的 JevSettings。
+
+    Args:
+        **overrides: 覆盖默认密钥、重试次数等 Jev 设置的字段值。
+
+    Returns:
+        供请求测试使用的 Jev 设置。
+    """
     base = {
         "api_key": "ts_test_key",
         "max_retries": 0,
@@ -53,8 +68,17 @@ def _settings(**overrides) -> JevSettings:
     base.update(overrides)
     return JevSettings(**base)
 
-def _choice_payload(choice: str, confidence: float) -> dict:
-    """构造一个合法的 System One 响应体。"""
+
+def _choice_payload(choice: str, confidence: float) -> dict[str, Any]:
+    """构造一个合法的 System One 响应体。
+
+    Args:
+        choice: 要返回的回复或静默选项。
+        confidence: 选项的置信度。
+
+    Returns:
+        包含裁决答案、选项概率和 token 用量的响应体。
+    """
     return {
         "model": "jev-1.13.0",
         "answers": {
@@ -71,7 +95,9 @@ def _choice_payload(choice: str, confidence: float) -> dict:
     }
 
 
-def _client(handler) -> httpx.AsyncClient:
+def _client(
+    handler: Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]],
+) -> httpx.AsyncClient:
     """用 MockTransport 构造客户端。"""
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
@@ -82,7 +108,10 @@ def _client(handler) -> httpx.AsyncClient:
 
 
 def test_build_state_keeps_only_configured_history_window() -> None:
-    history = [_MessageView(sender=f"m{index}", text=f"历史{index}") for index in range(5)]
+    """状态仅保留最近的指定条数历史，同时单独保留待裁决消息。"""
+    history = [
+        _MessageView(sender=f"m{index}", text=f"历史{index}") for index in range(5)
+    ]
     incoming = [_MessageView(sender="u", text="在吗")]
 
     state = build_state(
@@ -94,12 +123,11 @@ def test_build_state_keeps_only_configured_history_window() -> None:
 
     # 只保留最近 2 条历史
     assert [entry["text"] for entry in state["messages"][:2]] == ["历史3", "历史4"]
-    assert state["incoming"] == [
-        {"sender": "u", "role": "member", "text": "在吗"}
-    ]
+    assert state["incoming"] == [{"sender": "u", "role": "member", "text": "在吗"}]
 
 
 def test_build_state_marks_bot_messages() -> None:
+    """历史中的机器人消息标为 bot，状态同时声明机器人身份。"""
     history = [_MessageView(sender="bot", text="我是bot", is_bot=True)]
 
     state = build_state(
@@ -114,6 +142,7 @@ def test_build_state_marks_bot_messages() -> None:
 
 
 def test_build_state_drops_empty_messages() -> None:
+    """历史和待裁决列表中的空白正文均不进入状态。"""
     state = build_state(
         incoming=[_MessageView(sender="a", text="   ")],
         history=[_MessageView(sender="b", text="")],
@@ -126,6 +155,7 @@ def test_build_state_drops_empty_messages() -> None:
 
 
 def test_build_state_with_zero_history_window() -> None:
+    """历史窗口为零时仍保留待裁决消息，不携带历史正文。"""
     state = build_state(
         incoming=[_MessageView(sender="a", text="你好")],
         history=[_MessageView(sender="b", text="不该出现")],
@@ -138,6 +168,7 @@ def test_build_state_with_zero_history_window() -> None:
 
 
 def test_message_view_to_state_marks_bot_role() -> None:
+    """消息视图转换为状态字典时保留发送者、正文及机器人角色。"""
     view = _MessageView(sender="a", text="你好", is_bot=True)
 
     assert view.to_state() == {"sender": "a", "role": "bot", "text": "你好"}
@@ -162,6 +193,7 @@ def test_build_state_uses_pre_trimmed_text() -> None:
 
 
 def test_parse_choice_answer_respond() -> None:
+    """回复选项解析为 RESPOND，并保留置信度和两个选项的概率。"""
     answer = _choice_payload("respond", 0.91)["answers"]["action"]
 
     result = parse_choice_answer(answer, min_confidence=0.0)
@@ -173,6 +205,7 @@ def test_parse_choice_answer_respond() -> None:
 
 
 def test_parse_choice_answer_silent() -> None:
+    """静默选项解析为 SILENT，并保留静默与回复的概率。"""
     answer = _choice_payload("silent", 0.75)["answers"]["action"]
 
     result = parse_choice_answer(answer, min_confidence=0.0)
@@ -183,11 +216,13 @@ def test_parse_choice_answer_silent() -> None:
 
 
 def test_parse_choice_answer_rejects_non_dict() -> None:
+    """非字典答案应以 JevError 拒绝，而不是进入选项解析。"""
     with pytest.raises(JevError):
         parse_choice_answer("not-a-dict", min_confidence=0.0)
 
 
 def test_parse_choice_answer_rejects_unknown_option() -> None:
+    """未定义的裁决选项不能被接受为有效答案。"""
     with pytest.raises(JevError):
         parse_choice_answer(
             {"choice": "maybe", "confidence": 0.9},
@@ -196,13 +231,19 @@ def test_parse_choice_answer_rejects_unknown_option() -> None:
 
 
 def test_parse_choice_answer_rejects_out_of_range_confidence() -> None:
+    """置信度大于一或小于零时均应拒绝答案。"""
     with pytest.raises(JevError):
-        parse_choice_answer({"choice": "respond", "confidence": 1.5}, min_confidence=0.0)
+        parse_choice_answer(
+            {"choice": "respond", "confidence": 1.5}, min_confidence=0.0
+        )
     with pytest.raises(JevError):
-        parse_choice_answer({"choice": "respond", "confidence": -0.2}, min_confidence=0.0)
+        parse_choice_answer(
+            {"choice": "respond", "confidence": -0.2}, min_confidence=0.0
+        )
 
 
 def test_parse_choice_answer_enforces_min_confidence() -> None:
+    """置信度低于配置门限时抛出明确的门限错误。"""
     answer = _choice_payload("respond", 0.4)["answers"]["action"]
 
     with pytest.raises(JevError, match="置信度低于门限"):
@@ -210,6 +251,7 @@ def test_parse_choice_answer_enforces_min_confidence() -> None:
 
 
 def test_parse_choice_answer_allows_boundary_confidence() -> None:
+    """置信度恰好等于门限时仍接受裁决结果。"""
     answer = _choice_payload("respond", 0.8)["answers"]["action"]
 
     result = parse_choice_answer(answer, min_confidence=0.8)
@@ -223,9 +265,11 @@ def test_parse_choice_answer_allows_boundary_confidence() -> None:
 
 
 async def test_request_decision_success_sends_expected_payload() -> None:
-    captured: dict = {}
+    """请求携带正确端点、鉴权和选项顺序，响应透传裁决与 token 用量。"""
+    captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """记录请求地址、鉴权和 JSON 正文，并返回固定的回复裁决。"""
         captured["url"] = str(request.url)
         captured["auth"] = request.headers.get("Authorization")
         captured["body"] = json.loads(request.content.decode("utf-8"))
@@ -251,42 +295,44 @@ async def test_request_decision_success_sends_expected_payload() -> None:
 
 
 async def test_request_decision_auth_failure_is_not_retried() -> None:
+    """即使配置了重试次数，HTTP 401 鉴权失败也只发送一次请求。"""
     calls = {"count": 0}
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        """累计请求次数并持续返回鉴权失败。"""
         calls["count"] += 1
         return httpx.Response(401, json={"error": "unauthorized"})
 
     async with _client(handler) as client:
         with pytest.raises(JevError, match="HTTP 401"):
-            await request_decision(
-                client, settings=_settings(max_retries=3), state={}
-            )
+            await request_decision(client, settings=_settings(max_retries=3), state={})
 
     # 鉴权失败不重试
     assert calls["count"] == 1
 
 
 async def test_request_decision_validation_error_is_not_retried() -> None:
+    """HTTP 422 参数错误直接失败，不消耗额外重试次数。"""
     calls = {"count": 0}
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        """累计请求次数并返回不可重试的参数错误。"""
         calls["count"] += 1
         return httpx.Response(422, json={"error": "bad request"})
 
     async with _client(handler) as client:
         with pytest.raises(JevError, match="HTTP 422"):
-            await request_decision(
-                client, settings=_settings(max_retries=2), state={}
-            )
+            await request_decision(client, settings=_settings(max_retries=2), state={})
 
     assert calls["count"] == 1
 
 
 async def test_request_decision_retries_on_rate_limit_then_succeeds() -> None:
+    """首次限流后重试一次，并采用第二次返回的静默裁决。"""
     calls = {"count": 0}
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        """第一次返回限流，后续请求返回合法的静默裁决。"""
         calls["count"] += 1
         if calls["count"] == 1:
             return httpx.Response(429, json={"error": "rate limited"})
@@ -305,24 +351,34 @@ async def test_request_decision_retries_on_rate_limit_then_succeeds() -> None:
 
 
 async def test_request_decision_retries_on_overload() -> None:
+    """持续过载时按配置重试一次，随后报告 HTTP 529 错误。"""
     calls = {"count": 0}
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        """累计请求次数并持续返回上游过载。"""
         calls["count"] += 1
         return httpx.Response(529, json={"error": "overloaded"})
 
     async with _client(handler) as client:
         with pytest.raises(JevError, match="529"):
-            await request_decision(
-                client, settings=_settings(max_retries=1), state={}
-            )
+            await request_decision(client, settings=_settings(max_retries=1), state={})
 
     # 首次 + 1 次重试
     assert calls["count"] == 2
 
 
 async def test_request_decision_handles_transport_error() -> None:
+    """连接失败应转换为 JevError，而不是泄漏传输层异常。"""
+
     def handler(request: httpx.Request) -> httpx.Response:
+        """模拟无法建立连接的传输错误。
+
+        Args:
+            request: 关联到异常的原始 HTTP 请求。
+
+        Raises:
+            httpx.ConnectError: 固定抛出连接被拒绝错误。
+        """
         raise httpx.ConnectError("connection refused", request=request)
 
     async with _client(handler) as client:
@@ -331,7 +387,10 @@ async def test_request_decision_handles_transport_error() -> None:
 
 
 async def test_request_decision_rejects_non_json_body() -> None:
+    """成功状态码不能掩盖非 JSON 正文，解析失败应明确报错。"""
+
     def handler(_request: httpx.Request) -> httpx.Response:
+        """返回状态成功但正文不是 JSON 的响应。"""
         return httpx.Response(200, text="not json")
 
     async with _client(handler) as client:
@@ -340,7 +399,10 @@ async def test_request_decision_rejects_non_json_body() -> None:
 
 
 async def test_request_decision_rejects_missing_answer_key() -> None:
+    """响应缺失 answers.action 时应报告结构错误。"""
+
     def handler(_request: httpx.Request) -> httpx.Response:
+        """返回仅含其他答案键的响应，模拟 action 答案缺失。"""
         return httpx.Response(200, json={"answers": {"other": {}}})
 
     async with _client(handler) as client:
@@ -349,7 +411,10 @@ async def test_request_decision_rejects_missing_answer_key() -> None:
 
 
 async def test_request_decision_propagates_low_confidence_as_error() -> None:
+    """HTTP 请求成功但置信度不足时仍应向调用方报告门限错误。"""
+
     def handler(_request: httpx.Request) -> httpx.Response:
+        """返回低于测试门限的合法回复选项。"""
         return httpx.Response(200, json=_choice_payload("respond", 0.2))
 
     async with _client(handler) as client:
@@ -367,6 +432,7 @@ async def test_request_decision_propagates_low_confidence_as_error() -> None:
 
 
 def test_build_decision_uses_jev_source_and_marks_jev() -> None:
+    """Jev 裁决保留本地评分并标记来源，不冒充子决策模型结果。"""
     decision = build_decision(
         DecisionAction.RESPOND,
         0.83,
@@ -387,6 +453,7 @@ def test_build_decision_uses_jev_source_and_marks_jev() -> None:
 
 
 def test_build_fallback_decision_is_silent_and_never_sub_actor() -> None:
+    """失败回退生成零置信度的静默裁决，保留原因且不标记子模型。"""
     decision = build_fallback_decision(
         local_score=0.02,
         lower_bound=-0.3,
@@ -411,6 +478,7 @@ class _JevChatter:
     """只暴露 _decide_gray_zone_with_jev 所需表面的最小替身。"""
 
     def __init__(self, stream_id: str = "stream-abcdef1234567890") -> None:
+        """保存灰区裁决接线测试使用的聊天流标识。"""
         self.stream_id = stream_id
 
     from ..chatter import _AgenticChatterBase as _Base
@@ -424,9 +492,19 @@ def _config(
     api_key: str = "ts_key",
     *,
     fallback_decider: str = "sub_actor",
-    **jev_overrides,
-):
-    """构造仅含 jev 段的插件配置替身。"""
+    **jev_overrides: object,
+) -> SimpleNamespace:
+    """构造仅含 jev 段的插件配置替身。
+
+    Args:
+        enabled: 是否启用 Jev。
+        api_key: 接线测试使用的 API 密钥。
+        fallback_decider: Jev 不可用时采用的回退裁决者。
+        **jev_overrides: 覆盖模型、预算、重试及置信度等 Jev 字段。
+
+    Returns:
+        仅包含 jev 配置段的插件配置替身。
+    """
     jev = SimpleNamespace(
         enabled=enabled,
         api_key=api_key,
@@ -449,10 +527,12 @@ def _decision_config(decider: str = "jev") -> SimpleNamespace:
 
 
 def _chat_stream(bot_id: str = "bot-1") -> SimpleNamespace:
+    """构造仅提供机器人账号标识的聊天流替身。"""
     return SimpleNamespace(bot_id=bot_id)
 
 
 def _messages() -> list[SimpleNamespace]:
+    """构造机器人历史发言和用户追问，供裁决状态验证角色与正文。"""
     return [
         SimpleNamespace(
             sender_id="bot-1",
@@ -471,15 +551,25 @@ def _messages() -> list[SimpleNamespace]:
     ]
 
 
-def _patch_http(monkeypatch, handler, captured: dict | None = None):
+def _patch_http(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], httpx.Response],
+    captured: dict[str, Any] | None = None,
+) -> None:
     """把 chatter 使用的共享客户端替换为 MockTransport 版本。
 
     ``chatter`` 在导入时把 ``get_shared_client`` 绑定到自身命名空间，
     因此必须替换 ``chatter`` 上的符号，而不是 ``decision.jev`` 上的。
+
+    Args:
+        monkeypatch: 用于替换 chatter 模块客户端工厂的补丁夹具。
+        handler: 生成模拟 HTTP 响应的同步处理器。
+        captured: 可选的记录字典，用于收集请求地址及 JSON 正文。
     """
     from .. import chatter as chatter_module
 
     def wrapped(request: httpx.Request) -> httpx.Response:
+        """按需记录请求地址及正文，再交给指定的模拟处理器。"""
         if captured is not None:
             captured["url"] = str(request.url)
             captured["body"] = json.loads(request.content.decode("utf-8"))
@@ -487,7 +577,16 @@ def _patch_http(monkeypatch, handler, captured: dict | None = None):
 
     original_client = httpx.AsyncClient
 
-    def fake_client(*_args, **kwargs):
+    def fake_client(*_args: object, **kwargs: Any) -> httpx.AsyncClient:
+        """忽略调用方的位置参数和超时配置，创建使用模拟传输的客户端。
+
+        Args:
+            *_args: 为兼容客户端工厂调用而接收的位置参数，不参与构造。
+            **kwargs: 透传给真实客户端构造器的关键字参数，移除 timeout。
+
+        Returns:
+            使用 wrapped 处理请求的异步 HTTP 客户端。
+        """
         kwargs.pop("timeout", None)
         return original_client(transport=httpx.MockTransport(wrapped), **kwargs)
 
@@ -495,18 +594,30 @@ def _patch_http(monkeypatch, handler, captured: dict | None = None):
 
 
 def _ok_handler(_request: httpx.Request) -> httpx.Response:
+    """返回固定高置信度回复裁决，作为接线测试的默认 HTTP 应答。"""
     return httpx.Response(200, json=_choice_payload("respond", 0.9))
 
 
 async def _run_jev(
-    monkeypatch,
-    config,
+    monkeypatch: pytest.MonkeyPatch,
+    config: SimpleNamespace,
     *,
     decider: str = "jev",
-    handler=_ok_handler,
-    captured: dict | None = None,
-):
-    """执行一次灰区裁决；handler 默认返回合法应答。"""
+    handler: Callable[[httpx.Request], httpx.Response] = _ok_handler,
+    captured: dict[str, Any] | None = None,
+) -> ReplyDecision | None:
+    """执行一次灰区裁决；handler 默认返回合法应答。
+
+    Args:
+        monkeypatch: 用于安装模拟 HTTP 客户端的补丁夹具。
+        config: 传给灰区裁决入口的插件配置替身。
+        decider: 灰区裁决者配置。
+        handler: 返回模拟响应的处理器，默认提供合法回复裁决。
+        captured: 可选的请求地址与正文记录字典。
+
+    Returns:
+        Jev 裁决或静默回退裁决；交由调用方回退时返回 None。
+    """
     _patch_http(monkeypatch, handler, captured)
     chatter = _JevChatter()
     return await chatter._decide_gray_zone_with_jev(
@@ -528,11 +639,14 @@ async def _run_jev(
 # --- 裁决者枚举分派 ------------------------------------------------------
 
 
-async def test_sub_actor_decider_skips_jev_entirely(monkeypatch) -> None:
+async def test_sub_actor_decider_skips_jev_entirely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """decider=sub_actor 时即使 Jev 完全可用也不发请求。"""
     calls = {"count": 0}
 
     def counting_handler(request: httpx.Request) -> httpx.Response:
+        """累计 Jev 请求次数，并在被调用时返回成功应答。"""
         calls["count"] += 1
         return _ok_handler(request)
 
@@ -547,10 +661,14 @@ async def test_sub_actor_decider_skips_jev_entirely(monkeypatch) -> None:
     assert calls["count"] == 0
 
 
-async def test_unknown_decider_value_falls_back_to_sub_actor(monkeypatch) -> None:
+async def test_unknown_decider_value_falls_back_to_sub_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未知裁决者配置应交回子决策模型，不发出 Jev 请求。"""
     calls = {"count": 0}
 
     def counting_handler(request: httpx.Request) -> httpx.Response:
+        """记录是否误发 Jev 请求，并提供可成功解析的应答。"""
         calls["count"] += 1
         return _ok_handler(request)
 
@@ -566,6 +684,7 @@ async def test_unknown_decider_value_falls_back_to_sub_actor(monkeypatch) -> Non
 
 
 async def test_returns_none_when_config_is_none() -> None:
+    """没有插件配置时返回 None，让调用方继续处理裁决。"""
     chatter = _JevChatter()
 
     decision = await chatter._decide_gray_zone_with_jev(
@@ -589,12 +708,13 @@ async def test_returns_none_when_config_is_none() -> None:
 # --- 成功路径 ------------------------------------------------------------
 
 
-async def test_chatter_produces_decision_on_success(monkeypatch) -> None:
-    captured: dict = {}
+async def test_chatter_produces_decision_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """成功接线后返回 Jev 回复裁决，保留本地边界并传送待判断消息。"""
+    captured: dict[str, Any] = {}
 
-    decision = await _run_jev(
-        monkeypatch, _config(True, "ts_key"), captured=captured
-    )
+    decision = await _run_jev(monkeypatch, _config(True, "ts_key"), captured=captured)
 
     assert decision is not None
     assert decision.action is DecisionAction.RESPOND
@@ -610,8 +730,11 @@ async def test_chatter_produces_decision_on_success(monkeypatch) -> None:
     assert len(captured["body"]["state"]["incoming"]) == 2
 
 
-async def test_chatter_marks_bot_messages_in_state(monkeypatch) -> None:
-    captured: dict = {}
+async def test_chatter_marks_bot_messages_in_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """发往 Jev 的待判断消息应正确区分机器人与群成员。"""
+    captured: dict[str, Any] = {}
 
     await _run_jev(monkeypatch, _config(True, "ts_key"), captured=captured)
 
@@ -622,19 +745,24 @@ async def test_chatter_marks_bot_messages_in_state(monkeypatch) -> None:
 # --- fallback_decider = sub_actor：返回 None 交由调用方回退 --------------
 
 
-async def test_returns_none_when_jev_disabled(monkeypatch) -> None:
+async def test_returns_none_when_jev_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Jev 关闭且采用默认回退策略时不生成裁决。"""
     decision = await _run_jev(monkeypatch, _config(False, "ts_key"))
 
     assert decision is None
 
 
-async def test_returns_none_when_api_key_missing(monkeypatch) -> None:
+async def test_returns_none_when_api_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """空白 API 密钥触发默认回退，将裁决交回调用方。"""
     decision = await _run_jev(monkeypatch, _config(True, "   "))
 
     assert decision is None
 
 
-async def test_returns_none_on_http_failure(monkeypatch) -> None:
+async def test_returns_none_on_http_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTP 鉴权失败时按默认策略返回 None，交由子决策模型回退。"""
     decision = await _run_jev(
         monkeypatch,
         _config(True, "ts_key"),
@@ -644,13 +772,12 @@ async def test_returns_none_on_http_failure(monkeypatch) -> None:
     assert decision is None
 
 
-async def test_returns_none_on_low_confidence(monkeypatch) -> None:
+async def test_returns_none_on_low_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Jev 结果低于门限时按默认策略交回调用方裁决。"""
     decision = await _run_jev(
         monkeypatch,
         _config(True, "ts_key", min_confidence=0.7),
-        handler=lambda _r: httpx.Response(
-            200, json=_choice_payload("respond", 0.3)
-        ),
+        handler=lambda _r: httpx.Response(200, json=_choice_payload("respond", 0.3)),
     )
 
     assert decision is None
@@ -660,6 +787,7 @@ async def test_returns_none_on_low_confidence(monkeypatch) -> None:
 
 
 async def test_silent_fallback_on_disabled() -> None:
+    """显式静默回退在 Jev 未启用时生成带禁用原因的静默裁决。"""
     chatter = _JevChatter()
 
     decision = await chatter._decide_gray_zone_with_jev(
@@ -685,6 +813,7 @@ async def test_silent_fallback_on_disabled() -> None:
 
 
 async def test_silent_fallback_on_missing_api_key() -> None:
+    """显式静默回退在缺少密钥时记录密钥缺失原因。"""
     chatter = _JevChatter()
 
     decision = await chatter._decide_gray_zone_with_jev(
@@ -707,7 +836,8 @@ async def test_silent_fallback_on_missing_api_key() -> None:
     assert decision.reasons[-1] == "jev_api_key_missing"
 
 
-async def test_silent_fallback_on_http_failure(monkeypatch) -> None:
+async def test_silent_fallback_on_http_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTP 失败在静默回退模式下生成失败来源裁决，不启用子模型。"""
     decision = await _run_jev(
         monkeypatch,
         _config(True, "ts_key", fallback_decider="silent"),
@@ -721,13 +851,14 @@ async def test_silent_fallback_on_http_failure(monkeypatch) -> None:
     assert decision.sub_actor_used is False
 
 
-async def test_silent_fallback_on_low_confidence(monkeypatch) -> None:
+async def test_silent_fallback_on_low_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """置信度不足在静默回退模式下保持静默，不混入子模型裁决。"""
     decision = await _run_jev(
         monkeypatch,
         _config(True, "ts_key", fallback_decider="silent", min_confidence=0.7),
-        handler=lambda _r: httpx.Response(
-            200, json=_choice_payload("respond", 0.3)
-        ),
+        handler=lambda _r: httpx.Response(200, json=_choice_payload("respond", 0.3)),
     )
 
     assert decision is not None
@@ -735,7 +866,9 @@ async def test_silent_fallback_on_low_confidence(monkeypatch) -> None:
     assert decision.sub_actor_used is False
 
 
-async def test_silent_fallback_ignores_unknown_fallback_value(monkeypatch) -> None:
+async def test_silent_fallback_ignores_unknown_fallback_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """非法 fallback_decider 值按 sub_actor 处理，不静默。"""
     decision = await _run_jev(
         monkeypatch,
@@ -754,6 +887,7 @@ async def test_total_budget_stops_further_retries() -> None:
     calls = {"count": 0}
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        """累计过载应答次数，用于确认总预算阻止额外重试。"""
         calls["count"] += 1
         return httpx.Response(529, json={"error": "overloaded"})
 
@@ -778,6 +912,7 @@ async def test_per_attempt_timeout_capped_by_remaining_budget() -> None:
     seen: list[float | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """记录传输层收到的超时配置，并返回成功裁决。"""
         seen.append(request.extensions.get("timeout"))
         return httpx.Response(200, json=_choice_payload("respond", 0.9))
 
@@ -797,7 +932,7 @@ async def test_per_attempt_timeout_capped_by_remaining_budget() -> None:
 # --- 共享客户端复用 --------------------------------------------------------
 
 
-async def test_shared_client_is_reused(monkeypatch) -> None:
+async def test_shared_client_is_reused(monkeypatch: pytest.MonkeyPatch) -> None:
     """共享客户端应复用同一实例，避免每次裁决重建连接池。"""
     from ..decision import jev as jev_module
 
@@ -841,6 +976,7 @@ async def test_request_decision_exposes_usage_tokens() -> None:
     """token 用量需透传到返回值，供 log_answers 观测成本。"""
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        """返回带固定输入和输出 token 用量的成功应答。"""
         return httpx.Response(200, json=_choice_payload("respond", 0.9))
 
     async with _client(handler) as client:
@@ -854,19 +990,19 @@ async def test_request_decision_exposes_usage_tokens() -> None:
 
 
 def test_endpoint_defaults_to_official_url() -> None:
-    assert (
-        JevSettings(api_key="k").endpoint
-        == "https://api.typesafe.ai/v1/systemone"
-    )
+    """未指定网关时使用官方 System One 端点。"""
+    assert JevSettings(api_key="k").endpoint == "https://api.typesafe.ai/v1/systemone"
 
 
 def test_endpoint_accepts_custom_gateway() -> None:
+    """自定义网关主机后自动补全 System One 路径。"""
     settings = JevSettings(api_key="k", base_url="https://my-proxy.internal")
 
     assert settings.endpoint == "https://my-proxy.internal/v1/systemone"
 
 
 def test_endpoint_tolerates_trailing_slash() -> None:
+    """网关末尾已有斜杠时不在拼接路径中产生重复斜杠。"""
     settings = JevSettings(api_key="k", base_url="https://my-proxy.internal/")
 
     assert settings.endpoint == "https://my-proxy.internal/v1/systemone"
@@ -874,30 +1010,30 @@ def test_endpoint_tolerates_trailing_slash() -> None:
 
 def test_endpoint_does_not_double_path() -> None:
     """用户直接填到完整路径时不应拼成 .../v1/systemone/v1/systemone。"""
-    settings = JevSettings(
-        api_key="k", base_url="https://api.typesafe.ai/v1/systemone"
-    )
+    settings = JevSettings(api_key="k", base_url="https://api.typesafe.ai/v1/systemone")
 
     assert settings.endpoint == "https://api.typesafe.ai/v1/systemone"
 
 
 def test_endpoint_supports_local_proxy_with_path_prefix() -> None:
-    settings = JevSettings(
-        api_key="k", base_url="http://127.0.0.1:8080/jev-proxy"
-    )
+    """本地代理已有路径前缀时保留前缀再拼接服务路径。"""
+    settings = JevSettings(api_key="k", base_url="http://127.0.0.1:8080/jev-proxy")
 
     assert settings.endpoint == "http://127.0.0.1:8080/jev-proxy/v1/systemone"
 
 
 def test_endpoint_falls_back_when_base_url_blank() -> None:
+    """空白网关配置应回退到官方端点。"""
     settings = JevSettings(api_key="k", base_url="   ")
 
     assert settings.endpoint == "https://api.typesafe.ai/v1/systemone"
 
 
-async def test_custom_base_url_is_actually_used(monkeypatch) -> None:
+async def test_custom_base_url_is_actually_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """端到端确认请求真的发往自定义地址，而不是硬编码域名。"""
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     _patch_http(
         monkeypatch,
@@ -925,6 +1061,7 @@ async def test_custom_base_url_is_actually_used(monkeypatch) -> None:
 
     assert captured["url"] == "https://my-proxy.internal/v1/systemone"
 
+
 # --- bot 身份与召唤信号（回归：曾因只发 is_chatbot 导致喊名字不回应）------
 
 
@@ -946,6 +1083,7 @@ def test_state_declares_bot_names() -> None:
 
 
 def test_state_without_names_falls_back_to_pronoun_note() -> None:
+    """未登记昵称时保留空名称列表，并明确提示身份名称缺失。"""
     state = build_state(
         incoming=[],
         history=[],
@@ -990,6 +1128,7 @@ def test_instructions_mention_calling_bot_by_name() -> None:
 
 
 def test_status_failure_code_maps_known_statuses() -> None:
+    """已知 HTTP 状态码映射到各自故障类别，并保留原始状态码。"""
     assert status_failure_code(401) == "jev_error:auth:401"
     assert status_failure_code(403) == "jev_error:auth:403"
     assert status_failure_code(402) == "jev_error:payment:402"
@@ -1016,8 +1155,13 @@ def test_status_failure_code_keeps_unmapped_status_verbatim() -> None:
         (500, "jev_error:http:500"),
     ],
 )
-async def test_request_decision_non_retryable_status_carries_code(status, expected) -> None:
-    async with _client(lambda _r: httpx.Response(status, json={"error": "x"})) as client:
+async def test_request_decision_non_retryable_status_carries_code(
+    status: int, expected: str
+) -> None:
+    """不可重试状态的异常保留细分原因码、HTTP 状态及一次尝试记录。"""
+    async with _client(
+        lambda _r: httpx.Response(status, json={"error": "x"})
+    ) as client:
         with pytest.raises(JevError) as excinfo:
             await request_decision(client, settings=_settings(), state={})
 
@@ -1034,14 +1178,14 @@ async def test_request_decision_non_retryable_status_carries_code(status, expect
     ],
 )
 async def test_request_decision_exhausted_retries_keep_retryable_code(
-    status, expected
+    status: int, expected: str
 ) -> None:
     """重试用尽后仍要保留限流/过载类别，而不是退化成 unknown。"""
-    async with _client(lambda _r: httpx.Response(status, json={"error": "x"})) as client:
+    async with _client(
+        lambda _r: httpx.Response(status, json={"error": "x"})
+    ) as client:
         with pytest.raises(JevError) as excinfo:
-            await request_decision(
-                client, settings=_settings(max_retries=1), state={}
-            )
+            await request_decision(client, settings=_settings(max_retries=1), state={})
 
     assert excinfo.value.code == expected
     assert excinfo.value.status == status
@@ -1049,7 +1193,17 @@ async def test_request_decision_exhausted_retries_keep_retryable_code(
 
 
 async def test_request_decision_transport_error_is_network() -> None:
+    """连接错误分类为网络故障，且不伪造 HTTP 状态码。"""
+
     async def handler(request: httpx.Request) -> httpx.Response:
+        """模拟连接被拒绝的异步传输失败。
+
+        Args:
+            request: 关联到异常的原始 HTTP 请求。
+
+        Raises:
+            httpx.ConnectError: 固定抛出连接失败异常。
+        """
         raise httpx.ConnectError("connection refused", request=request)
 
     async with _client(handler) as client:
@@ -1061,7 +1215,17 @@ async def test_request_decision_transport_error_is_network() -> None:
 
 
 async def test_request_decision_timeout_carries_timeout_code() -> None:
+    """读取超时应使用独立的 timeout 原因码。"""
+
     async def handler(request: httpx.Request) -> httpx.Response:
+        """模拟读取响应时超过超时限制。
+
+        Args:
+            request: 关联到异常的原始 HTTP 请求。
+
+        Raises:
+            httpx.ReadTimeout: 固定抛出读取超时异常。
+        """
         raise httpx.ReadTimeout("too slow", request=request)
 
     async with _client(handler) as client:
@@ -1098,6 +1262,7 @@ async def test_parse_stage_attempts_counts_real_requests() -> None:
     calls = {"n": 0}
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        """先返回限流，再返回低置信度应答，以定位第二次请求的解析失败。"""
         calls["n"] += 1
         if calls["n"] == 1:
             return httpx.Response(429, json={"error": "slow down"})
@@ -1141,6 +1306,7 @@ def test_total_budget_default_matches_config() -> None:
 
 
 async def test_request_decision_bad_json_code() -> None:
+    """无法解析的 JSON 正文应归类为 bad_json。"""
     async with _client(lambda _r: httpx.Response(200, text="not json")) as client:
         with pytest.raises(JevError) as excinfo:
             await request_decision(client, settings=_settings(), state={})
@@ -1149,6 +1315,7 @@ async def test_request_decision_bad_json_code() -> None:
 
 
 async def test_request_decision_missing_answer_is_bad_schema() -> None:
+    """缺失 action 答案的响应应归类为 bad_schema。"""
     async with _client(
         lambda _r: httpx.Response(200, json={"answers": {"other": {}}})
     ) as client:
@@ -1159,6 +1326,7 @@ async def test_request_decision_missing_answer_is_bad_schema() -> None:
 
 
 def test_parse_choice_answer_bad_answer_code() -> None:
+    """非字典答案与未知选项都应使用 bad_answer 原因码。"""
     with pytest.raises(JevError) as excinfo:
         parse_choice_answer("not-a-dict", min_confidence=0.0)
     assert excinfo.value.code == "jev_error:bad_answer"
@@ -1185,18 +1353,21 @@ def test_low_confidence_is_not_classified_as_failure() -> None:
 
 
 def test_redact_url_leaves_plain_endpoint_untouched() -> None:
+    """不含凭据的普通端点脱敏后应保持原样。"""
     assert redact_url("https://api.typesafe.ai/v1/systemone") == (
         "https://api.typesafe.ai/v1/systemone"
     )
 
 
 def test_redact_url_masks_userinfo() -> None:
+    """端点中的用户名和密码应被统一脱敏，不影响主机及路径。"""
     assert redact_url("https://svc:secret@gw.internal/v1/systemone") == (
         f"https://{REDACTED}@gw.internal/v1/systemone"
     )
 
 
 def test_redact_url_masks_user_without_password() -> None:
+    """即使只提供用户名而没有密码，也应隐藏用户信息。"""
     assert redact_url("https://svc@gw.internal/v1/systemone") == (
         f"https://{REDACTED}@gw.internal/v1/systemone"
     )
@@ -1225,7 +1396,8 @@ def test_redact_url_keeps_host_when_password_contains_at_sign() -> None:
         ("password=abc", "abc"),
     ],
 )
-def test_redact_url_masks_sensitive_query_params(query, secret) -> None:
+def test_redact_url_masks_sensitive_query_params(query: str, secret: str) -> None:
+    """敏感查询参数替换为脱敏占位符，同时保留非敏感模型参数。"""
     text = redact_url(f"https://gw.internal/v1/systemone?{query}&model=jev-latest")
 
     assert secret not in text
@@ -1243,6 +1415,7 @@ def test_redact_url_collapses_newline_to_stop_log_forging() -> None:
 
 
 def test_redact_url_caps_length() -> None:
+    """超长端点应限制长度，并用省略号标明截断。"""
     text = redact_url("https://gw.internal/" + "a" * 500)
 
     assert len(text) <= 200
@@ -1259,12 +1432,14 @@ def test_redact_url_masks_sensitive_param_in_fragment() -> None:
 
 
 def test_redact_url_is_idempotent() -> None:
+    """已脱敏端点再次处理不应改变结果。"""
     once = redact_url("https://svc:secret@gw.internal/v1?api_key=sk-live")
 
     assert redact_url(once) == once
 
 
 def test_redact_url_handles_blank() -> None:
+    """空字符串和纯空白端点均规范化为空字符串。"""
     assert redact_url("") == ""
     assert redact_url("   ") == ""
 
@@ -1282,6 +1457,7 @@ def test_jev_error_never_retains_plaintext_credentials() -> None:
 
 
 def test_format_failure_fields_never_prints_credentials() -> None:
+    """故障诊断中的端点仅显示脱敏凭据，不能输出明文密码。"""
     text = format_failure_fields(
         JevError(
             "x",
@@ -1323,6 +1499,7 @@ async def test_budget_exhaustion_keeps_upstream_cause() -> None:
     """
 
     async def slow_429(request: httpx.Request) -> httpx.Response:
+        """延迟返回限流响应，使后续尝试耗尽总预算。"""
         await asyncio.sleep(0.30)
         return httpx.Response(429, json={"error": "slow down"})
 
@@ -1392,12 +1569,14 @@ def test_reason_text_keeps_unclassified_exception_class() -> None:
 
 
 def test_reason_text_still_falls_back_for_unknown_prefix() -> None:
+    """未知原因前缀仍使用通用中文说明，不误判为已知异常类别。"""
     from ..decision.models import reason_text
 
     assert reason_text("some_unmapped:ValueError") == "其他判断信号"
 
 
 def test_classify_failure_passes_through_jev_error_code() -> None:
+    """已有 JevError 原因码应原样透传，不被重新归类。"""
     error = JevError("x", code="jev_error:auth:401")
     assert classify_failure(error) == "jev_error:auth:401"
 
@@ -1408,11 +1587,13 @@ def test_classify_failure_keeps_unclassifiable_exception_verbose() -> None:
 
 
 def test_format_failure_fields_omits_empty_diagnostics() -> None:
+    """没有异常或异常不含诊断信息时，格式化结果应为空。"""
     assert format_failure_fields(None) == ""
     assert format_failure_fields(JevError("x")) == ""
 
 
 def test_format_failure_fields_reports_attempts_and_endpoint() -> None:
+    """诊断输出包含尝试次数、耗时和端点，且 HTTP 状态只出现一次。"""
     text = format_failure_fields(
         JevError(
             "x",
@@ -1451,6 +1632,7 @@ def test_describe_decision_renders_jev_failure_code() -> None:
 
 
 def test_describe_decision_renders_plain_code_without_suffix() -> None:
+    """不含状态码后缀的 Jev 禁用原因也应转换为中文说明。"""
     decision = build_fallback_decision(
         local_score=0.0,
         lower_bound=-0.2,
@@ -1483,13 +1665,21 @@ def test_describe_decision_still_falls_back_for_unknown_code() -> None:
 
 
 @contextmanager
-def _capture_chatter_logs(monkeypatch):
+def _capture_chatter_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[list[tuple[str, str]]]:
     """把 chatter 的日志调用收进列表。
 
     框架的 ``Logger``（``src/kernel/logger``）是自定义类，既不是标准库
     ``logging.Logger``，也不向 root 传播，因此 ``caplog`` 与 ``addHandler``
     都抓不到记录。这里直接替换实例上的 ``warning`` / ``debug`` 方法，
     只观察调用事实，不依赖日志器的内部实现。
+
+    Args:
+        monkeypatch: 用于替换日志方法的补丁夹具。
+
+    Yields:
+        按调用顺序保存日志级别和消息正文的列表。
     """
     from .. import chatter as chatter_module
 
@@ -1503,7 +1693,9 @@ def _capture_chatter_logs(monkeypatch):
     yield captured
 
 
-async def test_jev_failure_is_warned_even_when_falling_back(monkeypatch) -> None:
+async def test_jev_failure_is_warned_even_when_falling_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """默认 sub_actor 回退下也必须 WARNING——否则 Jev 静默失效无人察觉。"""
     with _capture_chatter_logs(monkeypatch) as captured:
         await _run_jev(
@@ -1521,18 +1713,22 @@ async def test_jev_failure_is_warned_even_when_falling_back(monkeypatch) -> None
     assert any("鉴权失败" in text for text in warnings), captured
 
 
-async def test_jev_disabled_stays_debug_to_avoid_warn_spam(monkeypatch) -> None:
+async def test_jev_disabled_stays_debug_to_avoid_warn_spam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """未启用不是"请求失败"，按灰区频率打 WARNING 会变成常态噪音。"""
     with _capture_chatter_logs(monkeypatch) as captured:
         await _run_jev(monkeypatch, _config(False, "ts_key"))
 
     assert not [text for level, text in captured if level == "warning"], captured
-    assert any(
-        level == "debug" and "Jev 未启用" in text for level, text in captured
-    ), captured
+    assert any(level == "debug" and "Jev 未启用" in text for level, text in captured), (
+        captured
+    )
 
 
-async def test_silent_fallback_reason_carries_specific_code(monkeypatch) -> None:
+async def test_silent_fallback_reason_carries_specific_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """silent 模式下决策原因必须是细分后的码，而不是 JevError 类名。"""
     decision = await _run_jev(
         monkeypatch,

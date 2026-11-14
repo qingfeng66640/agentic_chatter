@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -16,13 +17,13 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # pragma: no cover - 测试环境准备
     sys.path.insert(0, str(ROOT))
 
-from agentic_chatter.task_runtime.schedule import (  # noqa: E402
+from ..task_runtime.schedule import (  # noqa: E402
     ScheduleManager,
     ScheduleStore,
     init_schedule_manager,
     shutdown_schedule_manager,
 )
-from agentic_chatter.tooling.cron_tools import (  # noqa: E402
+from ..tooling.cron_tools import (  # noqa: E402
     CreateCronTool,
     DeleteCronTool,
     ReadCronTool,
@@ -31,12 +32,12 @@ from agentic_chatter.tooling.cron_tools import (  # noqa: E402
 
 
 @pytest.fixture
-def enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ScheduleManager:
+def enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[ScheduleManager]:
     """构造一个已启用的全局管理器。"""
-    manager = init_schedule_manager(
-        ScheduleStore(tmp_path / "db"), submitter=None
-    )
-    import agentic_chatter.tooling.cron_tools as cron_tools
+    manager = init_schedule_manager(ScheduleStore(tmp_path / "db"), submitter=None)
+    from ..tooling import cron_tools
 
     monkeypatch.setattr(cron_tools, "_get_manager", lambda: manager)
     yield manager
@@ -66,7 +67,7 @@ def tools() -> None:
 
 @pytest.mark.asyncio
 class TestCreateTool:
-    """cron_create。"""
+    """验证定时任务创建工具的参数约束和会话策略。"""
 
     async def test_creates_cron(self, enabled: ScheduleManager, tools: None) -> None:
         """创建循环任务成功。"""
@@ -112,7 +113,9 @@ class TestCreateTool:
         assert ok is False
         assert enabled.read_list() == ()
 
-    async def test_rejects_me_session(self, enabled: ScheduleManager, tools: None) -> None:
+    async def test_rejects_me_session(
+        self, enabled: ScheduleManager, tools: None
+    ) -> None:
         """me 不是合法会话目标。"""
         tool = _make(CreateCronTool)
         ok, message = await tool.execute(
@@ -147,7 +150,7 @@ class TestCreateTool:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """功能未启用时明确报错。"""
-        import agentic_chatter.tooling.cron_tools as cron_tools
+        from ..tooling import cron_tools
 
         monkeypatch.setattr(cron_tools, "_get_manager", lambda: None)
         tool = _make(CreateCronTool)
@@ -160,7 +163,7 @@ class TestCreateTool:
 
 @pytest.mark.asyncio
 class TestReadTool:
-    """cron_read。"""
+    """验证任务列表、详情与运行历史的查询结果。"""
 
     async def test_list_empty(self, enabled: ScheduleManager, tools: None) -> None:
         """没有任务时给出提示。"""
@@ -169,9 +172,7 @@ class TestReadTool:
         assert ok is True
         assert "没有定时任务" in message
 
-    async def test_list_and_detail(
-        self, enabled: ScheduleManager, tools: None
-    ) -> None:
+    async def test_list_and_detail(self, enabled: ScheduleManager, tools: None) -> None:
         """列表与详情都能读到。"""
         enabled.create(
             cron_name="巡检", prompt="p", stream_id="s", schedule="0 9 * * *"
@@ -189,9 +190,7 @@ class TestReadTool:
             cron_name="巡检", prompt="p", stream_id="s", schedule="0 9 * * *"
         )
         tool = _make(ReadCronTool)
-        ok, message = await tool.execute(
-            view="runs", cron_ref=str(record["cron_id"])
-        )
+        ok, message = await tool.execute(view="runs", cron_ref=str(record["cron_id"]))
         assert ok is True
 
     async def test_detail_requires_ref(
@@ -212,11 +211,9 @@ class TestReadTool:
 
 @pytest.mark.asyncio
 class TestUpdateTool:
-    """cron_update。"""
+    """验证定时规则更新、暂停和恢复的行为约束。"""
 
-    async def test_update_prompt(
-        self, enabled: ScheduleManager, tools: None
-    ) -> None:
+    async def test_update_prompt(self, enabled: ScheduleManager, tools: None) -> None:
         """修改指令成功且保留调度。"""
         record = enabled.create(
             cron_name="n", prompt="旧指令", stream_id="s", schedule="0 9 * * *"
@@ -237,9 +234,7 @@ class TestUpdateTool:
             cron_name="n", prompt="p", stream_id="s", schedule="0 9 * * *"
         )
         tool = _make(UpdateCronTool)
-        ok, _ = await tool.execute(
-            cron_ref=str(record["cron_id"]), enabled="false"
-        )
+        ok, _ = await tool.execute(cron_ref=str(record["cron_id"]), enabled="false")
         assert ok is True
         paused = enabled.read_detail(str(record["cron_id"]))
         assert paused is not None
@@ -273,9 +268,7 @@ class TestUpdateTool:
             cron_name="n", prompt="p", stream_id="s", schedule="0 9 * * *"
         )
         tool = _make(UpdateCronTool)
-        ok, _ = await tool.execute(
-            cron_ref=str(record["cron_id"]), prompt="只改指令"
-        )
+        ok, _ = await tool.execute(cron_ref=str(record["cron_id"]), prompt="只改指令")
         assert ok is True
         refreshed = enabled.read_detail(str(record["cron_id"]))
         assert refreshed is not None
@@ -298,7 +291,7 @@ class TestUpdateTool:
 
 @pytest.mark.asyncio
 class TestDeleteTool:
-    """cron_delete。"""
+    """验证删除任务时保留历史及处理无效任务引用。"""
 
     async def test_delete_removes(self, enabled: ScheduleManager, tools: None) -> None:
         """删除后任务消失但历史保留。"""

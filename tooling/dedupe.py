@@ -29,7 +29,9 @@ def redact_sensitive_value(value: Any) -> Any:
     """递归脱敏：把敏感键对应的值替换为 ``[REDACTED]``。"""
     if isinstance(value, dict):
         return {
-            key: "[REDACTED]" if _SENSITIVE_KEY_PATTERN.search(str(key)) else redact_sensitive_value(child)
+            key: "[REDACTED]"
+            if _SENSITIVE_KEY_PATTERN.search(str(key))
+            else redact_sensitive_value(child)
             for key, child in value.items()
         }
     if isinstance(value, (list, tuple)):
@@ -85,6 +87,7 @@ def build_result_preview(value: Any) -> tuple[str, bool]:
     if truncated:
         text = text[: MAX_ECHO_CHARS - 1] + "…"
     return text, truncated
+
 
 MAX_ECHO_CHARS = 200
 MAX_LOG_ARGS_CHARS = 1000

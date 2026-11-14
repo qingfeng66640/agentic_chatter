@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
 import json
 
 import pytest
 
-from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall, ToolResult
+from src.kernel.llm import ROLE, LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.payload.content import ReasoningText
 
 from ..tooling import provider_error_record as record_module
@@ -17,18 +22,25 @@ from ..tooling.provider_error_record import (
 
 
 class _SearchTool:
+    """提供检索工具 schema 的最小替身，供请求记录序列化使用。"""
+
     @classmethod
-    def to_schema(cls) -> dict:
+    def to_schema(cls) -> dict[str, object]:
+        """返回带 query 参数的检索工具定义。"""
         return {
             "function": {
                 "name": "tool-search",
                 "description": "检索资料",
-                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
             }
         }
 
 
 def _payloads() -> list[LLMPayload]:
+    """构造含人格、用户正文、工具调用及敏感字段的混合请求载荷。"""
     return [
         LLMPayload(
             ROLE.SYSTEM,
@@ -62,6 +74,7 @@ def _payloads() -> list[LLMPayload]:
 
 
 def test_request_record_redacts_system_persona_and_preserves_user_and_tools() -> None:
+    """记录脱敏系统人格和工具凭据，保留用户正文、调用关联并省略推理内容。"""
     record = build_provider_error_request_record(
         _payloads(),
         rule="google_prompt_policy_block",
@@ -103,7 +116,9 @@ def test_request_record_redacts_system_persona_and_preserves_user_and_tools() ->
     }
 
 
-def test_request_record_honors_total_size_limit(monkeypatch) -> None:
+def test_request_record_honors_total_size_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """总记录超过上限时仅保留装得下的完整 payload。"""
     monkeypatch.setattr(record_module, "_MAX_TOTAL_CHARS", 900)
     record = build_provider_error_request_record(
@@ -120,7 +135,10 @@ def test_request_record_honors_total_size_limit(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_append_request_record_uses_jsonl(monkeypatch, tmp_path) -> None:
+async def test_append_request_record_uses_jsonl(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """连续追加两条请求记录应生成两行独立 JSON，并返回记录文件路径。"""
     target = tmp_path / "provider_error_requests.jsonl"
     monkeypatch.setattr(record_module, "_RECORD_PATH", target)
     record = build_provider_error_request_record(

@@ -32,8 +32,8 @@ __all__ = [
 class EndTurnAction(BaseAction):
     """结束当前回合，等待对方回应。"""
 
-    action_name = "end_turn"
-    action_description = (
+    name = "end_turn"
+    description = (
         "结束这一轮，等待对方的下一条消息。"
         "当你该说的已经说完、该做的已经做完时调用它。"
         "如果传入 seconds，则不管对方有没有回应，都会在指定秒数后重新唤起你，"
@@ -41,6 +41,10 @@ class EndTurnAction(BaseAction):
     )
     primary_action = False
     associated_types = ["text"]
+
+    # 核心动作执行前事件仍读取历史字段，保留同值别名。
+    action_name = name
+    action_description = description
 
     async def execute(
         self,
@@ -68,14 +72,18 @@ class EndTurnAction(BaseAction):
 class StopConversationAction(BaseAction):
     """结束对话并进入冷却。"""
 
-    action_name = "stop_conversation"
-    action_description = (
+    name = "stop_conversation"
+    description = (
         "结束当前话题并进入冷却，冷却期内即使有新消息也不会唤起你。"
         "当这个话题确实聊完了、或者你暂时不想继续时使用。"
         "注意这比 end_turn 更彻底，不确定时优先用 end_turn。"
     )
     primary_action = False
     associated_types = ["text"]
+
+    # 核心动作执行前事件仍读取历史字段，保留同值别名。
+    action_name = name
+    action_description = description
 
     async def execute(
         self,

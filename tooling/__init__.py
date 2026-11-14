@@ -6,13 +6,13 @@
 from .dedupe import CallDeduper, DedupeDecision, DedupeMode, build_call_key
 from .explore import ExploreToolsTool
 from .manage_tasks import ManageTasksTool
-from .skills import ReadSkillReferenceTool, ReadSkillTool
 from .registry import (
     ToolLayout,
     build_encouragement_prompt,
     build_tool_layout,
     signature_matches,
 )
+from .skills import ReadSkillReferenceTool, ReadSkillTool
 
 __all__ = [
     "CallDeduper",

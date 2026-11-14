@@ -12,7 +12,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
-from src.kernel.llm import LLMPayload, ROLE, Text, ToolResult
+from src.kernel.llm import ROLE, LLMPayload, Text, ToolResult
 
 from ..humanize.segmenter import Segment, segment_reply
 from ..tooling.dedupe import build_result_preview
@@ -300,7 +300,9 @@ def append_control_tool_results(response: Any, calls: list[Any]) -> None:
     for call in control_calls:
         name = str(getattr(call, "name", "") or "")
         if call is not effective_call:
-            append_tool_result(response, call, "本次控制请求已被后续或更高优先级请求覆盖。")
+            append_tool_result(
+                response, call, "本次控制请求已被后续或更高优先级请求覆盖。"
+            )
         elif name == END_TURN_CALL:
             append_tool_result(response, call, "本轮已结束，等待后续消息。")
         else:

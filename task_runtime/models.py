@@ -169,7 +169,10 @@ class TaskState:
 
     def __post_init__(self) -> None:
         """初始化任务的执行起点。"""
-        if self.started_at is None and self.status in (TaskStatus.PLANNING, TaskStatus.RUNNING):
+        if self.started_at is None and self.status in (
+            TaskStatus.PLANNING,
+            TaskStatus.RUNNING,
+        ):
             self.started_at = self.created_at
 
     def elapsed_seconds(self) -> float:
@@ -189,8 +192,19 @@ class TaskState:
         """执行受限状态迁移。"""
         allowed = {
             TaskStatus.CREATED: {TaskStatus.PLANNING, TaskStatus.CANCELLED},
-            TaskStatus.PLANNING: {TaskStatus.RUNNING, TaskStatus.WAITING_USER, TaskStatus.FAILED, TaskStatus.CANCELLED},
-            TaskStatus.RUNNING: {TaskStatus.WAITING_USER, TaskStatus.PAUSED, TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED},
+            TaskStatus.PLANNING: {
+                TaskStatus.RUNNING,
+                TaskStatus.WAITING_USER,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            },
+            TaskStatus.RUNNING: {
+                TaskStatus.WAITING_USER,
+                TaskStatus.PAUSED,
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            },
             TaskStatus.WAITING_USER: {TaskStatus.RUNNING, TaskStatus.CANCELLED},
             TaskStatus.PAUSED: {TaskStatus.RUNNING, TaskStatus.CANCELLED},
             TaskStatus.SUCCEEDED: set(),

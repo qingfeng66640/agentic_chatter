@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Never
 
 import pytest
 
@@ -16,14 +17,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # pragma: no cover - 测试环境准备
     sys.path.insert(0, str(ROOT))
 
-from agentic_chatter.task_runtime.schedule import (  # noqa: E402
+from ..task_runtime.schedule import (  # noqa: E402
     ScheduleError,
     ScheduleManager,
     ScheduleStore,
 )
-from agentic_chatter.task_runtime.schedule import manager as manager_module  # noqa: E402
-from agentic_chatter.tooling import cron_tools  # noqa: E402
-from agentic_chatter.tooling.cron_tools import (  # noqa: E402
+from ..task_runtime.schedule import manager as manager_module  # noqa: E402
+from ..tooling import cron_tools  # noqa: E402
+from ..tooling.cron_tools import (  # noqa: E402
     CreateCronTool,
     DeleteCronTool,
     ReadCronTool,
@@ -34,7 +35,10 @@ from agentic_chatter.tooling.cron_tools import (  # noqa: E402
 _ORIGINAL_GET_MANAGER = cron_tools._get_manager
 
 
-def _make(tool_cls: type, stream_id: str = "stream-1") -> object:
+def _make(
+    tool_cls: type[CreateCronTool | ReadCronTool | UpdateCronTool | DeleteCronTool],
+    stream_id: str = "stream-1",
+) -> CreateCronTool | ReadCronTool | UpdateCronTool | DeleteCronTool:
     """构造工具实例并绑定当前聊天流。
 
     Args:
@@ -42,7 +46,7 @@ def _make(tool_cls: type, stream_id: str = "stream-1") -> object:
         stream_id: 伪装的当前聊天流。
 
     Returns:
-        object: 已绑定流 ID 的工具实例。
+        已绑定流 ID、与传入工具类对应的定时任务工具实例。
     """
     tool = tool_cls.__new__(tool_cls)  # noqa: SLF001 - 绕过框架构造，仅测 execute 逻辑
     tool.get_current_stream_id = lambda: stream_id  # type: ignore[method-assign]
@@ -123,7 +127,11 @@ class TestParseAgain:
     def test_cron_kind(self) -> None:
         """cron 类型被还原。"""
         parsed = manager_module._parse_again(  # noqa: SLF001
-            {"schedule_kind": "cron", "cron_expression": "0 9 * * *", "timezone_name": "UTC"}
+            {
+                "schedule_kind": "cron",
+                "cron_expression": "0 9 * * *",
+                "timezone_name": "UTC",
+            }
         )
         assert parsed.kind == "cron"
         assert parsed.cron_expression == "0 9 * * *"
@@ -220,7 +228,12 @@ class TestManagerEdges:
         store = ScheduleStore(tmp_path / "db")
         manager = ScheduleManager(store)
 
-        def boom() -> int:
+        def boom() -> Never:
+            """模拟恢复滞留认领时数据库被锁定。
+
+            Raises:
+                RuntimeError: 固定抛出数据库锁定异常。
+            """
             raise RuntimeError("db locked")
 
         monkeypatch.setattr(store, "reset_stale_claims", boom)
@@ -245,12 +258,18 @@ class TestManagerEdges:
         assert "缺少提交回调" in runs[0]["error"]
 
     @pytest.mark.asyncio
-    async def test_unreachable_expression_completes_task(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_unreachable_expression_completes_task(self, tmp_path: Path) -> None:
         """永不相遇的表达式把任务置为完成且不再排程。"""
 
         async def submitter(**_: object) -> str:
+            """返回固定任务标识，使不可达表达式的后续排程分支可被检查。
+
+            Args:
+                **_: 忽略任务提交参数。
+
+            Returns:
+                模拟成功创建的任务标识。
+            """
             return "t1"
 
         store = ScheduleStore(tmp_path / "db")
@@ -272,6 +291,14 @@ class TestManagerEdges:
         calls: list[str] = []
 
         def submitter(**_: object) -> str:
+            """同步记录任务提交，并返回用于运行历史断言的任务标识。
+
+            Args:
+                **_: 忽略任务提交参数。
+
+            Returns:
+                同步创建任务的固定标识。
+            """
             calls.append("x")
             return "task-sync"
 
@@ -462,6 +489,12 @@ class TestToolErrorBranches:
             original_update = manager.update
 
             def update_then_delete(*args: object, **kwargs: object) -> None:
+                """先调用原更新方法，再删除任务以模拟解析后的记录消失。
+
+                Args:
+                    *args: 原样转发给更新方法的位置参数。
+                    **kwargs: 原样转发给更新方法的关键字参数。
+                """
                 original_update(*args, **kwargs)  # type: ignore[arg-type]
                 manager.delete(str(record["cron_id"]))
 

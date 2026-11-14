@@ -162,7 +162,7 @@ def reason_text(code: str) -> str:
         if text is not None:
             return text
     if code.startswith("jev_exception:") and len(code) > len("jev_exception:"):
-        return f"Jev 调用失败（{code[len('jev_exception:'):]}）"
+        return f"Jev 调用失败（{code[len('jev_exception:') :]}）"
     return "其他判断信号"
 
 

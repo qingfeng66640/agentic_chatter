@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
 import re
 import time
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from .models import DecisionAction, DecisionFeatures, DecisionSource, ReplyDecision
 from .state import ParticipationState
 
-_QUESTION_RE = re.compile(r"[?？]|(?:吗|么|呢|怎么|为什么|为何|能否|可以|请问|帮我|麻烦|求助)")
-_CLOSURE_RE = re.compile(r"^(?:好(?:的|吧|啦)?|收到|知道了|明白了|行|嗯+|晚安|先这样|下次聊|没事了)[。！!~～…]*$")
+_QUESTION_RE = re.compile(
+    r"[?？]|(?:吗|么|呢|怎么|为什么|为何|能否|可以|请问|帮我|麻烦|求助)"
+)
+_CLOSURE_RE = re.compile(
+    r"^(?:好(?:的|吧|啦)?|收到|知道了|明白了|行|嗯+|晚安|先这样|下次聊|没事了)[。！!~～…]*$"
+)
 _LOW_INFO_RE = re.compile(r"^(?:[哈呵嘿嗯哦啊诶]+|[\W_]+|[1６6]+|ok|OK|hh+)$")
 
 
@@ -76,8 +80,10 @@ def _nickname_addresses_bot(
         for prefix in (nickname, f"@{nickname}", f"＠{nickname}"):
             if not normalized.startswith(prefix):
                 continue
-            suffix = normalized[len(prefix):]
-            return not suffix or suffix[0].isspace() or suffix[0] in "，。！？、：:;；,.!?"
+            suffix = normalized[len(prefix) :]
+            return (
+                not suffix or suffix[0].isspace() or suffix[0] in "，。！？、：:;；,.!?"
+            )
     return False
 
 
@@ -142,10 +148,7 @@ def extract_features(
     joined = "\n".join(texts)
     features = DecisionFeatures()
 
-    if any(
-        _nickname_addresses_bot(text, bot_nickname)
-        for text in texts
-    ):
+    if any(_nickname_addresses_bot(text, bot_nickname) for text in texts):
         features.direct_address = 1.0
         features.reasons.append("nickname_address")
 
@@ -191,9 +194,7 @@ def extract_features(
     else:
         features.semantic_continuity = max(0.0, min(1.0, semantic_continuity))
     if bot_history_continuity is not None:
-        features.bot_history_continuity = max(
-            0.0, min(1.0, bot_history_continuity)
-        )
+        features.bot_history_continuity = max(0.0, min(1.0, bot_history_continuity))
 
     since_reply = (
         current - participation.last_reply_at

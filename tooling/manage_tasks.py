@@ -74,9 +74,7 @@ def _resolve_task_ref(
         if 1 <= position <= len(tasks):
             return tasks[position - 1], ""
         candidates = [
-            runtime
-            for runtime in tasks
-            if runtime.state.task_id.startswith(normalized)
+            runtime for runtime in tasks if runtime.state.task_id.startswith(normalized)
         ]
         if len(candidates) == 1:
             return candidates[0], ""
@@ -86,9 +84,7 @@ def _resolve_task_ref(
         )
 
     candidates = [
-        runtime
-        for runtime in tasks
-        if runtime.state.task_id.startswith(normalized)
+        runtime for runtime in tasks if runtime.state.task_id.startswith(normalized)
     ]
     if len(candidates) == 1:
         return candidates[0], ""
@@ -101,18 +97,24 @@ def _resolve_task_ref(
 class ManageTasksTool(BaseTool):
     """列出、查询和取消当前聊天流的后台任务。"""
 
-    tool_name = "manage_tasks"
-    tool_description = (
+    name = "manage_tasks"
+    description = (
         "管理当前对话的后台任务。command=list 列出全部任务及状态/进度/目标；"
         "command=status 查询单个任务详情；command=cancel 取消指定任务。"
         "task_ref 填列表中的序号或任务ID前缀。"
         "用户问“任务怎么样了/任务列表”或要求停止某个任务时调用。"
     )
 
+    # 新代码使用统一属性，同时保留历史字段读取兼容性。
+    tool_name = name
+    tool_description = description
+
     async def execute(
         self,
         command: Annotated[str, "操作：list（默认）/ status / cancel"] = "list",
-        task_ref: Annotated[str, "任务序号（list 输出中的序号）或任务ID前缀（至少6位）"] = "",
+        task_ref: Annotated[
+            str, "任务序号（list 输出中的序号）或任务ID前缀（至少6位）"
+        ] = "",
     ) -> tuple[bool, str]:
         """执行任务管理命令。
 

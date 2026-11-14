@@ -17,7 +17,7 @@ from ..tooling import execution_cleanup, timeout
 from ..tooling.execution_cleanup import ExecutionCleanup
 from ..tooling.timed_calls import run_with_timeout
 from ..tooling.timeout import ToolExecutionScope
-from .test_tool_timeout import _Response, _Usable, _config
+from .test_tool_timeout import _config, _Response, _Usable
 
 
 class _ClosingIterator:

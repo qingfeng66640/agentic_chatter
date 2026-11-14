@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
+
 import random
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,11 +18,6 @@ from src.core.models.stream import ChatStream
 from src.core.prompt.template import PromptTemplate
 
 from ..chatter import AgenticChatter
-from ..decision.actor import (
-    _fallback,
-    _parse_decision_result,
-    _response_diagnostics,
-)
 from ..decision import (
     DecisionAction,
     DecisionFeatures,
@@ -26,6 +28,11 @@ from ..decision import (
     extract_features,
     hard_rule_decision,
     score_features,
+)
+from ..decision.actor import (
+    _fallback,
+    _parse_decision_result,
+    _response_diagnostics,
 )
 from ..pipeline.stages import (
     STAGE_ACT,
@@ -60,7 +67,6 @@ def test_contextual_fallback_keeps_gray_zone_reachable() -> None:
 
     assert decision.action == DecisionAction.RESPOND
     assert decision.source == DecisionSource.FALLBACK
-
 
 
 def test_nickname_address_enters_local_scoring() -> None:
@@ -263,7 +269,9 @@ def test_platform_mention_signal_triggers_hard_reply_without_ids() -> None:
         is_private=False,
         bot_id="",
         bot_nickname="小蝶",
-        unread_messages=[_message("@<小蝶：群内身份> @我一下", bot_was_mentioned=True, at_users=[])],
+        unread_messages=[
+            _message("@<小蝶：群内身份> @我一下", bot_was_mentioned=True, at_users=[])
+        ],
         bot_message_ids=set(),
     )
 
@@ -311,7 +319,11 @@ def test_platform_false_keeps_legacy_exact_mention_compatibility() -> None:
         is_private=False,
         bot_id="stable-bot-id",
         bot_nickname="小蝶",
-        unread_messages=[_message("你好", bot_was_mentioned=False, at_users=[{"user_id": "stable-bot-id"}])],
+        unread_messages=[
+            _message(
+                "你好", bot_was_mentioned=False, at_users=[{"user_id": "stable-bot-id"}]
+            )
+        ],
         bot_message_ids=set(),
     )
 
@@ -334,18 +346,24 @@ def test_non_boolean_platform_mention_signal_does_not_trigger_reply() -> None:
 
 def test_explicit_fallback_modes_ignore_recent_reply_suppression() -> None:
     """只有 contextual 受近期回复保护，显式模式保持原语义。"""
-    assert _fallback(
-        "fail_open",
-        local_score=0.0,
-        reasons=[],
-        suppress_contextual=True,
-    ).action == DecisionAction.RESPOND
-    assert _fallback(
-        "fail_closed",
-        local_score=0.0,
-        reasons=[],
-        suppress_contextual=True,
-    ).action == DecisionAction.SILENT
+    assert (
+        _fallback(
+            "fail_open",
+            local_score=0.0,
+            reasons=[],
+            suppress_contextual=True,
+        ).action
+        == DecisionAction.RESPOND
+    )
+    assert (
+        _fallback(
+            "fail_closed",
+            local_score=0.0,
+            reasons=[],
+            suppress_contextual=True,
+        ).action
+        == DecisionAction.SILENT
+    )
 
 
 def test_response_diagnostics_describes_empty_text_without_leaking_content() -> None:
@@ -375,6 +393,7 @@ def test_response_diagnostics_keeps_unknown_stop_reason() -> None:
 
 
 def test_response_diagnostics_handles_missing_stop_reason() -> None:
+    """结束原因为空时，诊断信息应明确显示未提供。"""
     response = SimpleNamespace(
         message="", reasoning_content="", call_list=[], stop_reason=""
     )
@@ -386,12 +405,11 @@ def test_parse_decision_result_accepts_common_wrappers() -> None:
     """兼容模型偶发输出的单元素数组和嵌套 JSON 字符串。"""
     expected = {"action": "respond", "confidence": 0.8}
 
-    assert _parse_decision_result(
-        '[{"action":"respond","confidence":0.8}]'
-    ) == expected
-    assert _parse_decision_result(
-        '"{\\"action\\":\\"respond\\",\\"confidence\\":0.8}"'
-    ) == expected
+    assert _parse_decision_result('[{"action":"respond","confidence":0.8}]') == expected
+    assert (
+        _parse_decision_result('"{\\"action\\":\\"respond\\",\\"confidence\\":0.8}"')
+        == expected
+    )
 
 
 def test_parse_decision_result_rejects_non_object() -> None:
@@ -412,7 +430,18 @@ def _message(
     reply_to: str | None = None,
     **extra: object,
 ) -> Message:
-    """构造测试消息。"""
+    """构造测试消息。
+
+    Args:
+        text: 消息正文，同时作为处理后的纯文本。
+        message_id: 消息标识。
+        sender_id: 发送者标识。
+        reply_to: 被引用的消息标识，None 表示没有引用。
+        **extra: 透传给消息模型的附加字段。
+
+    Returns:
+        供回复决策使用的群聊消息。
+    """
     return Message(
         message_id=message_id,
         content=text,
@@ -603,6 +632,7 @@ def test_local_reply_combination_respects_negative_guards() -> None:
         decision = score_features(feature, _decision_config())
         assert decision is None or decision.action == DecisionAction.SILENT
 
+
 def test_score_is_reproducible_with_fixed_rng() -> None:
     """固定 RNG 时灰区随机扰动应可复现。"""
     config = _decision_config(gray_zone_randomness=0.03)
@@ -622,12 +652,17 @@ def test_cosine_similarity_handles_invalid_vectors() -> None:
     assert cosine_similarity([1.0], [1.0, 2.0]) is None
 
 
-async def test_embedding_uses_one_batched_request(monkeypatch) -> None:
+async def test_embedding_uses_one_batched_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """一轮相关性判断只发一个有界批量 embedding 请求。"""
     captured: list[str] = []
 
     class Request:
-        async def send(self):
+        """提供固定批量向量的 embedding 请求替身。"""
+
+        async def send(self) -> SimpleNamespace:
+            """返回三组固定向量，使当前正文与话题相同、与机器人历史正交。"""
             return SimpleNamespace(
                 embeddings=[
                     [1.0, 0.0],
@@ -636,7 +671,19 @@ async def test_embedding_uses_one_batched_request(monkeypatch) -> None:
                 ]
             )
 
-    def create_request(_model_set, *, request_name: str, inputs: list[str]):
+    def create_request(
+        _model_set: list[dict[str, object]], *, request_name: str, inputs: list[str]
+    ) -> Request:
+        """校验请求名称并收集批量输入，返回不访问模型的请求替身。
+
+        Args:
+            _model_set: 由模型任务查询替身提供的配置列表，此处不使用。
+            request_name: 待校验的 embedding 请求名称。
+            inputs: 本轮一并提交的当前正文及候选文本。
+
+        Returns:
+            返回固定向量的请求替身。
+        """
         assert request_name == "agentic_reply_relevance"
         captured.extend(inputs)
         return Request()
@@ -678,7 +725,7 @@ def test_decide_stage_is_before_plan_and_act() -> None:
     assert order.index(STAGE_DECIDE) < order.index(STAGE_ACT)
 
 
-async def test_skill_alias_does_not_wake_silent_decision(tmp_path) -> None:
+async def test_skill_alias_does_not_wake_silent_decision(tmp_path: Path) -> None:
     """别名只提供 ACT 选择参考，不能覆盖 DECIDE 的静默结果。"""
     from ..tooling import skills
 
@@ -705,7 +752,20 @@ async def test_silent_decision_skips_plan_and_act_but_reflects() -> None:
     chatter._stage_act = AsyncMock()
     chatter._stage_reflect = AsyncMock()
 
-    async def decide(_config, _stream, state: TurnState, _messages) -> None:
+    async def decide(
+        _config: SimpleNamespace,
+        _stream: ChatStream,
+        state: TurnState,
+        _messages: list[Message],
+    ) -> None:
+        """将本轮状态设为本地静默裁决，以验证后续流水线阶段选择。
+
+        Args:
+            _config: 流水线传入的测试配置，不参与裁决。
+            _stream: 当前聊天流，不参与裁决。
+            state: 写入静默决策的本轮状态。
+            _messages: 当前未读消息，不参与裁决。
+        """
         state.decision = ReplyDecision(
             DecisionAction.SILENT,
             DecisionSource.LOCAL,

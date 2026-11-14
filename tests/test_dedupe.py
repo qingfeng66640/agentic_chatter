@@ -15,9 +15,8 @@ from ..tooling.dedupe import (
 
 
 def test_build_log_args_redacts_sensitive_values() -> None:
-    text = build_log_args(
-        {"query": "天气", "nested": {"api_key": "secret-value"}}
-    )
+    """嵌套敏感参数应脱敏，普通查询参数仍应保留在日志中。"""
+    text = build_log_args({"query": "天气", "nested": {"api_key": "secret-value"}})
 
     assert '"query":"天气"' in text
     assert "secret-value" not in text
@@ -25,6 +24,7 @@ def test_build_log_args_redacts_sensitive_values() -> None:
 
 
 def test_build_log_args_is_bounded_and_single_line() -> None:
+    """超长参数日志应保持单行，并在长度上限内以省略号结束。"""
     text = build_log_args({"value": "a\n" * 1000})
 
     assert "\n" not in text
@@ -33,6 +33,7 @@ def test_build_log_args_is_bounded_and_single_line() -> None:
 
 
 def test_build_log_args_replaces_unserializable_values() -> None:
+    """无法序列化的参数值应替换为固定占位标识。"""
     text = build_log_args({"value": object()})
 
     assert text == '{"value":"[UNSERIALIZABLE]"}'
@@ -46,23 +47,27 @@ def test_build_call_key_ignores_reason_field() -> None:
 
 
 def test_build_call_key_distinguishes_different_args() -> None:
+    """同一工具使用不同查询参数时，应得到不同去重键。"""
     first = build_call_key("tool-search", {"q": "天气"})
     second = build_call_key("tool-search", {"q": "股价"})
     assert first != second
 
 
 def test_build_call_key_handles_unserializable_args() -> None:
+    """参数含不可序列化对象时，仍应生成带工具名前缀的去重键。"""
     key = build_call_key("tool-x", {"obj": object()})
     assert key.startswith("tool-x:")
 
 
 def test_off_mode_never_blocks() -> None:
+    """关闭去重时，连续重复的同一调用都应获准执行。"""
     deduper = CallDeduper(mode="off")
     for _ in range(10):
         assert deduper.check("tool-a", {"x": 1}).allow
 
 
 def test_hard_mode_blocks_second_call() -> None:
+    """硬去重应放行首次调用，拒绝第二次相同调用并附带原因。"""
     deduper = CallDeduper(mode="hard")
     assert deduper.check("tool-a", {"x": 1}).allow
 
@@ -85,6 +90,7 @@ def test_soft_mode_allows_repeats_up_to_limit() -> None:
 
 
 def test_soft_mode_echoes_previous_result() -> None:
+    """软去重放行重复调用时，提示中应包含已记录的上次结果。"""
     deduper = CallDeduper(mode="soft", soft_limit=3)
 
     deduper.check("tool-a", {"x": 1})
@@ -96,6 +102,7 @@ def test_soft_mode_echoes_previous_result() -> None:
 
 
 def test_record_result_truncates_long_output() -> None:
+    """记录超长工具结果后，重复调用提示应限制长度。"""
     deduper = CallDeduper(mode="soft")
     deduper.check("tool-a", {"x": 1})
     deduper.record_result("tool-a", {"x": 1}, "长" * 1000)
@@ -105,6 +112,7 @@ def test_record_result_truncates_long_output() -> None:
 
 
 def test_record_result_serializes_dict() -> None:
+    """字典工具结果应转为可读提示，并保留其字段名。"""
     deduper = CallDeduper(mode="soft")
     deduper.check("tool-a", {"x": 1})
     deduper.record_result("tool-a", {"x": 1}, {"temp": 25})
@@ -113,8 +121,8 @@ def test_record_result_serializes_dict() -> None:
     assert "temp" in decision.note
 
 
-
 def test_result_preview_redacts_secrets_and_bounds_text() -> None:
+    """结果预览应脱敏秘密字段，并将超长正文截断到固定上限。"""
     preview, truncated = build_result_preview(
         {"token": "secret-value", "message": "长" * 300}
     )
@@ -125,6 +133,7 @@ def test_result_preview_redacts_secrets_and_bounds_text() -> None:
 
 
 def test_reset_clears_state() -> None:
+    """重置去重状态后，曾出现过的调用应重新获准执行。"""
     deduper = CallDeduper(mode="hard")
     deduper.check("tool-a", {"x": 1})
     deduper.reset()
@@ -133,6 +142,7 @@ def test_reset_clears_state() -> None:
 
 
 def test_different_tools_do_not_interfere() -> None:
+    """不同工具即使参数相同，也不应共享硬去重记录。"""
     deduper = CallDeduper(mode="hard")
     assert deduper.check("tool-a", {"x": 1}).allow
     assert deduper.check("tool-b", {"x": 1}).allow

@@ -14,7 +14,12 @@ from src.core.components.loader import register_plugin
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager, min_len, optional, wrap
 
-from .actions import DispatchTaskAction, EndTurnAction, SayAction, StopConversationAction
+from .actions import (
+    DispatchTaskAction,
+    EndTurnAction,
+    SayAction,
+    StopConversationAction,
+)
 from .chatter import (
     AgenticChatter,
     AgenticDiscussChatter,
@@ -33,7 +38,12 @@ from .prompts import (
 )
 from .schedule_service import start_schedule_service, stop_schedule_service
 from .service import PipelineService, TaskRuntimeService
-from .tooling import ExploreToolsTool, ManageTasksTool, ReadSkillReferenceTool, ReadSkillTool
+from .tooling import (
+    ExploreToolsTool,
+    ManageTasksTool,
+    ReadSkillReferenceTool,
+    ReadSkillTool,
+)
 from .tooling.cron_tools import (
     CreateCronTool,
     DeleteCronTool,
@@ -54,8 +64,7 @@ class AgenticChatterPlugin(BasePlugin):
     plugin_version = "0.8.1"
     plugin_author = "qf"
     plugin_description = (
-        "Agent 式回复流程聊天器：分层回复决策、纯文本即回复、"
-        "分层工具暴露、跨流全局心智"
+        "Agent 式回复流程聊天器：分层回复决策、纯文本即回复、分层工具暴露、跨流全局心智"
     )
     configs = [AgenticChatterConfig]
 
@@ -93,7 +102,9 @@ class AgenticChatterPlugin(BasePlugin):
                 ),
                 "reply_style": optional(personality.reply_style),
                 "safety_guidelines": optional("\n".join(personality.safety_guidelines)),
-                "negative_behaviors": optional("\n".join(personality.negative_behaviors)),
+                "negative_behaviors": optional(
+                    "\n".join(personality.negative_behaviors)
+                ),
                 "theme_guide": optional(""),
                 "tool_encouragement": optional(""),
                 "tool_call_mode_guidance": optional(""),
@@ -120,10 +131,13 @@ class AgenticChatterPlugin(BasePlugin):
                 "platform_id": optional("未知ID"),
                 "history": optional("")
                 .then(min_len(2))
-                .then(wrap("# 之前的对话\n", "\n（以上是历史记录，供你了解来龙去脉，不必复述）")),
-                "unreads": optional("")
-                .then(min_len(2))
-                .then(wrap("# 新消息\n", "")),
+                .then(
+                    wrap(
+                        "# 之前的对话\n",
+                        "\n（以上是历史记录，供你了解来龙去脉，不必复述）",
+                    )
+                ),
+                "unreads": optional("").then(min_len(2)).then(wrap("# 新消息\n", "")),
                 "extra": optional("").then(min_len(2)).then(wrap("# 补充\n", "")),
             },
         )

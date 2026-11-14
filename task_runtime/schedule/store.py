@@ -94,7 +94,9 @@ def _now_ms() -> int:
 class ScheduleStore:
     """定时任务的 SQLite 存储。"""
 
-    def __init__(self, directory: str | Path, filename: str = "schedules.sqlite3") -> None:
+    def __init__(
+        self, directory: str | Path, filename: str = "schedules.sqlite3"
+    ) -> None:
         """初始化存储。
 
         Args:
@@ -293,7 +295,9 @@ class ScheduleStore:
         )
         return True
 
-    def mark_run(self, run_cron_id: str, *, status: str, error: str = "", task_id: str = "") -> None:
+    def mark_run(
+        self, run_cron_id: str, *, status: str, error: str = "", task_id: str = ""
+    ) -> None:
         """更新运行结果。
 
         Args:
@@ -380,7 +384,9 @@ class ScheduleStore:
 
     # ==================== 固定线程历史 ====================
 
-    def append_thread_entry(self, cron_id: str, summary: str, *, max_entries: int = 10) -> None:
+    def append_thread_entry(
+        self, cron_id: str, summary: str, *, max_entries: int = 10
+    ) -> None:
         """追加一条固定线程历史，并按条数裁剪。"""
         now = _now_ms()
         with self._connect() as connection:
@@ -394,7 +400,9 @@ class ScheduleStore:
                 (cron_id, cron_id, int(max_entries)),
             )
 
-    def list_thread_entries(self, cron_id: str, *, limit: int = 10) -> tuple[dict[str, Any], ...]:
+    def list_thread_entries(
+        self, cron_id: str, *, limit: int = 10
+    ) -> tuple[dict[str, Any], ...]:
         """读取固定线程的历史（时间正序，便于注入上下文）。"""
         with self._connect() as connection:
             rows = connection.execute(
@@ -406,7 +414,9 @@ class ScheduleStore:
     def drop_thread_entries(self, cron_id: str) -> None:
         """删除某任务的全部线程历史。"""
         with self._connect() as connection:
-            connection.execute("DELETE FROM schedule_threads WHERE cron_id = ?", (cron_id,))
+            connection.execute(
+                "DELETE FROM schedule_threads WHERE cron_id = ?", (cron_id,)
+            )
 
 
 def describe_run(run: dict[str, Any]) -> str:

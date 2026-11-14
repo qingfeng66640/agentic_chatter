@@ -232,6 +232,7 @@ def start_task(
     )
 
     async def runner() -> None:
+        """执行受预算保护的任务、推送完成事件，并持久化及清理终态。"""
         runtime.state.metadata["validation_steps"] = tuple(request.validation_steps)
         if request.result_schema is not None:
             runtime.state.metadata["result_schema"] = request.result_schema
@@ -320,15 +321,21 @@ async def route_message(task_id: str, text: str) -> bool:
     active = _ACTIVE.get(task_id)
     if active is None:
         return False
-    if active.task.done() and active.task.cancelled() and active.executor.runtime.state.status == TaskStatus.CANCELLED:
+    if (
+        active.task.done()
+        and active.task.cancelled()
+        and active.executor.runtime.state.status == TaskStatus.CANCELLED
+    ):
         return False
     message = classify_task_message(text, task_id)
     if message.kind == TaskMessageKind.CHAT:
         return False
     if message.kind == TaskMessageKind.CONTROL and message.text == "status":
         result = active.executor.runtime.state.result
-        summary = result.summary if result is not None else (
-            f"任务状态：{active.executor.runtime.state.status.value}"
+        summary = (
+            result.summary
+            if result is not None
+            else (f"任务状态：{active.executor.runtime.state.status.value}")
         )
         await active.executor.send_notice(summary)
         return True
@@ -356,7 +363,11 @@ async def route_message(task_id: str, text: str) -> bool:
         elif message.text != "resume":
             return True
 
-    if message.kind == TaskMessageKind.CONTROL and message.text == "resume" and not active.task.done():
+    if (
+        message.kind == TaskMessageKind.CONTROL
+        and message.text == "resume"
+        and not active.task.done()
+    ):
         await active.executor.send_command(TaskCommand("resume"))
         return True
     # 运行至此只可能是 INPUT：status/pause/cancel 已在前置分支拦截，

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Never
 
 import pytest
 
@@ -16,13 +16,15 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # pragma: no cover - 测试环境准备
     sys.path.insert(0, str(ROOT))
 
-from agentic_chatter import schedule_service  # noqa: E402
+from .. import schedule_service  # noqa: E402
 
 
 class _FakeConfig:
     """最小化的插件配置替身。"""
 
-    def __init__(self, tasks_dir: str = "", schedule_dir: str = "", enabled: bool = True):
+    def __init__(
+        self, tasks_dir: str = "", schedule_dir: str = "", enabled: bool = True
+    ) -> None:
         """构造配置。
 
         Args:
@@ -38,7 +40,9 @@ class _FakeConfig:
 
 def test_database_directory_defaults_to_checkpoints() -> None:
     """未配置时复用任务检查点目录。"""
-    directory = schedule_service.build_schedule_directory(_FakeConfig(tasks_dir="data/x"))
+    directory = schedule_service.build_schedule_directory(
+        _FakeConfig(tasks_dir="data/x")
+    )
     assert directory is not None
     assert directory.endswith("schedules")
     assert "data/x" in directory
@@ -102,10 +106,10 @@ class _FakeScheduler:
 
     def __init__(self) -> None:
         """构造替身。"""
-        self.created: list[dict[str, Any]] = []
+        self.created: list[dict[str, object]] = []
         self.removed: list[str] = []
 
-    async def create_schedule(self, **kwargs: Any) -> str:
+    async def create_schedule(self, **kwargs: object) -> str:
         """记录创建的调度。
 
         Args:
@@ -142,9 +146,7 @@ class TestServiceLifecycle:
         scheduler = _FakeScheduler()
         manager_instance = _FakeManager()
 
-        monkeypatch.setattr(
-            schedule_service, "ScheduleStore", lambda directory: store
-        )
+        monkeypatch.setattr(schedule_service, "ScheduleStore", lambda directory: store)
         monkeypatch.setattr(
             schedule_service,
             "init_schedule_manager",
@@ -180,7 +182,15 @@ class TestServiceLifecycle:
     ) -> None:
         """数据库初始化失败时不阻断插件加载。"""
 
-        def boom(directory: str) -> None:
+        def boom(directory: str) -> Never:
+            """模拟构造日程存储时数据库无法创建。
+
+            Args:
+                directory: 接收但不实际创建的数据库目录。
+
+            Raises:
+                RuntimeError: 固定抛出数据库创建异常。
+            """
             raise RuntimeError("无法创建数据库")
 
         monkeypatch.setattr(schedule_service, "ScheduleStore", boom)
@@ -195,12 +205,20 @@ class TestServiceLifecycle:
         released: list[bool] = []
 
         class _BoomScheduler:
-            async def create_schedule(self, **kwargs: Any) -> str:
+            """在注册调度时抛出异常的内核调度器替身。"""
+
+            async def create_schedule(self, **kwargs: object) -> Never:
+                """拒绝注册扫描调度以触发管理器释放分支。
+
+                Args:
+                    **kwargs: 接收但不使用的调度注册参数。
+
+                Raises:
+                    RuntimeError: 固定抛出内核调度器不可用异常。
+                """
                 raise RuntimeError("内核调度器不可用")
 
-        monkeypatch.setattr(
-            schedule_service, "ScheduleStore", lambda directory: store
-        )
+        monkeypatch.setattr(schedule_service, "ScheduleStore", lambda directory: store)
         monkeypatch.setattr(
             schedule_service,
             "init_schedule_manager",
@@ -219,9 +237,7 @@ class TestServiceLifecycle:
         await schedule_service.start_schedule_service(plugin)
         assert released == [True]
 
-    async def test_stop_unregisters(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_stop_unregisters(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """停止时注销扫描调度。"""
         scheduler = _FakeScheduler()
         monkeypatch.setattr(
@@ -239,13 +255,10 @@ class TestServiceLifecycle:
         await schedule_service.stop_schedule_service()
         assert scheduler.removed == [schedule_service.SCHEDULER_TASK_NAME]
         assert released == [True]
-    async def test_stop_without_manager(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+
+    async def test_stop_without_manager(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """未启动时停止是安全的空操作。"""
-        monkeypatch.setattr(
-            schedule_service, "get_schedule_manager", lambda: None
-        )
+        monkeypatch.setattr(schedule_service, "get_schedule_manager", lambda: None)
         released: list[bool] = []
         monkeypatch.setattr(
             schedule_service,
@@ -261,7 +274,17 @@ class TestServiceLifecycle:
         """注销失败不阻断卸载。"""
 
         class _BoomScheduler:
-            async def remove_schedule_by_name(self, task_name: str) -> bool:
+            """在注销调度时抛出异常的内核调度器替身。"""
+
+            async def remove_schedule_by_name(self, task_name: str) -> Never:
+                """模拟扫描调度注销失败。
+
+                Args:
+                    task_name: 待注销调度的名称。
+
+                Raises:
+                    RuntimeError: 固定抛出注销失败异常。
+                """
                 raise RuntimeError("注销失败")
 
         monkeypatch.setattr(
@@ -312,42 +335,77 @@ class TestSubmitter:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """触发时在目标流创建复杂任务并注入固定线程上下文。"""
+        from .. import chatter as chatter_module
+        from ..task_runtime import coordinator as coordinator_module
+        from ..task_runtime import runtime as runtime_module
+
         plugin = type("P", (), {"config": _FakeConfig(tasks_dir=str(tmp_path))})()
         submit = schedule_service._make_submitter(plugin)  # noqa: SLF001
 
-        created: list[dict[str, Any]] = []
+        created: list[dict[str, str]] = []
 
         class _Runtime:
+            """只保存任务标识且启动为空操作的复杂任务运行时替身。"""
+
             def __init__(self, task_id: str) -> None:
+                """将给定任务标识写入运行时状态，供提交回调读取。
+
+                Args:
+                    task_id: 模拟创建的任务标识。
+                """
                 self.state = type("S", (), {"task_id": task_id})()
 
             def start(self) -> None:
                 """对齐 TaskRuntime.start 的空实现。"""
 
         class _RuntimeManager:
-            def get_active_tasks(self, stream_id: str) -> list[Any]:
+            """记录目标聊天流与任务目标，并创建固定任务标识的管理器替身。"""
+
+            def get_active_tasks(self, stream_id: str) -> list[_Runtime]:
+                """报告空活动任务列表，使目标流具备可用任务额度。
+
+                Args:
+                    stream_id: 被查询的聊天流标识。
+
+                Returns:
+                    不包含活动任务的运行时列表。
+                """
                 return []
 
-            def create(self, stream_id: str, goal: str, **kwargs: Any) -> _Runtime:
+            def create(self, stream_id: str, goal: str, **kwargs: object) -> _Runtime:
+                """记录任务的聊天流和目标，并返回固定标识的运行时替身。
+
+                Args:
+                    stream_id: 新任务所属的聊天流。
+                    goal: 新任务的目标文本。
+                    **kwargs: 接收但不使用的其他任务配置。
+
+                Returns:
+                    任务标识固定为 task-42 的运行时替身。
+                """
                 created.append({"stream_id": stream_id, "goal": goal})
                 return _Runtime("task-42")
 
-        started: list[Any] = []
+        started: list[tuple[object, ...]] = []
 
         monkeypatch.setattr(
-            "agentic_chatter.task_runtime.runtime.get_task_runtime_manager",
+            runtime_module,
+            "get_task_runtime_manager",
             lambda: _RuntimeManager(),
         )
         monkeypatch.setattr(
-            "agentic_chatter.task_runtime.runtime.get_task_runtime_manager",
+            runtime_module,
+            "get_task_runtime_manager",
             lambda: _RuntimeManager(),
         )
         monkeypatch.setattr(
-            "agentic_chatter.task_runtime.coordinator.start_task",
+            coordinator_module,
+            "start_task",
             lambda *args: started.append(args),
         )
         monkeypatch.setattr(
-            "agentic_chatter.chatter.AgenticChatter",
+            chatter_module,
+            "AgenticChatter",
             lambda stream_id, plugin_arg: object(),
         )
 
@@ -370,19 +428,33 @@ class TestSubmitter:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """活动任务达上限时跳过触发。"""
+        from ..task_runtime import runtime as runtime_module
+
         plugin = type("P", (), {"config": _FakeConfig(tasks_dir=str(tmp_path))})()
         submit = schedule_service._make_submitter(plugin)  # noqa: SLF001
 
         class _RuntimeManager:
-            def get_active_tasks(self, stream_id: str) -> list[Any]:
+            """固定报告两个活动任务以触发容量上限的管理器替身。"""
+
+            def get_active_tasks(self, stream_id: str) -> list[object]:
+                """返回两个占位对象，模拟聊天流已经用满任务额度。
+
+                Args:
+                    stream_id: 被查询的聊天流标识。
+
+                Returns:
+                    两个代表活动任务的占位对象。
+                """
                 return [object(), object()]
 
         monkeypatch.setattr(
-            "agentic_chatter.task_runtime.runtime.get_task_runtime_manager",
+            runtime_module,
+            "get_task_runtime_manager",
             lambda: _RuntimeManager(),
         )
         monkeypatch.setattr(
-            "agentic_chatter.task_runtime.runtime.get_task_runtime_manager",
+            runtime_module,
+            "get_task_runtime_manager",
             lambda: _RuntimeManager(),
         )
 

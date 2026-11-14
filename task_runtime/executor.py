@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.app.plugin_system.api import llm_api, send_api
-from src.kernel.llm import LLMPayload, ROLE, Text
+from src.kernel.llm import ROLE, LLMPayload, Text
 
 from ..humanize.segmenter import clean_reply_text_with_metadata
 from ..pipeline.loop import END_TURN_CALL, STOP_CALL
@@ -35,7 +35,7 @@ def _strip_schema_prefix(name: str) -> str:
     """剥掉 schema 调用名的组件类型前缀。"""
     for prefix in _SCHEMA_NAME_PREFIXES:
         if name.startswith(prefix):
-            return name[len(prefix):]
+            return name[len(prefix) :]
     return name
 
 
@@ -123,7 +123,9 @@ class TaskExecutor:
             names = (
                 signature,
                 component_name,
-                _strip_schema_prefix(f"tool-{component_name}") if component_name else "",
+                _strip_schema_prefix(f"tool-{component_name}")
+                if component_name
+                else "",
                 str(getattr(component_cls, "tool_name", "") or ""),
                 str(getattr(component_cls, "action_name", "") or ""),
                 str(getattr(component_cls, "agent_name", "") or ""),
@@ -160,13 +162,18 @@ class TaskExecutor:
             return False
 
         def matches(value: Any, rule: dict[str, Any]) -> bool:
+            """递归校验结果值的类型、枚举、必填字段及嵌套结构。"""
             expected = rule.get("type")
             type_matches = {
                 "object": lambda: isinstance(value, dict),
                 "array": lambda: isinstance(value, list),
                 "string": lambda: isinstance(value, str),
-                "integer": lambda: isinstance(value, int) and not isinstance(value, bool),
-                "number": lambda: isinstance(value, (int, float)) and not isinstance(value, bool),
+                "integer": lambda: (
+                    isinstance(value, int) and not isinstance(value, bool)
+                ),
+                "number": lambda: (
+                    isinstance(value, (int, float)) and not isinstance(value, bool)
+                ),
                 "boolean": lambda: isinstance(value, bool),
                 "null": lambda: value is None,
             }
@@ -181,9 +188,10 @@ class TaskExecutor:
                 if any(field not in value for field in required):
                     return False
                 properties = rule.get("properties", {})
-                if any(field not in properties for field in value) and rule.get(
-                    "additionalProperties", True
-                ) is False:
+                if (
+                    any(field not in properties for field in value)
+                    and rule.get("additionalProperties", True) is False
+                ):
                     return False
                 if any(
                     field in value and not matches(value[field], child_rule)
@@ -269,7 +277,11 @@ class TaskExecutor:
             max_subtasks=self.runtime.state.budget.max_subtasks,
         )
         factory = TaskExecutorFactory(self.chatter, self.runtime)
-        async def execute_subtask(spec: Any, *, dependency_context: str = "") -> TaskResult:
+
+        async def execute_subtask(
+            spec: Any, *, dependency_context: str = ""
+        ) -> TaskResult:
+            """为单个子任务继承父请求的结果格式和验证步骤。"""
             return await factory.execute(
                 spec,
                 dependency_context=dependency_context,
@@ -308,7 +320,9 @@ class TaskExecutor:
                 response = await response.send(stream=True)
                 await response
                 calls = list(getattr(response, "call_list", None) or [])
-                normal_calls, denied_calls, confirmation_calls = self._classify_calls(calls)
+                normal_calls, denied_calls, confirmation_calls = self._classify_calls(
+                    calls
+                )
                 if confirmation_calls:
                     names = "、".join(confirmation_calls)
                     return self.runtime.set_waiting_user(f"工具 {names} 需要用户确认")
@@ -323,7 +337,9 @@ class TaskExecutor:
                         request, normal_calls, response, registry, executed_tools
                     )
                 else:
-                    return await self._finalize_result(request, executed_tools, response)
+                    return await self._finalize_result(
+                        request, executed_tools, response
+                    )
                 if budget_result is not None:
                     return budget_result
             return self.runtime.state.result or TaskResult(
@@ -382,7 +398,9 @@ class TaskExecutor:
             signature = build_call_key(name, getattr(call, "args", {}))
             # call.name 是带类型前缀的 schema 名（如 tool-read_file），
             # 需还原为组件名再过权限策略，与注入侧判定保持一致。
-            permission = self.runtime.classify_tool(_strip_schema_prefix(name), signature)
+            permission = self.runtime.classify_tool(
+                _strip_schema_prefix(name), signature
+            )
             if permission == ToolPermission.ALLOW:
                 normal_calls.append(call)
             elif permission == ToolPermission.CONFIRM:

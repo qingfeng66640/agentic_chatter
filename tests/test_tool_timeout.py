@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from src.core.components.base.tool import BaseTool
 from src.kernel.concurrency import get_task_manager
-from src.kernel.llm import LLMPayload, LLMUsableExecution, ROLE, ToolCall, ToolResult
+from src.kernel.llm import ROLE, LLMPayload, LLMUsableExecution, ToolCall, ToolResult
 from src.kernel.llm.usable_execution import execute_usable_instance
 
 from ..chatter import AgenticChatter

@@ -36,13 +36,22 @@ class _Msg:
         role: str = "user",
         reply_to: str = "",
     ) -> None:
+        """保存信号提取所需的发送者、正文、角色和引用信息。
+
+        Args:
+            sender_id: 发送者账号标识。
+            sender_name: 发送者显示名。
+            text: 消息正文。
+            role: 发送者角色，默认为用户。
+            reply_to: 被引用的消息标识，空字符串表示未引用。
+        """
         self.sender_id = sender_id
         self.sender_name = sender_name
         self.content = text
         self.processed_plain_text = None
         self.sender_role = role
         self.reply_to = reply_to
-        self.extra: dict = {}
+        self.extra: dict[str, object] = {}
 
 
 class _Participation:
@@ -54,7 +63,15 @@ class _Participation:
     consecutive_silence = 0
 
 
-def _config(**overrides) -> SimpleNamespace:
+def _config(**overrides: object) -> SimpleNamespace:
+    """构造含固定权重和边界的本地评分配置，允许覆盖指定字段。
+
+    Args:
+        **overrides: 覆盖默认评分参数的字段值。
+
+    Returns:
+        可通过属性访问评分参数的配置替身。
+    """
     base = {
         "local_reply_lower_bound": 0.30,
         "local_silent_upper_bound": -0.25,
@@ -77,7 +94,16 @@ def _config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def _features(semantic, bot_semantic) -> DecisionFeatures:
+def _features(semantic: float | None, bot_semantic: float | None) -> DecisionFeatures:
+    """为同一条群聊消息注入指定的语义连续性，提取本地评分特征。
+
+    Args:
+        semantic: 与当前话题的语义连续性，None 表示未知。
+        bot_semantic: 与机器人历史的语义连续性，None 表示未知。
+
+    Returns:
+        包含语义信号和不确定度的决策特征。
+    """
     return extract_features(
         unread_messages=[_Msg("u1", "小明", "这个方案我觉得可以")],
         bot_id="bot-1",
@@ -134,6 +160,7 @@ def test_no_semantic_unknown_penalty_when_semantics_disabled() -> None:
 
 
 def test_disabled_semantics_are_zero_not_unset() -> None:
+    """显式禁用语义计算时，两个连续性字段都保留零值而非未知值。"""
     disabled = _features(0.0, 0.0)
 
     assert disabled.semantic_continuity == 0.0
@@ -160,8 +187,7 @@ def test_embedding_and_scoring_live_inside_the_gate_block() -> None:
     gate = next(
         node
         for node in ast.walk(stage)
-        if isinstance(node, ast.If)
-        and "local_gate_enabled" in ast.unparse(node.test)
+        if isinstance(node, ast.If) and "local_gate_enabled" in ast.unparse(node.test)
     )
     gate_span = (
         min(statement.lineno for statement in gate.body),
@@ -169,11 +195,11 @@ def test_embedding_and_scoring_live_inside_the_gate_block() -> None:
     )
 
     def _call_line(fn_name: str) -> int:
+        """定位决策阶段中指定函数调用的源码行号。"""
         return next(
             call.lineno
             for call in ast.walk(stage)
-            if isinstance(call, ast.Call)
-            and ast.unparse(call.func) == fn_name
+            if isinstance(call, ast.Call) and ast.unparse(call.func) == fn_name
         )
 
     assert gate_span[0] <= _call_line("compute_semantic_relevance") <= gate_span[1]
@@ -195,8 +221,7 @@ def test_bounds_are_not_compared_outside_the_gate() -> None:
     gate = next(
         node
         for node in ast.walk(stage)
-        if isinstance(node, ast.If)
-        and "local_gate_enabled" in ast.unparse(node.test)
+        if isinstance(node, ast.If) and "local_gate_enabled" in ast.unparse(node.test)
     )
     gate_span = (
         min(statement.lineno for statement in gate.body),

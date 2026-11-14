@@ -7,9 +7,11 @@ croniter 可用路径、存储的并发认领与空更新等。
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Never
 
 import pytest
 
@@ -17,16 +19,16 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:  # pragma: no cover - 测试环境准备
     sys.path.insert(0, str(ROOT))
 
-from agentic_chatter.task_runtime.schedule import expression as expression_module  # noqa: E402
-from agentic_chatter.task_runtime.schedule import (  # noqa: E402
+from ..task_runtime.schedule import (  # noqa: E402
     ScheduleError,
     ScheduleManager,
     ScheduleStore,
     parse_cron,
     parse_schedule,
 )
-from agentic_chatter.task_runtime.schedule import manager as manager_module  # noqa: E402
-from agentic_chatter.task_runtime.schedule import store as store_module  # noqa: E402
+from ..task_runtime.schedule import expression as expression_module  # noqa: E402
+from ..task_runtime.schedule import manager as manager_module  # noqa: E402
+from ..task_runtime.schedule import store as store_module  # noqa: E402
 
 CST = timezone(timedelta(hours=8))
 MONDAY = datetime(2026, 10, 19, 8, 0, tzinfo=CST)
@@ -53,7 +55,7 @@ class TestFieldParsing:
             parse_cron("0 9 * * 5-1")
 
     def test_no_valid_values_rejected(self) -> None:
-        """取值全部越界时��拒绝。"""
+        """取值全部越界时被拒绝。"""
         with pytest.raises(ScheduleError):
             parse_cron("0 9 * * 70")
 
@@ -125,11 +127,27 @@ class TestCroniterPath:
         captured: dict[str, object] = {}
 
         class _FakeCroniter:
+            """记录 cron 表达式与起点，并固定返回 2030 年触发时刻的替身。"""
+
             def __init__(self, expression: str, start: datetime) -> None:
+                """记录传给 croniter 的表达式和起始时间。
+
+                Args:
+                    expression: 待计算下一次触发的 cron 表达式。
+                    start: 下一次触发计算的起始时刻。
+                """
                 captured["expression"] = expression
                 captured["start"] = start
 
-            def get_next(self, kind: type) -> datetime:
+            def get_next(self, kind: type[datetime]) -> datetime:
+                """用调用方指定的日期时间类型构造固定触发时刻。
+
+                Args:
+                    kind: croniter 接口要求返回的日期时间类型。
+
+                Returns:
+                    2030 年 1 月 1 日 09:00 的 UTC 时刻。
+                """
                 return kind(2030, 1, 1, 9, 0, tzinfo=timezone.utc)
 
         monkeypatch.setattr(expression_module, "_croniter", _FakeCroniter)
@@ -144,10 +162,26 @@ class TestCroniterPath:
         """Schedule 在 croniter 可用时同样走该分支。"""
 
         class _FakeCroniter:
+            """保留计算起点，并固定返回 2031 年触发时刻的 croniter 替身。"""
+
             def __init__(self, expression: str, start: datetime) -> None:
+                """保存调度定义传入的计算起点。
+
+                Args:
+                    expression: 接收但不解析的 cron 表达式。
+                    start: 保存为实例状态的计算起点。
+                """
                 self._start = start
 
-            def get_next(self, kind: type) -> datetime:
+            def get_next(self, kind: type[datetime]) -> datetime:
+                """用指定的日期时间类型返回固定的后续触发时刻。
+
+                Args:
+                    kind: croniter 接口要求返回的日期时间类型。
+
+                Returns:
+                    2031 年 5 月 5 日 05:05 的 UTC 时刻。
+                """
                 return kind(2031, 5, 5, 5, 5, tzinfo=timezone.utc)
 
         monkeypatch.setattr(expression_module, "_croniter", _FakeCroniter)
@@ -289,9 +323,7 @@ class TestManagerUpdateBranches:
         record = manager.create(
             cron_name="n", prompt="p", stream_id="s", schedule="0 9 * * *"
         )
-        updated = manager.update(
-            str(record["cron_id"]), timezone_name="Asia/Shanghai"
-        )
+        updated = manager.update(str(record["cron_id"]), timezone_name="Asia/Shanghai")
         assert updated is not None
         assert updated["cron_expression"] == "0 9 * * *"
         assert updated["timezone_name"] == "Asia/Shanghai"
@@ -310,7 +342,7 @@ class TestManagerUpdateBranches:
 
     def test_get_schedule_manager_returns_instance(self, tmp_path: Path) -> None:
         """全局管理器可获取与释放。"""
-        from agentic_chatter.task_runtime import schedule as schedule_pkg
+        from ..task_runtime import schedule as schedule_pkg
 
         store = ScheduleStore(tmp_path / "db")
         instance = schedule_pkg.init_schedule_manager(store)
@@ -331,6 +363,14 @@ class TestRunForever:
         scans: list[int] = []
 
         async def fake_scan() -> int:
+            """记录扫描次数，并在第二次扫描时取消后台循环。
+
+            Returns:
+                首次扫描返回零，表示没有提交任务。
+
+            Raises:
+                asyncio.CancelledError: 记录到至少两次扫描时终止循环。
+            """
             scans.append(1)
             if len(scans) >= 2:
                 raise asyncio.CancelledError
@@ -351,24 +391,47 @@ class TestSubmitterValueError:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """任务创建失败时返回空串而不是抛出。"""
-        from agentic_chatter import schedule_service
+        from .. import schedule_service
+        from ..task_runtime import runtime as runtime_module
 
         plugin = type("P", (), {"config": _Config(tasks_dir=str(tmp_path))})()
         submit = schedule_service._make_submitter(plugin)  # noqa: SLF001
 
         class _RuntimeManager:
+            """活动任务列表为空，但创建任务时报告容量异常的管理器替身。"""
+
             def get_active_tasks(self, stream_id: str) -> list[object]:
+                """返回空活动任务列表，使提交进入任务创建分支。
+
+                Args:
+                    stream_id: 查询活动任务的聊天流标识。
+
+                Returns:
+                    不包含活动任务的列表。
+                """
                 return []
 
-            def create(self, stream_id: str, goal: str, **kwargs: object) -> object:
+            def create(self, stream_id: str, goal: str, **kwargs: object) -> Never:
+                """在创建阶段模拟任务数量超限。
+
+                Args:
+                    stream_id: 目标聊天流标识。
+                    goal: 待创建任务的目标。
+                    **kwargs: 接收但不使用的其他任务配置。
+
+                Raises:
+                    ValueError: 固定抛出任务容量超限异常。
+                """
                 raise ValueError("任务数超限")
 
         monkeypatch.setattr(
-            "agentic_chatter.task_runtime.runtime.get_task_runtime_manager",
+            runtime_module,
+            "get_task_runtime_manager",
             lambda: _RuntimeManager(),
         )
         monkeypatch.setattr(
-            "agentic_chatter.task_runtime.runtime.get_task_runtime_manager",
+            runtime_module,
+            "get_task_runtime_manager",
             lambda: _RuntimeManager(),
         )
         result = await submit(
@@ -401,8 +464,8 @@ class TestGetManagerOriginal:
 
     def test_get_manager_returns_global(self, tmp_path: Path) -> None:
         """未启用时返回 None，启用后返回全局实例。"""
-        from agentic_chatter.task_runtime import schedule as schedule_pkg
-        from agentic_chatter.tooling.cron_tools import _get_manager
+        from ..task_runtime import schedule as schedule_pkg
+        from ..tooling.cron_tools import _get_manager
 
         schedule_pkg.shutdown_schedule_manager()
         assert _get_manager() is None
@@ -455,9 +518,18 @@ class TestStoreConcurrentClaim:
         calls = {"n": 0}
 
         def insert_then_steal(
-            connection: object, record: dict[str, object], now_ms: int
+            connection: sqlite3.Connection, record: dict[str, object], now_ms: int
         ) -> bool:
-            """第一次插入后抢占该行，使条件更新不再命中。"""
+            """第一次插入后抢占该行，使条件更新不再命中。
+
+            Args:
+                connection: 当前认领事务使用的 SQLite 连接。
+                record: 本次准备认领的调度记录。
+                now_ms: 传给原始插入方法的当前毫秒时间戳。
+
+            Returns:
+                首次调用返回真；后续调用不插入并返回假。
+            """
             calls["n"] += 1
             if calls["n"] == 1:
                 original_insert(connection, record, now_ms)  # type: ignore[arg-type]
@@ -524,7 +596,7 @@ class TestRunsViewNonEmpty:
     @pytest.mark.asyncio
     async def test_runs_view_lists_records(self, tmp_path: Path) -> None:
         """有运行记录时列出内容。"""
-        from agentic_chatter.tooling import cron_tools
+        from ..tooling import cron_tools
 
         store = ScheduleStore(tmp_path / "db")
         manager = ScheduleManager(store)

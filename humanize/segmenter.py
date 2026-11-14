@@ -78,6 +78,7 @@ def clean_reply_text_with_metadata(text: str) -> CleanReplyResult:
     removed: list[str] = []
 
     def remove_block(match: re.Match[str]) -> str:
+        """移除匹配的思考块，并保存清除标签后的内部文本。"""
         value = match.group(0)
         inner = re.sub(r"^\s*(?:<[^>]+>|\[[^]]+\]|【[^】]+】)", "", value)
         inner = re.sub(r"(?:</[^>]+>|\[/[^]]+\]|【/[^】]+】)\s*$", "", inner)
@@ -134,12 +135,9 @@ def detect_provider_error_text(text: str) -> str | None:
     if not normalized:
         return None
 
-    gemini_blocked = (
-        "this request was blocked by gemini's filters" in normalized
-        and (
-            "try rephrasing your prompt" in normalized
-            or "they can occasionally trigger by mistake" in normalized
-        )
+    gemini_blocked = "this request was blocked by gemini's filters" in normalized and (
+        "try rephrasing your prompt" in normalized
+        or "they can occasionally trigger by mistake" in normalized
     )
     if gemini_blocked:
         return "gemini_filter_block"
@@ -260,9 +258,7 @@ def _atoms_with_flags(text: str) -> list[tuple[str, bool]]:
     return split_into_atoms(text, units)
 
 
-def _last_free_index(
-    atoms: list[tuple[str, bool]], endings: str, limit: int
-) -> int:
+def _last_free_index(atoms: list[tuple[str, bool]], endings: str, limit: int) -> int:
     """在上限内找到最后一个可安全切分的原子边界。
 
     标点必须落在普通字符原子上；落在不可拆单元上说明该标点属于颜文字

@@ -34,7 +34,7 @@ _COMBINING = "̀-ͯ҃-҉᪰-᫿᷀-᷿⃐-⃰"
 # 变体选择符、keycap 组合键、ZWJ
 _VARIATION = "︎️⃣‍"
 # 区域指示符与 tag 序列（旗帜、国旗）
-_TAG = "\U000E0020-\U000E007F"
+_TAG = "\U000e0020-\U000e007f"
 
 _MODIFIERS = _COMBINING + _VARIATION
 _CLUSTER_BODY = "[^" + _MODIFIERS + _TAG + "]"
@@ -42,9 +42,18 @@ _CLUSTER_BODY = "[^" + _MODIFIERS + _TAG + "]"
 # 优先使用 regex 的 \X（完整 grapheme cluster）；
 # 降级路径用手写状态机，规则等价于「基字符 + 若干修饰符 + 若干 ZWJ 连接段」。
 _GRAPHEME_RE = (
-    _regex.compile(r"\X") if _regex is not None else _re.compile(
-        "(?:" + _CLUSTER_BODY + "[" + _MODIFIERS + "]*(?:‍" + _CLUSTER_BODY
-        + "[" + _MODIFIERS + "]*)*)*"
+    _regex.compile(r"\X")
+    if _regex is not None
+    else _re.compile(
+        "(?:"
+        + _CLUSTER_BODY
+        + "["
+        + _MODIFIERS
+        + "]*(?:‍"
+        + _CLUSTER_BODY
+        + "["
+        + _MODIFIERS
+        + "]*)*)*"
     )
 )
 
@@ -53,7 +62,7 @@ _GRAPHEME_RE = (
 _EMOJI_RE = (
     _regex.compile(r"\p{Extended_Pictographic}|[⃣\U0001F100-\U0001F1FF]" + _TAG)
     if _regex is not None
-    else _re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️⃣]")
+    else _re.compile("[\U0001f000-\U0001faff☀-➿⬀-⯿️⃣]")
 )
 
 # emoji 基字符：用于判断当前字符是否应交给 \X 聚合。
@@ -61,9 +70,7 @@ _EMOJI_RE = (
 _EMOJI_BASE_RE = (
     _regex.compile(r"\p{Extended_Pictographic}|[\U0001F100-\U0001F1FF" + _TAG + "⃣]")
     if _regex is not None
-    else _re.compile(
-        "[\U0001F000-\U0001FAFF☀-➿⬀-⯿️⃣\U0001F100-\U0001F1FF]"
-    )
+    else _re.compile("[\U0001f000-\U0001faff☀-➿⬀-⯿️⃣\U0001f100-\U0001f1ff]")
 )
 
 # keycap 序列（1️⃣、#️⃣）的基字符是 ASCII 数字/井号/星号，
@@ -205,28 +212,28 @@ def _is_strong_face_char(char: str) -> bool:
     if category == "Sk":
         return True
     # 几何眼形与口部：(°ω°) (╹◡╹) (◠‿◠) (▽ω▽)
-    if 0x25a0 <= codepoint <= 0x25ff or 0x2500 <= codepoint <= 0x257f:
+    if 0x25A0 <= codepoint <= 0x25FF or 0x2500 <= codepoint <= 0x257F:
         return True
     # 泰文眼珠：(๑•̀ㅂ•́)
-    if 0x0e50 <= codepoint <= 0x0e59:
+    if 0x0E50 <= codepoint <= 0x0E59:
         return True
     # 希腊字母：颜文字最常见的嘴型 ω
-    if 0x0370 <= codepoint <= 0x03ff:
+    if 0x0370 <= codepoint <= 0x03FF:
         return True
     # 方言音符、彝文等表格文字
-    if 0xa000 <= codepoint <= 0xa4cf:
+    if 0xA000 <= codepoint <= 0xA4CF:
         return True
     # 组合记号：(´◡` ) 中的重音符
     if category == "Mn" or unicodedata.combining(char):
         return True
     # 假名浊音符与小写假名：(っ・ω・っ)
-    if 0x3041 <= codepoint <= 0x309f or 0x30a1 <= codepoint <= 0x30ff:
+    if 0x3041 <= codepoint <= 0x309F or 0x30A1 <= codepoint <= 0x30FF:
         return True
     # 连接符类泪纹：(:﹏﹏:) 里的 ﹏
     if category == "Pc":
         return True
     # 彝文与加拿大音节文字：(꒰ᐢ꒱) 的眼形部件
-    if 0xa000 <= codepoint <= 0xa4cf or 0x1400 <= codepoint <= 0x167f:
+    if 0xA000 <= codepoint <= 0xA4CF or 0x1400 <= codepoint <= 0x167F:
         return True
     return False
 
@@ -250,15 +257,15 @@ def _has_face_signature(inner: str) -> bool:
         # 明确的眼嘴部件
         if category == "Sk":
             return True
-        if 0x25a0 <= codepoint <= 0x25ff or 0x2500 <= codepoint <= 0x257f:
+        if 0x25A0 <= codepoint <= 0x25FF or 0x2500 <= codepoint <= 0x257F:
             return True
-        if 0x0e50 <= codepoint <= 0x0e59 or 0x0370 <= codepoint <= 0x03ff:
+        if 0x0E50 <= codepoint <= 0x0E59 or 0x0370 <= codepoint <= 0x03FF:
             return True
         if category == "Mn" or unicodedata.combining(char):
             return True
-        if 0x3041 <= codepoint <= 0x309f or 0x30a1 <= codepoint <= 0x30ff:
+        if 0x3041 <= codepoint <= 0x309F or 0x30A1 <= codepoint <= 0x30FF:
             return True
-        if 0xa000 <= codepoint <= 0xa4cf or 0x1400 <= codepoint <= 0x167f:
+        if 0xA000 <= codepoint <= 0xA4CF or 0x1400 <= codepoint <= 0x167F:
             return True
         # 连接符类泪纹：(:﹏﹏:)
         if category == "Pc":
@@ -440,9 +447,7 @@ def find_units(text: str) -> list[Unit]:
         if _EMOJI_BASE_RE.match(char) is not None or _starts_keycap(text, position):
             cluster = _GRAPHEME_RE.match(text, position)
             if cluster is not None and cluster.end() > position:
-                units.append(
-                    Unit(position, cluster.end(), cluster.group(0), "emoji")
-                )
+                units.append(Unit(position, cluster.end(), cluster.group(0), "emoji"))
                 position = cluster.end()
                 continue
 
@@ -450,9 +455,7 @@ def find_units(text: str) -> list[Unit]:
         if char in _WAVES:
             end = _scan_waved(text, position)
             if end is not None:
-                units.append(
-                    Unit(position, end, text[position:end], "kaomoji")
-                )
+                units.append(Unit(position, end, text[position:end], "kaomoji"))
                 position = end
                 continue
 
@@ -461,18 +464,14 @@ def find_units(text: str) -> list[Unit]:
             end = _scan_bracketed(text, position)
             if end is not None:
                 end = _extend_tail(text, end)
-                units.append(
-                    Unit(position, end, text[position:end], "kaomoji")
-                )
+                units.append(Unit(position, end, text[position:end], "kaomoji"))
                 position = end
                 continue
 
         # 5) 网络缩写
         match = _LATIN_EMOTICON.match(text, position)
         if match is not None and match.end() > position:
-            units.append(
-                Unit(position, match.end(), match.group(0), "kaomoji")
-            )
+            units.append(Unit(position, match.end(), match.group(0), "kaomoji"))
             position = match.end()
             continue
 

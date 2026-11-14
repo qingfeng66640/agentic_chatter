@@ -40,7 +40,9 @@ _BASE64_RAW_DENOMINATOR = 4
 #: ``[图片(a1):a]b[图片(cd34)]`` 会在第一个 ``]`` 处截断并把后面的
 #: ``[图片(cd34)]`` 一并吞掉，导致**预算内、本该内联的图凭空消失**。
 #: 禁止方括号后，这类文本退化为"整段不匹配、原样透传"，不会破坏结构。
-_IMAGE_PLACEHOLDER_PATTERN = re.compile(r"\[图片(?:\(([0-9a-fA-F]+)\)(?::[^\[\]]*)?)?\]")
+_IMAGE_PLACEHOLDER_PATTERN = re.compile(
+    r"\[图片(?:\(([0-9a-fA-F]+)\)(?::[^\[\]]*)?)?\]"
+)
 
 #: 无 media_id 的 ``[图片:描述]`` 形态（``converter.py`` 在有描述但无 media_id 时产出）。
 #: 要求「图片」后紧跟「:」加至少一个非空白非右括号字符，因此**不会**误匹配
@@ -219,7 +221,11 @@ def _collect_candidates(
     for message in ordered:
         for item in _media_items(message):
             image_id = item.get("image_id")
-            if not isinstance(image_id, str) or not image_id or image_id in seen_image_ids:
+            if (
+                not isinstance(image_id, str)
+                or not image_id
+                or image_id in seen_image_ids
+            ):
                 continue
             seen_image_ids.add(image_id)
             candidates.append((image_id, item))
@@ -282,7 +288,10 @@ def _select_within_budget(
     dropped = {"count": 0, "bytes": 0, "oversize": 0, "placeholder_slots": 0}
     used = 0
 
-    for pool, slots in ((referenced, None), (unreferenced, min(bare_slots, max_images))):
+    for pool, slots in (
+        (referenced, None),
+        (unreferenced, min(bare_slots, max_images)),
+    ):
         remaining_slots = slots
         for index, (image_id, item) in enumerate(pool):
             if remaining_slots is not None and remaining_slots <= 0:
@@ -329,7 +338,7 @@ def _payload_body(data: str) -> str:
     if payload.startswith("data:") and "base64," in payload:
         payload = payload.split("base64,", 1)[1]
     if payload.startswith("base64|"):
-        payload = payload[len("base64|"):]
+        payload = payload[len("base64|") :]
     return payload.replace("\n", "").replace("\r", "").replace(" ", "")
 
 
@@ -462,7 +471,7 @@ def _resolve_placeholder(
     cursor = 0
 
     for match in _IMAGE_PLACEHOLDER_PATTERN.finditer(text):
-        _append_source_text(content, text[cursor:match.start()])
+        _append_source_text(content, text[cursor : match.start()])
         image_id = match.group(1)
 
         if image_id is None:
@@ -475,7 +484,7 @@ def _resolve_placeholder(
             else:
                 content.append(Text(_OMITTED_TEXT))
         elif image_id in intext:
-            desc = match.group(0)[len(f"[图片({image_id})"):]
+            desc = match.group(0)[len(f"[图片({image_id})") :]
             content.append(Text(f"[图片(同图,上文已提供){desc}"))
         else:
             image = (
@@ -689,11 +698,7 @@ def build_image_content(
         # 必须把张数证据补回去，否则会退化成 unknown，丢失"上限为 0"
         # 这一明确成因。该分支直接返回文本，不经过 _safe_image，无发射阶段拒绝。
         available = len(
-            {
-                image_id
-                for message in messages
-                for image_id in _image_ids(message)
-            }
+            {image_id for message in messages for image_id in _image_ids(message)}
         )
         dropped = {
             "count": available,
@@ -702,8 +707,11 @@ def build_image_content(
             "placeholder_slots": 0,
         }
         summary = summarize_budget(
-            content, messages, max_bytes=max_bytes,
-            dropped=dropped, invalid_payloads=0,
+            content,
+            messages,
+            max_bytes=max_bytes,
+            dropped=dropped,
+            invalid_payloads=0,
         )
         return content, summary
 
@@ -728,7 +736,10 @@ def build_image_content(
     )
     invalid_payloads = _REJECTED_PAYLOADS["invalid"] - rejected_before
     summary = summarize_budget(
-        content, messages, max_bytes=max_bytes, dropped=dropped,
+        content,
+        messages,
+        max_bytes=max_bytes,
+        dropped=dropped,
         invalid_payloads=invalid_payloads,
     )
     return content, summary
@@ -737,4 +748,3 @@ def build_image_content(
 def image_count(messages: list[Message]) -> int:
     """统计消息中带可用图片载荷的媒体项数量。"""
     return sum(len(_media_items(message)) for message in messages)
-

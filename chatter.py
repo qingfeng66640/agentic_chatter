@@ -38,20 +38,20 @@ from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
 from src.core.utils.context_compression import default_chat_context_compression_handler
 from src.kernel.llm import (
-    LLMContextManager,
-    LLMRequest,
-    LLMPayload,
     ROLE,
+    LLMContextManager,
+    LLMPayload,
+    LLMRequest,
     Text,
     ToolRegistry,
 )
 
 from .config import AgenticChatterConfig
 from .decision import (
-    action_text,
     DecisionAction,
     DecisionSource,
     ReplyDecision,
+    action_text,
     compute_semantic_relevance,
     decide_with_sub_actor,
     describe_decision,
@@ -66,8 +66,8 @@ from .decision.jev import (
     DEFAULT_JEV_BASE_URL,
     JevError,
     JevSettings,
-    _MessageView,
     _clip,
+    _MessageView,
     build_decision,
     build_fallback_decision,
     build_state,
@@ -80,7 +80,6 @@ from .global_mind import get_global_mind, render_global_awareness
 from .humanize.attention import should_get_distracted, should_interrupt
 from .humanize.mood import describe_mood_for_prompt, infer_mood_delta
 from .humanize.qqbot_streaming import create_streaming_session
-from .multimodal import build_image_content
 from .humanize.segmenter import (
     CleanReplyResult,
     clean_reply_text_with_metadata,
@@ -88,13 +87,7 @@ from .humanize.segmenter import (
     detect_reply_decision_json_text,
     is_framework_message_line,
 )
-from .pipeline.mailbox import (
-    StreamMailbox,
-    TurnClaim,
-    get_stream_mailbox,
-    message_key,
-    safe_error_type,
-)
+from .multimodal import build_image_content
 from .pipeline.loop import (
     append_control_tool_results,
     append_interrupted_tool_results,
@@ -109,6 +102,13 @@ from .pipeline.loop import (
     is_repeated_reply,
     should_continue_loop,
 )
+from .pipeline.mailbox import (
+    StreamMailbox,
+    TurnClaim,
+    get_stream_mailbox,
+    message_key,
+    safe_error_type,
+)
 from .pipeline.stages import (
     STAGE_ACT,
     STAGE_DECIDE,
@@ -121,25 +121,10 @@ from .pipeline.state import (
     ToolExecutionRecord,
     TurnState,
 )
-
 from .prompts import (
     DEFAULT_HOW_YOU_ACT,
     DEFAULT_HOW_YOU_SPEAK,
     DEFAULT_WHEN_TO_STOP,
-)
-from .tooling.dedupe import CallDeduper, build_log_args
-from .tooling.timed_calls import run_with_timeout
-from .tooling.explore import (
-    ExploreToolsTool,
-    clear_stream_catalog,
-    consume_expansion,
-    set_stream_catalog,
-)
-from .tooling.registry import (
-    build_encouragement_prompt,
-    build_tool_layout,
-    is_blacklisted_component,
-    signature_matches,
 )
 from .task_runtime import (
     TaskBudget,
@@ -169,14 +154,30 @@ from .task_runtime.coordinator import (
     route_message,
     start_task,
 )
-from .tooling.skills import ReadSkillReferenceTool, ReadSkillTool, clear_scope, skill_catalog
+from .tooling.dedupe import CallDeduper, build_log_args
+from .tooling.explore import (
+    ExploreToolsTool,
+    clear_stream_catalog,
+    consume_expansion,
+    set_stream_catalog,
+)
 from .tooling.provider_error_record import (
     append_provider_error_request_record,
     build_provider_error_request_record,
 )
-
-
-
+from .tooling.registry import (
+    build_encouragement_prompt,
+    build_tool_layout,
+    is_blacklisted_component,
+    signature_matches,
+)
+from .tooling.skills import (
+    ReadSkillReferenceTool,
+    ReadSkillTool,
+    clear_scope,
+    skill_catalog,
+)
+from .tooling.timed_calls import run_with_timeout
 
 _TASK_KEYWORDS = {
     TaskType.RESEARCH: ("查询资料", "搜索资料", "查资料", "调研"),
@@ -194,7 +195,9 @@ def _task_request_for_runtime(runtime: Any) -> TaskRequest:
     template = get_task_templates().get(runtime.state.task_type)
     return TaskRequest(
         objective=runtime.state.user_goal,
-        result_schema=runtime.state.metadata.get("result_schema", template.result_schema),
+        result_schema=runtime.state.metadata.get(
+            "result_schema", template.result_schema
+        ),
         validation_steps=tuple(
             runtime.state.metadata.get("validation_steps", template.validation_steps)
         ),
@@ -236,7 +239,9 @@ def _build_task_budget(config: AgenticChatterConfig) -> TaskBudget:
 
 def _is_task_enabled(config: AgenticChatterConfig | None) -> bool:
     """判断复杂任务运行时是否开启。"""
-    return config is not None and bool(getattr(getattr(config, "tasks", None), "enabled", False))
+    return config is not None and bool(
+        getattr(getattr(config, "tasks", None), "enabled", False)
+    )
 
 
 def _restore_persisted_tasks(
@@ -274,6 +279,7 @@ def _restore_persisted_tasks(
         ):
             register_task(chatter, restored, request, task_store)
     return manager
+
 
 if TYPE_CHECKING:
     from src.core.components.types import ChatterResult
@@ -357,7 +363,9 @@ _BUDGET_REASON_TEXT = {
 def _thought_log_line(stream_id: str, source: str, content: str) -> str:
     """构建单行、限长的主 Agent 思考日志。"""
     normalized = " ".join(
-        "".join(character if character.isprintable() else " " for character in str(content)).split()
+        "".join(
+            character if character.isprintable() else " " for character in str(content)
+        ).split()
     )
     prefix = f"[{stream_id[:8]}] 主 Agent 思考 来源={source} 内容="
     if len(prefix) >= MAX_THOUGHT_LOG_CHARS:
@@ -583,7 +591,9 @@ class _AgenticChatterBase(BaseChatter):
                         ):
                             report_events = pending_completed_events(self.stream_id)
                             if report_events:
-                                state.task_report = build_task_report_prompt(report_events)
+                                state.task_report = build_task_report_prompt(
+                                    report_events
+                                )
                         turn_result, claim = await self._run_normal_turn(
                             config,
                             mailbox,
@@ -593,7 +603,12 @@ class _AgenticChatterBase(BaseChatter):
                             unread_msgs,
                             generation,
                         )
-                        if report_events and claim is None and not state.failed and state.spoke:
+                        if (
+                            report_events
+                            and claim is None
+                            and not state.failed
+                            and state.spoke
+                        ):
                             acknowledge_completed_events(self.stream_id, report_events)
             except asyncio.CancelledError:
                 raise
@@ -614,7 +629,11 @@ class _AgenticChatterBase(BaseChatter):
             finally:
                 try:
                     if claim is not None:
-                        if state is not None and state.failed and not state.interrupted_by_new_input:
+                        if (
+                            state is not None
+                            and state.failed
+                            and not state.interrupted_by_new_input
+                        ):
                             # 确认期间取消也不能把已失败输入重新放回执行队列。
                             await mailbox.fail_claim(
                                 claim,
@@ -625,10 +644,14 @@ class _AgenticChatterBase(BaseChatter):
                                 tool_count=len(state.tool_ledger),
                             )
                         else:
-                            await self._release_claim_safely(mailbox, claim, generation, "收尾时")
+                            await self._release_claim_safely(
+                                mailbox, claim, generation, "收尾时"
+                            )
                 finally:
                     if is_turn_owner:
-                        await self._release_owner_safely(mailbox, turn_token, generation, "mailbox")
+                        await self._release_owner_safely(
+                            mailbox, turn_token, generation, "mailbox"
+                        )
 
             resume_event = yield turn_result
 
@@ -738,9 +761,13 @@ class _AgenticChatterBase(BaseChatter):
                 if notice:
                     # 多任务消歧：提示用户带序号或任务ID前缀
                     try:
-                        await send_api.send_text(content=notice, stream_id=self.stream_id)
+                        await send_api.send_text(
+                            content=notice, stream_id=self.stream_id
+                        )
                     except Exception as exc:
-                        logger.warning(f"[{self.stream_id[:8]}] 任务消歧提示发送失败：{exc}")
+                        logger.warning(
+                            f"[{self.stream_id[:8]}] 任务消歧提示发送失败：{exc}"
+                        )
                     consumed = True
                     continue
                 if command == "status":
@@ -754,10 +781,14 @@ class _AgenticChatterBase(BaseChatter):
                                 content=describe_tasks(tasks), stream_id=self.stream_id
                             )
                         except Exception as exc:
-                            logger.warning(f"[{self.stream_id[:8]}] 任务状态发送失败：{exc}")
+                            logger.warning(
+                                f"[{self.stream_id[:8]}] 任务状态发送失败：{exc}"
+                            )
                         consumed = True
                     continue
-                if target is not None and await route_message(target.state.task_id, text):
+                if target is not None and await route_message(
+                    target.state.task_id, text
+                ):
                     routed_task = target
                     consumed = True
                 continue
@@ -783,7 +814,10 @@ class _AgenticChatterBase(BaseChatter):
                 unread_text,
                 task_type=task_type,
                 parent_turn_id=f"{self.stream_id}:{generation}",
-                allowed_tools=tuple(getattr(config.tasks, "default_allowed_tools", ()) or ()) or None,
+                allowed_tools=tuple(
+                    getattr(config.tasks, "default_allowed_tools", ()) or ()
+                )
+                or None,
                 budget=_build_task_budget(config),
                 denied_tools=tuple(getattr(config.tasks, "denied_tools", ()) or ()),
             )
@@ -794,7 +828,9 @@ class _AgenticChatterBase(BaseChatter):
                     content=f"任务创建失败：{exc}", stream_id=self.stream_id
                 )
             except Exception as notify_exc:
-                logger.warning(f"[{self.stream_id[:8]}] 任务创建失败提示发送失败：{notify_exc}")
+                logger.warning(
+                    f"[{self.stream_id[:8]}] 任务创建失败提示发送失败：{notify_exc}"
+                )
             return None
         task_runtime.start()
         logger.info(
@@ -939,10 +975,7 @@ class _AgenticChatterBase(BaseChatter):
 
         match = await self._match_claim_unreads(unread_msgs)
         if match is None:
-            raise RuntimeError(
-                "消息确认不完整："
-                f"expected={len(unread_msgs)} actual=0"
-            )
+            raise RuntimeError(f"消息确认不完整：expected={len(unread_msgs)} actual=0")
         is_committed = await mailbox.commit_claim(
             claim,
             apply=lambda: self._apply_claim_unread_match(match),
@@ -986,7 +1019,9 @@ class _AgenticChatterBase(BaseChatter):
         state.error_type = safe_error_type(type(error).__name__)
         status_code = getattr(error, "status_code", None)
         state.error_status_code = (
-            status_code if type(status_code) is int and 100 <= status_code <= 599 else None
+            status_code
+            if type(status_code) is int and 100 <= status_code <= 599
+            else None
         )
 
     async def _finish_failed_turn(
@@ -1016,7 +1051,9 @@ class _AgenticChatterBase(BaseChatter):
             status_code=state.error_status_code,
             spoke=state.spoke,
             tool_count=len(state.tool_ledger),
-            apply=(lambda: self._apply_claim_unread_match(match)) if match is not None else None,
+            apply=(lambda: self._apply_claim_unread_match(match))
+            if match is not None
+            else None,
         )
         if record is None:
             logger.error(
@@ -1025,7 +1062,11 @@ class _AgenticChatterBase(BaseChatter):
             )
         else:
             state.input_confirmed = record.input_acknowledged
-            reason = "模型调用失败" if record.failure_kind == "model_error" else "回合执行失败"
+            reason = (
+                "模型调用失败"
+                if record.failure_kind == "model_error"
+                else "回合执行失败"
+            )
             logger.warning(
                 f"[{self.stream_id[:8]}] 回合失败终止 事件=回合失败终止 "
                 f"代次={record.generation} 消息数={record.message_count} "
@@ -1129,7 +1170,9 @@ class _AgenticChatterBase(BaseChatter):
 
                 custom_stage = get_custom_stage(stage_name)
                 if custom_stage is None:
-                    logger.warning(f"[{self.stream_id[:8]}] 未注册管线阶段：{stage_name}")
+                    logger.warning(
+                        f"[{self.stream_id[:8]}] 未注册管线阶段：{stage_name}"
+                    )
                     continue
                 await custom_stage.run(
                     state,
@@ -1198,8 +1241,7 @@ class _AgenticChatterBase(BaseChatter):
             personality = get_core_config().personality
             nicknames.add(str(getattr(personality, "nickname", "") or ""))
             nicknames.update(
-                str(alias)
-                for alias in getattr(personality, "alias_names", []) or []
+                str(alias) for alias in getattr(personality, "alias_names", []) or []
             )
         except RuntimeError:
             pass
@@ -1330,7 +1372,9 @@ class _AgenticChatterBase(BaseChatter):
             if semantic is not None or bot_semantic is not None:
                 features.uncertainty = max(0.0, features.uncertainty - 0.18)
                 features.reasons = [
-                    reason for reason in features.reasons if reason != "semantic_unknown"
+                    reason
+                    for reason in features.reasons
+                    if reason != "semantic_unknown"
                 ]
             local_decision = score_features(features, decision_config)
             if local_decision is not None:
@@ -1381,9 +1425,7 @@ class _AgenticChatterBase(BaseChatter):
             self._log_reply_decision(state.decision)
             return
 
-        template = get_prompt_manager().get_template(
-            "agentic_chatter_reply_decision"
-        )
+        template = get_prompt_manager().get_template("agentic_chatter_reply_decision")
         system_prompt = (
             await template.build()
             if template is not None
@@ -1432,9 +1474,11 @@ class _AgenticChatterBase(BaseChatter):
             ReplyDecision | None: 需要静默时返回静默决策，否则返回 None 交由
                 调用方回退 sub_actor。
         """
-        mode = str(
-            getattr(jev_config, "fallback_decider", "sub_actor") or "sub_actor"
-        ).strip().lower()
+        mode = (
+            str(getattr(jev_config, "fallback_decider", "sub_actor") or "sub_actor")
+            .strip()
+            .lower()
+        )
         silent = mode == "silent"
         action = (
             "回退策略为静默，本轮灰区静默，不调用子决策模型"
@@ -1505,7 +1549,12 @@ class _AgenticChatterBase(BaseChatter):
         """
         if config is None:
             return None
-        if str(getattr(decision_config, "gray_zone_decider", "sub_actor") or "").strip().lower() != "jev":
+        if (
+            str(getattr(decision_config, "gray_zone_decider", "sub_actor") or "")
+            .strip()
+            .lower()
+            != "jev"
+        ):
             return None
         jev_config = getattr(config, "jev", None)
         if jev_config is None or not bool(getattr(jev_config, "enabled", False)):
@@ -1530,13 +1579,9 @@ class _AgenticChatterBase(BaseChatter):
 
         settings = JevSettings(
             api_key=api_key,
-            base_url=str(
-                getattr(jev_config, "base_url", "") or DEFAULT_JEV_BASE_URL
-            ),
+            base_url=str(getattr(jev_config, "base_url", "") or DEFAULT_JEV_BASE_URL),
             model=str(getattr(jev_config, "model", "jev-latest") or "jev-latest"),
-            timeout_seconds=float(
-                getattr(jev_config, "timeout_seconds", 8.0) or 8.0
-            ),
+            timeout_seconds=float(getattr(jev_config, "timeout_seconds", 8.0) or 8.0),
             total_budget_seconds=float(
                 # 兜底值与 config.py 的 JevSection.total_budget_seconds 保持一致：
                 # 正常运行时该属性必然存在，此处只是替身对象缺属性时的保底。
@@ -1720,20 +1765,29 @@ class _AgenticChatterBase(BaseChatter):
 
         layout = self._build_layout(config, usables)
         blacklist = [] if config is None else list(config.tools.blacklist)
-        layout.exposed = [usable for usable in layout.exposed if usable is not ExploreToolsTool]
+        layout.exposed = [
+            usable for usable in layout.exposed if usable is not ExploreToolsTool
+        ]
         skill_tools = (ReadSkillTool, ReadSkillReferenceTool)
-        layout.exposed = [usable for usable in layout.exposed if usable not in skill_tools]
-        if (config is None or getattr(getattr(config, "skills", None), "enabled", True)) and skill_catalog():
+        layout.exposed = [
+            usable for usable in layout.exposed if usable not in skill_tools
+        ]
+        if (
+            config is None or getattr(getattr(config, "skills", None), "enabled", True)
+        ) and skill_catalog():
             layout.exposed[:0] = [
-                usable for usable in skill_tools
+                usable
+                for usable in skill_tools
                 if usable in usables
                 and not is_blacklisted_component(usable, blacklist)
-                and not signature_matches(f"agentic_chatter:tool:{usable.tool_name}", blacklist)
+                and not signature_matches(
+                    f"agentic_chatter:tool:{usable.name}", blacklist
+                )
             ]
         explore_enabled = config is None or bool(config.tools.enable_explore_tools)
-        explore_blacklisted = is_blacklisted_component(ExploreToolsTool, blacklist) or signature_matches(
-            "agentic_chatter:tool:explore_tools", blacklist
-        )
+        explore_blacklisted = is_blacklisted_component(
+            ExploreToolsTool, blacklist
+        ) or signature_matches("agentic_chatter:tool:explore_tools", blacklist)
         if explore_enabled and not explore_blacklisted:
             layout.exposed.insert(0, ExploreToolsTool)
             set_stream_catalog(
@@ -1747,10 +1801,14 @@ class _AgenticChatterBase(BaseChatter):
         registry = self._register_usables_into_registry(layout.exposed)
 
         system_text = await self._build_system_prompt(config, chat_stream, layout)
-        user_text = await self._build_user_prompt(config, chat_stream, state, unread_msgs)
+        user_text = await self._build_user_prompt(
+            config, chat_stream, state, unread_msgs
+        )
 
         user_content = Text(user_text)
-        if config is not None and bool(getattr(config.plugin, "native_multimodal", False)):
+        if config is not None and bool(
+            getattr(config.plugin, "native_multimodal", False)
+        ):
             history_messages = list(chat_stream.context.history_messages)
             multimodal_messages = history_messages + list(unread_msgs)
             max_images = max(0, int(getattr(config.plugin, "max_input_images", 3)))
@@ -1786,15 +1844,21 @@ class _AgenticChatterBase(BaseChatter):
         request.add_payload(LLMPayload(ROLE.TOOL, registry.get_all()))  # type: ignore[arg-type]
         request.add_payload(LLMPayload(ROLE.USER, user_content))
 
-        max_iterations = 6 if config is None else max(1, int(config.pipeline.max_iterations))
+        max_iterations = (
+            6 if config is None else max(1, int(config.pipeline.max_iterations))
+        )
         response: Any = request
         while should_continue_loop(state, max_iterations):
             state.iterations += 1
 
-            stream_session = self._create_qqbot_streaming_session(
-                config,
-                unread_msgs,
-            ) if self._streaming_allowed(config, state) else None
+            stream_session = (
+                self._create_qqbot_streaming_session(
+                    config,
+                    unread_msgs,
+                )
+                if self._streaming_allowed(config, state)
+                else None
+            )
             try:
                 response = await response.send(stream=True)
                 if stream_session is not None:
@@ -2106,9 +2170,7 @@ class _AgenticChatterBase(BaseChatter):
                 or ""
             ),
             initial_chars=int(getattr(humanize, "streaming_initial_chars", 1)),
-            update_min_chars=int(
-                getattr(humanize, "streaming_update_min_chars", 1)
-            ),
+            update_min_chars=int(getattr(humanize, "streaming_update_min_chars", 1)),
         )
 
     def _log_main_agent_thoughts(
@@ -2158,10 +2220,18 @@ class _AgenticChatterBase(BaseChatter):
             message,
             state.sent_texts,
             similarity_threshold=float(
-                getattr(humanize, "reply_similarity_threshold", DEFAULT_REPLY_SIMILARITY_THRESHOLD)
+                getattr(
+                    humanize,
+                    "reply_similarity_threshold",
+                    DEFAULT_REPLY_SIMILARITY_THRESHOLD,
+                )
             ),
             containment_threshold=float(
-                getattr(humanize, "reply_containment_threshold", DEFAULT_REPLY_CONTAINMENT_THRESHOLD)
+                getattr(
+                    humanize,
+                    "reply_containment_threshold",
+                    DEFAULT_REPLY_CONTAINMENT_THRESHOLD,
+                )
             ),
         )
 
@@ -2377,7 +2447,9 @@ class _AgenticChatterBase(BaseChatter):
             return 0
 
         success_count = 0
-        batches = [runnable] if tool_call_mode == "batch" else [[call] for call in runnable]
+        batches = (
+            [runnable] if tool_call_mode == "batch" else [[call] for call in runnable]
+        )
         for batch in batches:
             if log_tool_calls:
                 for call in batch:
@@ -2493,9 +2565,7 @@ class _AgenticChatterBase(BaseChatter):
         context = chat_stream.context
         current_unreads = list(context.unread_messages)
         history_attr = (
-            "history_messages"
-            if hasattr(context, "history_messages")
-            else "history"
+            "history_messages" if hasattr(context, "history_messages") else "history"
         )
         current_history = list(getattr(context, history_attr))
         unread_consumed: set[int] = set()
@@ -2591,7 +2661,6 @@ class _AgenticChatterBase(BaseChatter):
                 history_consumed.add(index)
                 history_matched.append(history_messages[index])
         return unread_matched, history_matched
-
 
     @classmethod
     def _apply_claim_unread_match(cls, match: _ClaimUnreadMatch) -> None:
@@ -2861,8 +2930,9 @@ class _AgenticChatterBase(BaseChatter):
                 mood_text = describe_mood_for_prompt(mood_value)
 
         return await (
-            template
-            .set("nickname", str(getattr(chat_stream, "bot_nickname", "") or ""))
+            template.set(
+                "nickname", str(getattr(chat_stream, "bot_nickname", "") or "")
+            )
             .set("how_you_speak", how_you_speak)
             .set("how_you_act", how_you_act)
             .set("when_to_stop", when_to_stop)
@@ -2875,9 +2945,7 @@ class _AgenticChatterBase(BaseChatter):
             .set("system_prompt_extra", extra)
             .set(
                 "skill_catalog",
-                skill_catalog()
-                if ReadSkillTool in layout.exposed
-                else "",
+                skill_catalog() if ReadSkillTool in layout.exposed else "",
             )
             .build()
         )
@@ -2907,7 +2975,8 @@ class _AgenticChatterBase(BaseChatter):
             return state.unread_texts
 
         history = "\n".join(
-            self.format_message_line(msg) for msg in chat_stream.context.history_messages
+            self.format_message_line(msg)
+            for msg in chat_stream.context.history_messages
         )
         unreads = "\n".join(self.format_message_line(msg) for msg in unread_msgs)
 
@@ -2920,12 +2989,16 @@ class _AgenticChatterBase(BaseChatter):
             extra_parts.append(state.task_report)
 
         return await (
-            template
-            .set("stream_name", str(getattr(chat_stream, "stream_name", "") or "未知对话"))
+            template.set(
+                "stream_name",
+                str(getattr(chat_stream, "stream_name", "") or "未知对话"),
+            )
             .set("current_time", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             .set("platform", str(getattr(chat_stream, "platform", "") or "未知"))
             .set("chat_type", str(chat_stream.chat_type or "未知"))
-            .set("platform_name", str(getattr(chat_stream, "bot_nickname", "") or "未知"))
+            .set(
+                "platform_name", str(getattr(chat_stream, "bot_nickname", "") or "未知")
+            )
             .set("platform_id", str(getattr(chat_stream, "bot_id", "") or "未知"))
             .set("history", history)
             .set("unreads", unreads)

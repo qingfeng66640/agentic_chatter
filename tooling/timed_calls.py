@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from src.kernel.concurrency import get_task_manager
-from src.kernel.llm import LLMPayload, ROLE, ToolResult
+from src.kernel.llm import ROLE, LLMPayload, ToolResult
 from src.kernel.logger import get_logger
 
 from .timeout import ToolExecutionScope
