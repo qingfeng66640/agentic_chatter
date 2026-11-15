@@ -1,7 +1,7 @@
 {
     "name": "agentic_chatter",
     "display_name": "Agentic Chatter",
-    "version": "0.8.1",
+    "version": "0.8.2",
     "description": "Agent 式回复流程聊天器：分层回复决策、纯文本即回复、分层工具暴露、跨流全局心智",
     "author": "qf",
     "license": "GPL-3.0",
@@ -117,7 +117,7 @@
         }
     ],
     "entry_point": "plugin.py",
-    "min_core_version": "1.3.0-alpha.1",
+    "min_core_version": "1.3.0-alpha.2",
     "python_dependencies": [
         "regex>=2024.0.0",
         "croniter>=6.0.0"
